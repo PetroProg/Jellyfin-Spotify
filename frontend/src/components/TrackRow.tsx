@@ -39,9 +39,7 @@ export const TrackRow: React.FC<TrackRowProps> = ({
     }
   };
 
-  const displayAlbum = (!track.album || (playlistName && track.album.toLowerCase() === playlistName.toLowerCase()))
-    ? '-'
-    : track.album;
+  const displayAlbum = track.album || '-';
 
   return (
     <div

@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { db } from './db';
 import { refreshJellyfinLibrary } from './jellyfin';
-import { SpotifyTrack, resolveSpotifyTrackCover, fetchSpotifyPlaylist } from './spotify';
+import { SpotifyTrack, resolveSpotifyTrackDetails, fetchSpotifyPlaylist } from './spotify';
 
 const MUSIC_DIR = process.env.MUSIC_DIR || path.join(process.cwd(), 'music');
 
@@ -194,12 +194,16 @@ async function runWorkerLoop() {
 async function downloadSingleTrack(item: QueueItem): Promise<void> {
   const { jobId, playlistId, track, position } = item;
 
-  // Resolve real individual track cover from Spotify
-  if (!track.cover_url || track.cover_url.includes('mosaic.scdn.co')) {
-    const realCover = await resolveSpotifyTrackCover(track.id);
-    if (realCover) {
-      track.cover_url = realCover;
-    }
+  // Resolve real individual track details (cover + real album) from Spotify
+  const details = await resolveSpotifyTrackDetails(track.id);
+  if (details.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
+    track.cover_url = details.cover_url;
+  }
+  if (details.album) {
+    track.album = details.album;
+  }
+  if (details.artist && (!track.artist || track.artist === 'Unknown Artist')) {
+    track.artist = details.artist;
   }
 
   // Check if track already exists locally in DB
@@ -208,6 +212,14 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
   `).get(track.id, track.title, track.artist) as any;
 
   if (existing) {
+    // If existing track had missing or playlist fallback album/cover, update it
+    if (details.album && (!existing.album || existing.album === 'Любимые треки' || existing.album === '-')) {
+      db.prepare('UPDATE tracks SET album = ? WHERE id = ?').run(details.album, existing.id);
+    }
+    if (details.cover_url && (!existing.cover_url || existing.cover_url.includes('mosaic.scdn.co'))) {
+      db.prepare('UPDATE tracks SET cover_url = ? WHERE id = ?').run(details.cover_url, existing.id);
+    }
+
     // Already downloaded, just link to playlist
     db.prepare(`
       INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)

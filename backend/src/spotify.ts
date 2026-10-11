@@ -173,9 +173,16 @@ export async function fetchSpotifyPlaylist(urlOrId: string): Promise<SpotifyPlay
   };
 }
 
-export async function resolveSpotifyTrackCover(trackId: string): Promise<string | undefined> {
-  if (!trackId) return undefined;
-  // 1. Try Spotify Web API if credentials configured
+export interface SpotifyTrackDetails {
+  cover_url?: string;
+  album?: string;
+  artist?: string;
+}
+
+export async function resolveSpotifyTrackDetails(trackId: string): Promise<SpotifyTrackDetails> {
+  const result: SpotifyTrackDetails = {};
+  if (!trackId) return result;
+
   try {
     const token = await getAccessToken();
     if (token) {
@@ -184,22 +191,28 @@ export async function resolveSpotifyTrackCover(trackId: string): Promise<string 
       });
       if (res.ok) {
         const data: any = await res.json();
-        const img = data.album?.images?.[0]?.url;
-        if (img) return img;
+        result.cover_url = data.album?.images?.[0]?.url;
+        result.album = data.album?.name;
+        result.artist = data.artists?.map((a: any) => a.name).join(', ');
+        return result;
       }
     }
   } catch (e) {}
 
-  // 2. Fallback to Spotify oEmbed
   try {
     const oembedRes = await fetch(`https://open.spotify.com/oembed?url=https://open.spotify.com/track/${trackId}`);
     if (oembedRes.ok) {
       const data: any = await oembedRes.json();
       if (data.thumbnail_url) {
-        return data.thumbnail_url.replace('00001e02', '0000b273');
+        result.cover_url = data.thumbnail_url.replace('00001e02', '0000b273');
       }
     }
   } catch (e) {}
 
-  return undefined;
+  return result;
+}
+
+export async function resolveSpotifyTrackCover(trackId: string): Promise<string | undefined> {
+  const details = await resolveSpotifyTrackDetails(trackId);
+  return details.cover_url;
 }
