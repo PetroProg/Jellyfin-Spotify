@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   ChevronDown, Heart, Shuffle, SkipBack, Play, Pause, 
-  SkipForward, Repeat, Repeat1, Music2, Sparkles 
+  SkipForward, Repeat, Repeat1, Music2, Sparkles, Volume2, VolumeX 
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { apiRequest } from '../api/client';
@@ -16,6 +16,8 @@ export const FullPlayer: React.FC = () => {
     nextTrack,
     prevTrack,
     seek,
+    volume,
+    setVolume,
     shuffle,
     toggleShuffle,
     smartShuffle,
@@ -27,6 +29,16 @@ export const FullPlayer: React.FC = () => {
   } = usePlayerStore();
 
   const [isLiked, setIsLiked] = useState(false);
+  const [prevVolume, setPrevVolume] = useState(1);
+
+  const toggleMute = () => {
+    if (volume > 0) {
+      setPrevVolume(volume);
+      setVolume(0);
+    } else {
+      setVolume(prevVolume || 0.8);
+    }
+  };
 
   useEffect(() => {
     if (currentTrack) {
@@ -178,6 +190,26 @@ export const FullPlayer: React.FC = () => {
         >
           {repeat === 'one' ? <Repeat1 className="w-6 h-6" /> : <Repeat className="w-6 h-6" />}
         </button>
+      </div>
+
+      {/* Volume Slider in Full Player */}
+      <div className="flex items-center justify-center gap-3 px-4 pt-1 text-cat-subtext0">
+        <button
+          onClick={toggleMute}
+          title={volume === 0 ? 'Включить звук' : 'Без звука'}
+          className="hover:text-cat-text transition-colors p-1"
+        >
+          {volume === 0 ? <VolumeX className="w-5 h-5 text-cat-red" /> : <Volume2 className="w-5 h-5" />}
+        </button>
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={volume}
+          onChange={(e) => setVolume(Number(e.target.value))}
+          className="flex-1 h-1.5 bg-cat-surface1 rounded-lg appearance-none cursor-pointer accent-cat-peach"
+        />
       </div>
     </div>
   );

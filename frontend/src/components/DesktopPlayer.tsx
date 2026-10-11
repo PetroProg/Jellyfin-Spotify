@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Repeat1, 
-  Volume2, Heart, Music2, Sparkles, ListMusic 
+  Volume2, VolumeX, Heart, Music2, Sparkles, ListMusic 
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { apiRequest } from '../api/client';
@@ -31,6 +31,16 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
   } = usePlayerStore();
 
   const [isLiked, setIsLiked] = useState(false);
+  const [prevVolume, setPrevVolume] = useState(1);
+
+  const toggleMute = () => {
+    if (volume > 0) {
+      setPrevVolume(volume);
+      setVolume(0);
+    } else {
+      setVolume(prevVolume || 0.8);
+    }
+  };
 
   useEffect(() => {
     if (currentTrack) {
@@ -168,7 +178,13 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
         )}
 
         <div className="flex items-center gap-2">
-          <Volume2 className="w-4 h-4" />
+          <button
+            onClick={toggleMute}
+            title={volume === 0 ? 'Включить звук' : 'Без звука'}
+            className="hover:text-cat-text transition-colors p-0.5 rounded"
+          >
+            {volume === 0 ? <VolumeX className="w-4 h-4 text-cat-red" /> : <Volume2 className="w-4 h-4" />}
+          </button>
           <input
             type="range"
             min={0}

@@ -32,9 +32,26 @@ interface PlayerState {
   removeFromQueue: (index: number) => void;
 }
 
+const STORAGE_KEY_VOLUME = 'jellyfy_player_volume';
+
+const loadSavedVolume = (): number => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY_VOLUME);
+    if (saved !== null) {
+      const parsed = parseFloat(saved);
+      if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) {
+        return parsed;
+      }
+    }
+  } catch (e) {}
+  return 1;
+};
+
 // Global Audio Instance
 const audio = new Audio();
 audio.preload = 'auto';
+const initialVolume = loadSavedVolume();
+audio.volume = initialVolume;
 
 export const usePlayerStore = create<PlayerState>((set, get) => {
   // Sync Audio Events
@@ -89,7 +106,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     shuffle: false,
     smartShuffle: true,
     repeat: 'off',
-    volume: 1,
+    volume: initialVolume,
     isFullPlayerOpen: false,
 
     playTrack: (track, newQueue, index) => {
@@ -204,8 +221,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     setVolume: (val) => {
-      audio.volume = Math.max(0, Math.min(1, val));
-      set({ volume: val });
+      const clamped = Math.max(0, Math.min(1, val));
+      audio.volume = clamped;
+      try {
+        localStorage.setItem(STORAGE_KEY_VOLUME, clamped.toString());
+      } catch (e) {}
+      set({ volume: clamped });
     },
 
     toggleShuffle: () => {
