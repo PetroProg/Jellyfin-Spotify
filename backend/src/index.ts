@@ -226,7 +226,13 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
     ORDER BY pt.position ASC
   `).all(playlistId);
 
-  return { playlist, tracks };
+  const activeJob: any = db.prepare(`
+    SELECT * FROM download_jobs
+    WHERE playlist_id = ? AND status = 'downloading'
+    ORDER BY created_at DESC LIMIT 1
+  `).get(playlistId);
+
+  return { playlist, tracks, activeJob: activeJob || null };
 });
 
 server.delete('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any) => {

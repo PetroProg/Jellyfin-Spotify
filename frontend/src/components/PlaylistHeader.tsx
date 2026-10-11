@@ -6,6 +6,7 @@ import { isPlaylistDownloaded, downloadPlaylistOffline, removePlaylistOffline } 
 interface PlaylistHeaderProps {
   playlist: Playlist;
   tracks: Track[];
+  activeJob?: any;
   onPlayAll: () => void;
   onShuffleAll: () => void;
 }
@@ -13,6 +14,7 @@ interface PlaylistHeaderProps {
 export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   playlist,
   tracks,
+  activeJob,
   onPlayAll,
   onShuffleAll,
 }) => {
@@ -70,8 +72,15 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
             {playlist.description}
           </p>
         )}
-        <div className="text-xs text-cat-subtext0 mt-2">
-          <span>{tracks.length} треков</span>
+        <div className="text-xs text-cat-subtext0 mt-2 flex items-center justify-center md:justify-start gap-2">
+          {activeJob && activeJob.status === 'downloading' ? (
+            <span className="text-cat-mauve font-semibold flex items-center gap-1.5">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              Загружено {tracks.length} из {activeJob.total_tracks} треков
+            </span>
+          ) : (
+            <span>{tracks.length} треков</span>
+          )}
         </div>
 
         {/* Buttons Row */}

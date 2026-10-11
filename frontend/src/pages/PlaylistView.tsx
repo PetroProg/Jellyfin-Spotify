@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ArrowUpDown, ArrowLeft } from 'lucide-react';
+import { ArrowUpDown, ArrowLeft, Loader2 } from 'lucide-react';
 import { Playlist, Track } from '../types';
 import { apiRequest } from '../api/client';
 import { PlaylistHeader } from '../components/PlaylistHeader';
@@ -17,6 +17,7 @@ type SortField = 'position' | 'title' | 'artist' | 'date' | 'duration';
 export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }) => {
   const [playlist, setPlaylist] = useState<Playlist | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
+  const [activeJob, setActiveJob] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [sortField, setSortField] = useState<SortField>('position');
   const [sortAsc, setSortAsc] = useState(true);
@@ -26,9 +27,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
 
   const loadData = async () => {
     try {
-      const data = await apiRequest<{ playlist: Playlist; tracks: Track[] }>(`/playlists/${playlistId}`);
+      const data = await apiRequest<{ playlist: Playlist; tracks: Track[]; activeJob?: any }>(`/playlists/${playlistId}`);
       setPlaylist(data.playlist);
       setTracks(data.tracks || []);
+      setActiveJob(data.activeJob || null);
     } catch (e: any) {
       console.warn(e);
     } finally {
@@ -39,6 +41,15 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
   useEffect(() => {
     loadData();
   }, [playlistId]);
+
+  // Auto-refresh when downloads are in progress
+  useEffect(() => {
+    if (!activeJob || activeJob.status !== 'downloading') return;
+    const interval = setInterval(() => {
+      loadData();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [playlistId, activeJob?.status, activeJob?.downloaded_tracks]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -102,6 +113,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
       <PlaylistHeader
         playlist={playlist}
         tracks={sortedTracks}
+        activeJob={activeJob}
         onPlayAll={() => sortedTracks.length > 0 && playTrack(sortedTracks[0], sortedTracks, 0)}
         onShuffleAll={() => {
           if (sortedTracks.length > 0) {
@@ -110,6 +122,35 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
           }
         }}
       />
+
+      {/* Live Download Banner */}
+      {activeJob && activeJob.status === 'downloading' && (
+        <div className="mb-4 p-4 rounded-2xl bg-cat-mantle border border-cat-mauve/40 shadow-lg">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <Loader2 className="w-4 h-4 animate-spin text-cat-mauve shrink-0" />
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-cat-text">
+                  Идет фоновая загрузка треков в высоком качестве
+                </p>
+                <p className="text-[11px] text-cat-subtext0 truncate">
+                  {activeJob.current_track ? `Качается: ${activeJob.current_track}` : 'Поиск и загрузка аудио...'}
+                </p>
+              </div>
+            </div>
+            <span className="text-xs font-black text-cat-mauve shrink-0 ml-3">
+              {activeJob.downloaded_tracks} / {activeJob.total_tracks}
+            </span>
+          </div>
+          {/* Progress Bar */}
+          <div className="w-full bg-cat-surface0 rounded-full h-1.5 overflow-hidden">
+            <div
+              className="bg-cat-mauve h-full rounded-full transition-all duration-500 ease-out"
+              style={{ width: `${Math.max(4, Math.min(100, ((activeJob.downloaded_tracks || 0) / (activeJob.total_tracks || 1)) * 100))}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Sorting / Table Header */}
       <div className="border-b border-cat-surface0/60 pb-2 mb-2 flex items-center justify-between text-xs font-semibold text-cat-subtext0 px-3">
@@ -147,7 +188,15 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
       <div className="space-y-0.5">
         {sortedTracks.length === 0 ? (
           <div className="py-12 text-center text-cat-subtext0 text-sm">
-            В этом плейлисте пока нет треков
+            {activeJob && activeJob.status === 'downloading' ? (
+              <div className="flex flex-col items-center justify-center gap-3">
+                <Loader2 className="w-6 h-6 animate-spin text-cat-mauve" />
+                <p className="font-semibold text-cat-text">Идет загрузка первых треков из Spotify...</p>
+                <p className="text-xs text-cat-subtext0">Они появятся в списке автоматически по мере скачивания</p>
+              </div>
+            ) : (
+              'В этом плейлисте пока нет треков'
+            )}
           </div>
         ) : (
           sortedTracks.map((track, i) => (
