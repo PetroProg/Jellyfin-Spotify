@@ -131,14 +131,17 @@ export async function fetchSpotifyPlaylist(urlOrId: string): Promise<SpotifyPlay
       const nextData = JSON.parse(nextDataMatch[1]);
       const entity = nextData.props?.pageProps?.state?.data?.entity;
       if (entity) {
-        const tracks: SpotifyTrack[] = (entity.trackList || []).map((t: any) => ({
-          id: t.id || Math.random().toString(36).substring(7),
-          title: t.title || t.name,
-          artist: t.subtitle || (t.artists?.map((a: any) => a.name).join(', ')) || 'Unknown Artist',
-          album: entity.title || '',
-          duration_ms: t.duration || 180000,
-          cover_url: entity.coverArt?.sources?.[0]?.url
-        }));
+        const tracks: SpotifyTrack[] = (entity.trackList || []).map((t: any) => {
+          const spId = t.uri ? t.uri.split(':').pop() : (t.id || Math.random().toString(36).substring(7));
+          return {
+            id: spId,
+            title: t.title || t.name,
+            artist: t.subtitle || (t.artists?.map((a: any) => a.name).join(', ')) || 'Unknown Artist',
+            album: entity.title || '',
+            duration_ms: t.duration || 180000,
+            cover_url: ''
+          };
+        });
 
         return {
           name: entity.title || 'Spotify Playlist',
@@ -168,4 +171,35 @@ export async function fetchSpotifyPlaylist(urlOrId: string): Promise<SpotifyPlay
     cover_url,
     tracks: []
   };
+}
+
+export async function resolveSpotifyTrackCover(trackId: string): Promise<string | undefined> {
+  if (!trackId) return undefined;
+  // 1. Try Spotify Web API if credentials configured
+  try {
+    const token = await getAccessToken();
+    if (token) {
+      const res = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data: any = await res.json();
+        const img = data.album?.images?.[0]?.url;
+        if (img) return img;
+      }
+    }
+  } catch (e) {}
+
+  // 2. Fallback to Spotify oEmbed
+  try {
+    const oembedRes = await fetch(`https://open.spotify.com/oembed?url=https://open.spotify.com/track/${trackId}`);
+    if (oembedRes.ok) {
+      const data: any = await oembedRes.json();
+      if (data.thumbnail_url) {
+        return data.thumbnail_url.replace('00001e02', '0000b273');
+      }
+    }
+  } catch (e) {}
+
+  return undefined;
 }

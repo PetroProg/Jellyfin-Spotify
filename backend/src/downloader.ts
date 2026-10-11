@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { db } from './db';
 import { refreshJellyfinLibrary } from './jellyfin';
-import { SpotifyTrack } from './spotify';
+import { SpotifyTrack, resolveSpotifyTrackCover } from './spotify';
 
 const MUSIC_DIR = process.env.MUSIC_DIR || path.join(process.cwd(), 'music');
 
@@ -77,6 +77,14 @@ async function runWorkerLoop() {
 
 async function downloadSingleTrack(item: QueueItem): Promise<void> {
   const { jobId, playlistId, track, position } = item;
+
+  // Resolve real individual track cover from Spotify
+  if (!track.cover_url || track.cover_url.includes('mosaic.scdn.co')) {
+    const realCover = await resolveSpotifyTrackCover(track.id);
+    if (realCover) {
+      track.cover_url = realCover;
+    }
+  }
 
   // Check if track already exists locally in DB
   const existing = db.prepare(`

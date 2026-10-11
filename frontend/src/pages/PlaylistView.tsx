@@ -121,6 +121,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
             toggleShuffle();
           }
         }}
+        onCoverChange={(newUrl) => setPlaylist(prev => prev ? { ...prev, cover_url: newUrl } : null)}
       />
 
       {/* Live Download Banner */}

@@ -235,6 +235,45 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
   return { playlist, tracks, activeJob: activeJob || null };
 });
 
+server.put('/api/playlists/:id/cover', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const playlistId = Number(req.params.id);
+  const playlist = db.prepare('SELECT id FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
+  if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
+
+  const body = req.body || {};
+  const { image_base64, cover_url } = body;
+  let finalUrl = cover_url;
+
+  if (image_base64) {
+    const coversDir = path.join(process.cwd(), 'data', 'covers');
+    if (!fs.existsSync(coversDir)) fs.mkdirSync(coversDir, { recursive: true });
+
+    const base64Data = image_base64.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+    const filePath = path.join(coversDir, `playlist_${playlistId}.jpg`);
+    fs.writeFileSync(filePath, buffer);
+    finalUrl = `/api/playlists/${playlistId}/cover?t=${Date.now()}`;
+  }
+
+  if (!finalUrl) {
+    return reply.status(400).send({ error: 'Изображение не предоставлено' });
+  }
+
+  db.prepare('UPDATE playlists SET cover_url = ? WHERE id = ?').run(finalUrl, playlistId);
+  return { success: true, cover_url: finalUrl };
+});
+
+server.get('/api/playlists/:id/cover', async (req: any, reply: any) => {
+  const playlistId = Number(req.params.id);
+  const coversDir = path.join(process.cwd(), 'data', 'covers');
+  const filePath = path.join(coversDir, `playlist_${playlistId}.jpg`);
+  if (fs.existsSync(filePath)) {
+    reply.type('image/jpeg').header('Cache-Control', 'public, max-age=86400').send(fs.readFileSync(filePath));
+  } else {
+    reply.status(404).send('Cover not found');
+  }
+});
+
 server.delete('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   db.prepare('DELETE FROM playlists WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   return { success: true };

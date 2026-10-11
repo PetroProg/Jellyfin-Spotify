@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Shuffle, Download, Check, Music2, Loader2 } from 'lucide-react';
+import { Play, Shuffle, Download, Check, Music2, Loader2, Camera } from 'lucide-react';
 import { Playlist, Track } from '../types';
 import { isPlaylistDownloaded, downloadPlaylistOffline, removePlaylistOffline } from '../utils/offline';
+import { apiRequest } from '../api/client';
 
 interface PlaylistHeaderProps {
   playlist: Playlist;
@@ -9,6 +10,7 @@ interface PlaylistHeaderProps {
   activeJob?: any;
   onPlayAll: () => void;
   onShuffleAll: () => void;
+  onCoverChange?: (newUrl: string) => void;
 }
 
 export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
@@ -17,14 +19,47 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   activeJob,
   onPlayAll,
   onShuffleAll,
+  onCoverChange,
 }) => {
   const [downloaded, setDownloaded] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [progressText, setProgressText] = useState('');
+  const [uploadingCover, setUploadingCover] = useState(false);
 
   useEffect(() => {
     setDownloaded(isPlaylistDownloaded(playlist.id));
   }, [playlist.id]);
+
+  const handleCoverFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      alert('Пожалуйста, выберите файл изображения (JPG, PNG, WebP)');
+      return;
+    }
+
+    setUploadingCover(true);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const base64 = reader.result as string;
+        const res = await apiRequest<{ success: boolean; cover_url: string }>(`/playlists/${playlist.id}/cover`, {
+          method: 'PUT',
+          body: JSON.stringify({ image_base64: base64 })
+        });
+        if (res.cover_url) {
+          playlist.cover_url = res.cover_url;
+          onCoverChange?.(res.cover_url);
+        }
+      } catch (err: any) {
+        alert(err.message || 'Ошибка загрузки обложки');
+      } finally {
+        setUploadingCover(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
 
   const handleToggleDownload = async () => {
     if (downloading) return;
@@ -51,12 +86,38 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   return (
     <div className="flex flex-col md:flex-row items-center md:items-end gap-5 mb-6 pt-2 select-none">
       {/* Cover Art */}
-      <div className="w-44 h-44 md:w-52 md:h-52 rounded-3xl bg-cat-surface0 shadow-2xl overflow-hidden flex-shrink-0 flex items-center justify-center border border-cat-surface1/30">
+      <div className="relative group w-44 h-44 md:w-52 md:h-52 rounded-3xl bg-cat-surface0 shadow-2xl overflow-hidden flex-shrink-0 flex items-center justify-center border border-cat-surface1/30">
         {playlist.cover_url ? (
           <img src={playlist.cover_url} alt="" className="w-full h-full object-cover" />
         ) : (
           <Music2 className="w-20 h-20 text-cat-mauve/40" />
         )}
+
+        {/* Change Cover Hover/Click Overlay */}
+        <label
+          htmlFor={`playlist-cover-input-${playlist.id}`}
+          className={`absolute inset-0 bg-cat-crust/70 backdrop-blur-xs flex flex-col items-center justify-center gap-1.5 text-cat-text cursor-pointer transition-all duration-200 ${
+            uploadingCover ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+          }`}
+          title="Сменить обложку плейлиста"
+        >
+          {uploadingCover ? (
+            <Loader2 className="w-7 h-7 text-cat-mauve animate-spin" />
+          ) : (
+            <>
+              <Camera className="w-7 h-7 text-cat-mauve drop-shadow" />
+              <span className="text-xs font-bold drop-shadow">Сменить обложку</span>
+            </>
+          )}
+        </label>
+        <input
+          id={`playlist-cover-input-${playlist.id}`}
+          type="file"
+          accept="image/*"
+          disabled={uploadingCover}
+          className="hidden"
+          onChange={handleCoverFileChange}
+        />
       </div>
 
       {/* Info & Action Buttons */}
