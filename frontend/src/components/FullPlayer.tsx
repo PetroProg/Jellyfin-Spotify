@@ -27,11 +27,19 @@ export const FullPlayer: React.FC = () => {
     toggleRepeat,
     isFullPlayerOpen,
     setFullPlayerOpen,
+    likedTrackIds,
+    toggleLikeTrack,
+    loadLikes,
   } = usePlayerStore();
 
-  const [isLiked, setIsLiked] = useState(false);
   const [prevVolume, setPrevVolume] = useState(1);
   const [isAddToPlaylistOpen, setIsAddToPlaylistOpen] = useState(false);
+
+  const isLiked = currentTrack ? likedTrackIds.includes(currentTrack.id) : false;
+
+  useEffect(() => {
+    loadLikes();
+  }, []);
 
   const toggleMute = () => {
     if (volume > 0) {
@@ -42,23 +50,10 @@ export const FullPlayer: React.FC = () => {
     }
   };
 
-  useEffect(() => {
-    if (currentTrack) {
-      // Check if current track is liked
-      apiRequest<{ tracks: any[] }>('/likes')
-        .then((res) => {
-          const liked = (res.tracks || []).some((t) => t.id === currentTrack.id);
-          setIsLiked(liked);
-        })
-        .catch(() => {});
-    }
-  }, [currentTrack]);
-
-  const toggleLike = async () => {
+  const handleToggleLike = async () => {
     if (!currentTrack) return;
     try {
-      const res = await apiRequest<{ liked: boolean }>(`/likes/${currentTrack.id}`, { method: 'POST' });
-      setIsLiked(res.liked);
+      await toggleLikeTrack(currentTrack.id);
     } catch (e) {
       console.warn(e);
     }
@@ -131,7 +126,8 @@ export const FullPlayer: React.FC = () => {
             <FolderPlus className="w-7 h-7" />
           </button>
           <button
-            onClick={toggleLike}
+            onClick={handleToggleLike}
+            title={isLiked ? "Удалить из любимых" : "В любимые треки"}
             className={`p-2 rounded-full transition-transform active:scale-125 ${
               isLiked ? 'text-cat-red' : 'text-cat-subtext0 hover:text-cat-text'
             }`}

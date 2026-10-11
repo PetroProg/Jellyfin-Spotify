@@ -13,7 +13,7 @@ export const LikedSongs: React.FC = () => {
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
 
-  const { playTrack, toggleShuffle, addToQueue } = usePlayerStore();
+  const { playTrack, toggleShuffle, addToQueue, likedTrackIds } = usePlayerStore();
 
   const loadLikes = async () => {
     try {
@@ -28,7 +28,7 @@ export const LikedSongs: React.FC = () => {
 
   useEffect(() => {
     loadLikes();
-  }, []);
+  }, [likedTrackIds]);
 
   const handleBlacklist = async (track: Track) => {
     try {

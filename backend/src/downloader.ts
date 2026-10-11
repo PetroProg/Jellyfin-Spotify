@@ -226,6 +226,11 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       VALUES (?, ?, ?)
     `).run(playlistId, existing.id, position);
 
+    const playlistRow: any = db.prepare('SELECT name FROM playlists WHERE id = ?').get(playlistId);
+    if (playlistRow && (playlistRow.name === 'Любимые треки' || playlistRow.name.toLowerCase() === 'liked songs')) {
+      db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, existing.id);
+    }
+
     const doneRow: any = db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
     db.prepare(`
       UPDATE download_jobs
@@ -317,6 +322,11 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
             INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
             VALUES (?, ?, ?)
           `).run(playlistId, trackId, position);
+
+          const playlistRow: any = db.prepare('SELECT name FROM playlists WHERE id = ?').get(playlistId);
+          if (playlistRow && (playlistRow.name === 'Любимые треки' || playlistRow.name.toLowerCase() === 'liked songs')) {
+            db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, trackId);
+          }
 
           const doneRow: any = db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
           db.prepare(`

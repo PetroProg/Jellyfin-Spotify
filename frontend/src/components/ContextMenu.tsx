@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
-import { ListPlus, Ban, FolderPlus, Trash2 } from 'lucide-react';
+import { ListPlus, Ban, FolderPlus, Trash2, Heart } from 'lucide-react';
 import { Track } from '../types';
+import { usePlayerStore } from '../store/playerStore';
 
 interface ContextMenuProps {
   track: Track;
@@ -22,6 +23,8 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   onBlacklist,
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
+  const { likedTrackIds, toggleLikeTrack } = usePlayerStore();
+  const isLiked = likedTrackIds.includes(track.id);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -57,6 +60,17 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
       >
         <ListPlus className="w-4 h-4 text-cat-mauve" />
         В очередь
+      </button>
+
+      <button
+        onClick={() => {
+          toggleLikeTrack(track.id);
+          onClose();
+        }}
+        className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-text hover:bg-cat-surface0 text-left transition-colors"
+      >
+        <Heart className={`w-4 h-4 ${isLiked ? 'fill-current text-cat-red' : 'text-cat-subtext0'}`} />
+        {isLiked ? 'Удалить из любимых' : 'В любимые треки'}
       </button>
 
       {onAddToPlaylist && (

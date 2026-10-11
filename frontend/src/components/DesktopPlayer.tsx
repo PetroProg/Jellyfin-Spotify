@@ -29,11 +29,19 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
     toggleSmartShuffle,
     repeat,
     toggleRepeat,
+    likedTrackIds,
+    toggleLikeTrack,
+    loadLikes,
   } = usePlayerStore();
 
-  const [isLiked, setIsLiked] = useState(false);
   const [prevVolume, setPrevVolume] = useState(1);
   const [isAddToPlaylistOpen, setIsAddToPlaylistOpen] = useState(false);
+
+  const isLiked = currentTrack ? likedTrackIds.includes(currentTrack.id) : false;
+
+  useEffect(() => {
+    loadLikes();
+  }, []);
 
   const toggleMute = () => {
     if (volume > 0) {
@@ -44,21 +52,10 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
     }
   };
 
-  useEffect(() => {
-    if (currentTrack) {
-      apiRequest<{ tracks: any[] }>('/likes')
-        .then((res) => {
-          setIsLiked((res.tracks || []).some((t) => t.id === currentTrack.id));
-        })
-        .catch(() => {});
-    }
-  }, [currentTrack]);
-
-  const toggleLike = async () => {
+  const handleToggleLike = async () => {
     if (!currentTrack) return;
     try {
-      const res = await apiRequest<{ liked: boolean }>(`/likes/${currentTrack.id}`, { method: 'POST' });
-      setIsLiked(res.liked);
+      await toggleLikeTrack(currentTrack.id);
     } catch (e) {
       console.warn(e);
     }
@@ -95,7 +92,8 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
           <FolderPlus className="w-5 h-5" />
         </button>
         <button
-          onClick={toggleLike}
+          onClick={handleToggleLike}
+          title={isLiked ? "Удалить из любимых" : "В любимые треки"}
           className={`p-1.5 rounded-full transition-transform active:scale-125 ${
             isLiked ? 'text-cat-red' : 'text-cat-subtext0 hover:text-cat-text'
           }`}

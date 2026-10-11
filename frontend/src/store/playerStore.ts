@@ -30,6 +30,9 @@ interface PlayerState {
   setFullPlayerOpen: (open: boolean) => void;
   addToQueue: (track: Track) => void;
   removeFromQueue: (index: number) => void;
+  likedTrackIds: number[];
+  loadLikes: () => Promise<void>;
+  toggleLikeTrack: (trackId: number) => Promise<boolean>;
 }
 
 const STORAGE_KEY_VOLUME = 'jellyfy_player_volume';
@@ -272,6 +275,41 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         newQueue.splice(index, 1);
         return { queue: newQueue };
       });
+    },
+
+    likedTrackIds: [],
+
+    loadLikes: async () => {
+      try {
+        const data = await apiRequest<{ tracks: Track[] }>('/likes');
+        set({ likedTrackIds: (data.tracks || []).map((t) => t.id) });
+      } catch (e) {
+        // Ignored if not yet authenticated
+      }
+    },
+
+    toggleLikeTrack: async (trackId: number) => {
+      const { likedTrackIds } = get();
+      const isCurrentlyLiked = likedTrackIds.includes(trackId);
+      const newLiked = isCurrentlyLiked
+        ? likedTrackIds.filter((id) => id !== trackId)
+        : [...likedTrackIds, trackId];
+
+      // Optimistic update
+      set({ likedTrackIds: newLiked });
+
+      try {
+        const res = await apiRequest<{ liked: boolean }>(`/likes/${trackId}`, { method: 'POST' });
+        const updated = res.liked
+          ? Array.from(new Set([...get().likedTrackIds, trackId]))
+          : get().likedTrackIds.filter((id) => id !== trackId);
+        set({ likedTrackIds: updated });
+        return res.liked;
+      } catch (err) {
+        // Rollback on error
+        set({ likedTrackIds });
+        throw err;
+      }
     },
   };
 });

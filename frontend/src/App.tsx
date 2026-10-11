@@ -15,6 +15,7 @@ import { LikedSongs } from './pages/LikedSongs';
 import { Settings } from './pages/Settings';
 import { Login } from './pages/Login';
 import { Register } from './pages/Register';
+import { usePlayerStore } from './store/playerStore';
 
 export const App: React.FC = () => {
   const { isAuthenticated, isLoading, fetchMe } = useAuthStore();
@@ -47,6 +48,7 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (isAuthenticated) {
       loadPlaylists();
+      usePlayerStore.getState().loadLikes();
     }
   }, [isAuthenticated]);
 

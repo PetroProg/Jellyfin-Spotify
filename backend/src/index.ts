@@ -25,6 +25,17 @@ const MUSIC_DIR = process.env.MUSIC_DIR || path.join(process.cwd(), 'music');
 server.register(cors, { origin: true });
 server.register(jwt, { secret: JWT_SECRET });
 
+// Handle empty JSON bodies gracefully without throwing 400
+server.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+  try {
+    const json = (body && typeof body === 'string' && body.trim().length > 0) ? JSON.parse(body) : {};
+    done(null, json);
+  } catch (err: any) {
+    err.statusCode = 400;
+    done(err, undefined);
+  }
+});
+
 // Public frontend static files
 const publicDir = path.join(__dirname, '..', 'public');
 if (fs.existsSync(publicDir)) {
@@ -398,11 +409,25 @@ server.get('/api/likes', { preHandler: [(server as any).authenticate] }, async (
 server.post('/api/likes/:trackId', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const trackId = Number(req.params.trackId);
   const exists = db.prepare('SELECT 1 FROM liked_tracks WHERE user_id = ? AND track_id = ?').get(req.user.id, trackId);
+
+  // Check if user has an imported playlist named 'Любимые треки'
+  const favPlaylist: any = db.prepare(`
+    SELECT id FROM playlists WHERE user_id = ? AND (name = 'Любимые треки' OR LOWER(name) = 'liked songs')
+  `).get(req.user.id);
+
   if (exists) {
     db.prepare('DELETE FROM liked_tracks WHERE user_id = ? AND track_id = ?').run(req.user.id, trackId);
+    if (favPlaylist) {
+      db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').run(favPlaylist.id, trackId);
+    }
     return { liked: false };
   } else {
-    db.prepare('INSERT INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(req.user.id, trackId);
+    db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(req.user.id, trackId);
+    if (favPlaylist) {
+      const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(favPlaylist.id);
+      const nextPos = (maxPosRow?.maxPos !== null && maxPosRow?.maxPos !== undefined) ? maxPosRow.maxPos + 1 : 0;
+      db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)').run(favPlaylist.id, trackId, nextPos);
+    }
     return { liked: true };
   }
 });
