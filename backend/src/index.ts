@@ -56,16 +56,25 @@ server.post('/api/auth/register', async (req: any, reply: any) => {
     return reply.status(400).send({ error: 'Пароли не совпадают' });
   }
 
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+  const cleanUser = String(username).trim();
+  const resolvedEmail = email ? String(email).trim() : (cleanUser.includes('@') ? cleanUser : null);
+
+  const existing = db.prepare(`
+    SELECT id FROM users 
+    WHERE username = ? 
+       OR (email IS NOT NULL AND email = ?)
+       OR (email IS NOT NULL AND email = ?)
+  `).get(cleanUser, cleanUser, resolvedEmail || '');
+
   if (existing) {
-    return reply.status(400).send({ error: 'Пользователь с таким именем уже существует' });
+    return reply.status(400).send({ error: 'Пользователь с таким логином или email уже существует' });
   }
 
   const passwordHash = bcrypt.hashSync(password, 10);
   const info = db.prepare(`
     INSERT INTO users (username, password_hash, display_name, email)
     VALUES (?, ?, ?, ?)
-  `).run(username, passwordHash, display_name || username, email || null);
+  `).run(cleanUser, passwordHash, display_name || cleanUser, resolvedEmail);
 
   const userId = Number(info.lastInsertRowid);
   const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM users').get();
@@ -75,21 +84,22 @@ server.post('/api/auth/register', async (req: any, reply: any) => {
   checkAndNotifyUserLimit(totalUsers).catch(() => {});
 
   // Send welcome email if provided
-  if (email) {
-    sendWelcomeEmail(email, display_name || username, username).catch(() => {});
+  if (resolvedEmail) {
+    sendWelcomeEmail(resolvedEmail, display_name || cleanUser, cleanUser).catch(() => {});
   }
 
-  const token = server.jwt.sign({ id: userId, username });
+  const token = server.jwt.sign({ id: userId, username: cleanUser });
   return {
     token,
-    user: { id: userId, username, display_name: display_name || username, email }
+    user: { id: userId, username: cleanUser, display_name: display_name || cleanUser, email: resolvedEmail }
   };
 });
 
 server.post('/api/auth/login', async (req: any, reply: any) => {
   const body = req.body || {};
   const { username, password } = body;
-  const user: any = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+  const cleanIdentifier = String(username || '').trim();
+  const user: any = db.prepare('SELECT * FROM users WHERE username = ? OR email = ?').get(cleanIdentifier, cleanIdentifier);
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return reply.status(401).send({ error: 'Неверный логин или пароль' });
   }
@@ -97,7 +107,7 @@ server.post('/api/auth/login', async (req: any, reply: any) => {
   const token = server.jwt.sign({ id: user.id, username: user.username });
   return {
     token,
-    user: { id: user.id, username: user.username, display_name: user.display_name }
+    user: { id: user.id, username: user.username, display_name: user.display_name, email: user.email }
   };
 });
 

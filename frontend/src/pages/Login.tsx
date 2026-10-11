@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Music2, Loader2, ArrowRight } from 'lucide-react';
+import { Music2, Loader2, ArrowRight, Eye, EyeOff } from 'lucide-react';
 import { apiRequest } from '../api/client';
 import { useAuthStore } from '../store/authStore';
 
@@ -10,6 +10,7 @@ interface LoginProps {
 export const Login: React.FC<LoginProps> = ({ onGoToRegister }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -25,7 +26,7 @@ export const Login: React.FC<LoginProps> = ({ onGoToRegister }) => {
     try {
       const data = await apiRequest<{ token: string; user: any }>('/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify({ username: username.trim(), password })
       });
       login(data.token, data.user);
     } catch (err: any) {
@@ -59,7 +60,7 @@ export const Login: React.FC<LoginProps> = ({ onGoToRegister }) => {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1">
-              Логин
+              Email / Логин
             </label>
             <input
               type="text"
@@ -67,7 +68,7 @@ export const Login: React.FC<LoginProps> = ({ onGoToRegister }) => {
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve"
-              placeholder="username"
+              placeholder="user@example.com или логин"
             />
           </div>
 
@@ -75,14 +76,24 @@ export const Login: React.FC<LoginProps> = ({ onGoToRegister }) => {
             <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1">
               Пароль
             </label>
-            <input
-              type="password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve"
-              placeholder="••••••••"
-            />
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl pl-4 pr-11 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve"
+                placeholder="••••••••"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute right-3.5 top-1/2 -translate-y-1/2 text-cat-subtext0 hover:text-cat-text transition-colors"
+                title={showPassword ? 'Скрыть пароль' : 'Показать пароль'}
+              >
+                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
           </div>
 
           <button
