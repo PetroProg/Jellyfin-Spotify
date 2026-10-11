@@ -8,7 +8,7 @@ import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import { db } from './db';
 import { checkAndNotifyUserLimit } from './notify';
-import { fetchSpotifyPlaylist, getSpotifyCredentials } from './spotify';
+import { fetchSpotifyPlaylist, getSpotifyCredentials, extractPlaylistId } from './spotify';
 import { enqueuePlaylistDownload, resumePendingDownloads, resumePlaylistDownload } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
@@ -214,14 +214,20 @@ server.get('/api/playlists', { preHandler: [(server as any).authenticate] }, asy
 server.post('/api/playlists', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const body = req.body || {};
   const { name, description } = body;
-  if (!name) return reply.status(400).send({ error: 'Название обязательно' });
+  if (!name || !name.trim()) return reply.status(400).send({ error: 'Название обязательно' });
+
+  const cleanName = name.trim();
+  const existing = db.prepare('SELECT id FROM playlists WHERE user_id = ? AND LOWER(name) = LOWER(?)').get(req.user.id, cleanName);
+  if (existing) {
+    return reply.status(400).send({ error: 'Плейлист с таким названием уже существует' });
+  }
 
   const info = db.prepare(`
     INSERT INTO playlists (user_id, name, description)
     VALUES (?, ?, ?)
-  `).run(req.user.id, name, description || '');
+  `).run(req.user.id, cleanName, description || '');
 
-  return { id: info.lastInsertRowid, name, description };
+  return { id: info.lastInsertRowid, name: cleanName, description };
 });
 
 server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
@@ -342,7 +348,81 @@ server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] 
       return reply.status(400).send({ error: 'Не удалось извлечь треки из плейлиста' });
     }
 
-    // Create playlist in DB
+    const cleanSpotifyId = extractPlaylistId(url);
+
+    // Check if user already has this playlist imported (by Spotify ID or matching title)
+    let existingPlaylist: any = null;
+    if (cleanSpotifyId) {
+      existingPlaylist = db.prepare(`
+        SELECT * FROM playlists 
+        WHERE user_id = ? AND spotify_id LIKE ?
+        ORDER BY id ASC LIMIT 1
+      `).get(req.user.id, `%${cleanSpotifyId}%`);
+    }
+
+    if (!existingPlaylist && playlistData.name) {
+      existingPlaylist = db.prepare(`
+        SELECT * FROM playlists 
+        WHERE user_id = ? AND LOWER(name) = LOWER(?)
+        ORDER BY id ASC LIMIT 1
+      `).get(req.user.id, playlistData.name);
+    }
+
+    if (existingPlaylist) {
+      const playlistId = existingPlaylist.id;
+
+      // Existing tracks linked to this playlist
+      const existingRows: any[] = db.prepare(`
+        SELECT t.id, t.spotify_id, LOWER(t.title) as title, LOWER(t.artist) as artist
+        FROM playlist_tracks pt
+        JOIN tracks t ON pt.track_id = t.id
+        WHERE pt.playlist_id = ?
+      `).all(playlistId);
+
+      // Determine which tracks from Spotify are not yet added to this playlist
+      const missingTracks = playlistData.tracks.filter((st) => {
+        return !existingRows.some((er) => {
+          if (st.id && er.spotify_id && er.spotify_id === st.id) return true;
+          return er.title === st.title.toLowerCase().trim() && er.artist === st.artist.toLowerCase().trim();
+        });
+      });
+
+      if (missingTracks.length === 0) {
+        return {
+          success: true,
+          playlistId,
+          playlistName: existingPlaylist.name,
+          alreadyUpToDate: true,
+          totalTracks: existingRows.length,
+          newTracks: 0,
+          message: 'Все треки из этого плейлиста уже загружены!'
+        };
+      }
+
+      // Enqueue only the missing tracks
+      const jobId = Math.random().toString(36).substring(2, 10);
+      const totalCount = existingRows.length + missingTracks.length;
+
+      db.prepare(`
+        INSERT INTO download_jobs (id, user_id, playlist_id, playlist_name, total_tracks, downloaded_tracks, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'downloading')
+      `).run(jobId, req.user.id, playlistId, existingPlaylist.name, totalCount, existingRows.length);
+
+      enqueuePlaylistDownload(jobId, req.user.id, playlistId, missingTracks);
+
+      return {
+        success: true,
+        jobId,
+        playlistId,
+        playlistName: existingPlaylist.name,
+        isUpdate: true,
+        newTracks: missingTracks.length,
+        totalTracks: totalCount,
+        message: `Найдено новых треков: ${missingTracks.length}. Загрузка начата.`
+      };
+    }
+
+    // Create new playlist in DB
     const pInfo = db.prepare(`
       INSERT INTO playlists (user_id, name, description, cover_url, spotify_id)
       VALUES (?, ?, ?, ?, ?)

@@ -46,6 +46,9 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist }) =>
       });
       setSpotifyUrl('');
       loadJobs();
+      if (res.message) {
+        alert(res.message);
+      }
       if (res.playlistId) {
         onOpenPlaylist(res.playlistId);
       }

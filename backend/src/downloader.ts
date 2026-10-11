@@ -26,15 +26,22 @@ export function enqueuePlaylistDownload(
   jobId: string,
   userId: number,
   playlistId: number,
-  tracks: SpotifyTrack[]
+  tracks: SpotifyTrack[],
+  startPosition?: number
 ) {
+  let pos = startPosition;
+  if (pos === undefined) {
+    const maxRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
+    pos = (maxRow?.maxPos !== null && maxRow?.maxPos !== undefined) ? maxRow.maxPos + 1 : 0;
+  }
+
   for (let i = 0; i < tracks.length; i++) {
     queue.push({
       jobId,
       userId,
       playlistId,
       track: tracks[i],
-      position: i
+      position: pos + i
     });
   }
 
@@ -106,32 +113,51 @@ export async function resumePlaylistDownload(playlistId: number, existingJobId?:
       }
     }
 
-    // Get positions of tracks already linked to this playlist
-    const existingRows: any[] = db.prepare('SELECT position FROM playlist_tracks WHERE playlist_id = ?').all(playlistId);
-    const existingPositions = new Set(existingRows.map(r => r.position));
+    // Get tracks already linked to this playlist
+    const existingPlaylistTracks: any[] = db.prepare(`
+      SELECT pt.position, t.spotify_id, LOWER(t.title) as title, LOWER(t.artist) as artist
+      FROM playlist_tracks pt
+      JOIN tracks t ON pt.track_id = t.id
+      WHERE pt.playlist_id = ?
+    `).all(playlistId);
+
+    const existingTrackSet = new Set<string>();
+    for (const r of existingPlaylistTracks) {
+      if (r.spotify_id) existingTrackSet.add(`sp:${r.spotify_id}`);
+      existingTrackSet.add(`name:${r.title}|${r.artist}`);
+    }
+
+    const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
+    let nextAvailablePos = (maxPosRow?.maxPos !== null && maxPosRow?.maxPos !== undefined) ? maxPosRow.maxPos + 1 : 0;
 
     let queuedCount = 0;
-    playlistData.tracks.forEach((track, idx) => {
-      // Check if already in DB or already in active in-memory queue
-      const alreadyInQueue = queue.some(q => q.playlistId === playlistId && q.position === idx);
-      if (!existingPositions.has(idx) && !alreadyInQueue) {
+    playlistData.tracks.forEach((track) => {
+      const isAlreadyAdded = (track.id && existingTrackSet.has(`sp:${track.id}`)) ||
+        existingTrackSet.has(`name:${track.title.toLowerCase().trim()}|${track.artist.toLowerCase().trim()}`);
+
+      const alreadyInQueue = queue.some(q => q.playlistId === playlistId && (
+        (track.id && q.track.id === track.id) ||
+        (q.track.title.toLowerCase() === track.title.toLowerCase() && q.track.artist.toLowerCase() === track.artist.toLowerCase())
+      ));
+
+      if (!isAlreadyAdded && !alreadyInQueue) {
         queue.push({
           jobId: jobId!,
           userId: playlist.user_id,
           playlistId,
           track,
-          position: idx
+          position: nextAvailablePos++
         });
         queuedCount++;
       }
     });
 
-    const currentDownloaded = existingPositions.size;
+    const currentDownloaded = existingPlaylistTracks.length;
     db.prepare(`
       UPDATE download_jobs
       SET downloaded_tracks = ?, total_tracks = ?
       WHERE id = ?
-    `).run(currentDownloaded, playlistData.tracks.length, jobId);
+    `).run(currentDownloaded, currentDownloaded + queuedCount, jobId);
 
     if (queuedCount === 0 && currentDownloaded >= playlistData.tracks.length) {
       db.prepare(`

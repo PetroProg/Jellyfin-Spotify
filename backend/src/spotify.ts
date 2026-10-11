@@ -85,17 +85,45 @@ export async function fetchSpotifyPlaylist(urlOrId: string): Promise<SpotifyPlay
         const pData: any = await playlistRes.json();
         const tracks: SpotifyTrack[] = [];
 
-        for (const item of pData.tracks.items) {
+        for (const item of pData.tracks?.items || []) {
           const t = item.track;
           if (!t) continue;
           tracks.push({
             id: t.id || Math.random().toString(36).substring(7),
             title: t.name,
-            artist: t.artists.map((a: any) => a.name).join(', '),
+            artist: t.artists?.map((a: any) => a.name).join(', ') || 'Unknown Artist',
             album: t.album?.name || '',
             duration_ms: t.duration_ms || 180000,
             cover_url: t.album?.images?.[0]?.url || pData.images?.[0]?.url
           });
+        }
+
+        // Fetch remaining pages if playlist has > 100 tracks (e.g. 200+ songs)
+        let nextUrl: string | null = pData.tracks?.next || null;
+        while (nextUrl) {
+          try {
+            const nextRes = await fetch(nextUrl, {
+              headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!nextRes.ok) break;
+            const nextData: any = await nextRes.json();
+            for (const item of nextData.items || []) {
+              const t = item.track;
+              if (!t) continue;
+              tracks.push({
+                id: t.id || Math.random().toString(36).substring(7),
+                title: t.name,
+                artist: t.artists?.map((a: any) => a.name).join(', ') || 'Unknown Artist',
+                album: t.album?.name || '',
+                duration_ms: t.duration_ms || 180000,
+                cover_url: t.album?.images?.[0]?.url || pData.images?.[0]?.url
+              });
+            }
+            nextUrl = nextData.next || null;
+          } catch (pageErr: any) {
+            console.warn('[Spotify pagination error]:', pageErr.message);
+            break;
+          }
         }
 
         return {

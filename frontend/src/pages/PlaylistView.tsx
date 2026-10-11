@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { ArrowUpDown, ArrowLeft, Loader2, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { ArrowUpDown, ArrowLeft, Loader2, RefreshCw, ChevronUp } from 'lucide-react';
 import { Playlist, Track } from '../types';
 import { apiRequest } from '../api/client';
 import { PlaylistHeader } from '../components/PlaylistHeader';
@@ -25,6 +25,22 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
   const [sortAsc, setSortAsc] = useState(true);
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
+  const [showScrollTop, setShowScrollTop] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      setShowScrollTop(el.scrollTop > 280);
+    };
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => el.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  const scrollToTop = () => {
+    containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   const { playTrack, toggleShuffle, addToQueue } = usePlayerStore();
 
@@ -126,7 +142,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 md:px-8 py-4 pb-28 md:pb-24 select-none custom-scrollbar">
+    <div ref={containerRef} className="flex-1 overflow-y-auto px-4 md:px-8 py-4 pb-28 md:pb-24 select-none custom-scrollbar">
       {onBack && (
         <button
           onClick={onBack}
@@ -304,6 +320,17 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
           onClose={() => setAddToPlaylistTrack(null)}
           onUpdated={loadData}
         />
+      )}
+
+      {/* Floating Scroll to Top Arrow */}
+      {showScrollTop && (
+        <button
+          onClick={scrollToTop}
+          title="Наверх"
+          className="fixed bottom-24 right-5 md:right-8 z-40 p-3 rounded-full bg-cat-mauve text-cat-base shadow-2xl hover:scale-110 active:scale-95 transition-all duration-200 animate-in fade-in zoom-in-75 cursor-pointer"
+        >
+          <ChevronUp className="w-5 h-5 stroke-[2.5]" />
+        </button>
       )}
     </div>
   );
