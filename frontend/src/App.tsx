@@ -79,7 +79,7 @@ export const App: React.FC = () => {
   if (isLoading) {
     return (
       <div className="min-h-screen bg-cat-base flex items-center justify-center text-cat-subtext0 text-sm">
-        Инициализация Spotify...
+        Инициализация Jellyfy...
       </div>
     );
   }

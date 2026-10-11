@@ -9,8 +9,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'masked-icon.svg'],
       manifest: {
-        name: 'Jellyfin Spotify',
-        short_name: 'Spotify',
+        name: 'Jellyfy',
+        short_name: 'Jellyfy',
         description: 'Personal Catppuccin Music Streaming Player',
         theme_color: '#1e1e2e',
         background_color: '#1e1e2e',

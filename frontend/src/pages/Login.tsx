@@ -44,7 +44,7 @@ export const Login: React.FC<LoginProps> = ({ onGoToRegister }) => {
         </div>
 
         <h1 className="text-2xl font-extrabold text-cat-text text-center mb-1">
-          Вход в Spotify
+          Вход в Jellyfy
         </h1>
         <p className="text-xs text-cat-subtext0 text-center mb-6">
           Введите учетные данные для доступа

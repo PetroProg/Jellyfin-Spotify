@@ -57,8 +57,8 @@ export async function sendWelcomeEmail(toEmail: string, displayName: string, use
     </head>
     <body>
       <div class="container">
-        <div class="badge">Jellyfin Spotify</div>
-        <h1>Добро пожаловать, ${displayName}! 🎵</h1>
+        <div class="badge">Jellyfy</div>
+        <h1>Добро пожаловать в Jellyfy, ${displayName}! 🎵</h1>
         <p>Ваш персональный аккаунт <strong>@${username}</strong> успешно создан в медиатеке.</p>
         <p>Теперь вам доступны:</p>
         <ul>
@@ -67,9 +67,9 @@ export async function sendWelcomeEmail(toEmail: string, displayName: string, use
           <li>Оффлайн-сохранение музыки на смартфон.</li>
           <li>Умный режим рекомендаций (Smart Shuffle).</li>
         </ul>
-        <a href="https://petroprog.tail703e6c.ts.net:10443" class="button">Открыть плеер</a>
+        <a href="https://petroprog.tail703e6c.ts.net:10443" class="button">Открыть Jellyfy</a>
         <div class="footer">
-          Jellyfin-Spotify (Catppuccin Edition) • Доступно только в вашей сети Tailscale
+          Jellyfy (Catppuccin Edition) • Доступно только в вашей сети Tailscale
         </div>
       </div>
     </body>
@@ -79,7 +79,7 @@ export async function sendWelcomeEmail(toEmail: string, displayName: string, use
     await transporter.sendMail({
       from: config.from,
       to: toEmail,
-      subject: `Добро пожаловать в Jellyfin-Spotify, ${displayName}! 🎧`,
+      subject: `Добро пожаловать в Jellyfy, ${displayName}! 🎧`,
       html: htmlContent,
     });
 

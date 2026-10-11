@@ -27,7 +27,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <Music2 className="w-5 h-5" />
         </div>
         <div>
-          <h1 className="font-bold text-lg text-cat-text tracking-wide">Spotify</h1>
+          <h1 className="font-bold text-lg text-cat-text tracking-wide">Jellyfy</h1>
           <span className="text-xs text-cat-subtext0">Catppuccin Edition</span>
         </div>
       </div>
