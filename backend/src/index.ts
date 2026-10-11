@@ -35,7 +35,7 @@ if (fs.existsSync(publicDir)) {
 }
 
 // Authentication Decorator
-server.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {
+server.decorate('authenticate', async (request: any, reply: any) => {
   try {
     await request.jwtVerify();
   } catch (err) {
@@ -43,15 +43,10 @@ server.decorate('authenticate', async (request: FastifyRequest, reply: FastifyRe
   }
 });
 
-// Helper auth interface
-interface AuthUser {
-  id: number;
-  username: string;
-}
-
 // ----------------- AUTH ROUTES -----------------
-server.post('/api/auth/register', async (req: FastifyRequest<{ Body: any }>, reply) => {
-  const { username, password, display_name } = req.body;
+server.post('/api/auth/register', async (req: any, reply: any) => {
+  const body = req.body || {};
+  const { username, password, display_name } = body;
   if (!username || !password) {
     return reply.status(400).send({ error: 'Логин и пароль обязательны' });
   }
@@ -81,8 +76,9 @@ server.post('/api/auth/register', async (req: FastifyRequest<{ Body: any }>, rep
   };
 });
 
-server.post('/api/auth/login', async (req: FastifyRequest<{ Body: any }>, reply) => {
-  const { username, password } = req.body;
+server.post('/api/auth/login', async (req: any, reply: any) => {
+  const body = req.body || {};
+  const { username, password } = body;
   const user: any = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return reply.status(401).send({ error: 'Неверный логин или пароль' });
@@ -100,8 +96,9 @@ server.get('/api/auth/me', { preHandler: [(server as any).authenticate] }, async
   return { user };
 });
 
-server.put('/api/auth/profile', { preHandler: [(server as any).authenticate] }, async (req: any, reply) => {
-  const { display_name } = req.body;
+server.put('/api/auth/profile', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const body = req.body || {};
+  const { display_name } = body;
   if (!display_name) {
     return reply.status(400).send({ error: 'Имя не может быть пустым' });
   }
@@ -109,8 +106,9 @@ server.put('/api/auth/profile', { preHandler: [(server as any).authenticate] }, 
   return { success: true, display_name };
 });
 
-server.put('/api/auth/password', { preHandler: [(server as any).authenticate] }, async (req: any, reply) => {
-  const { current_password, new_password } = req.body;
+server.put('/api/auth/password', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const body = req.body || {};
+  const { current_password, new_password } = body;
   const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
   if (!user || !bcrypt.compareSync(current_password, user.password_hash)) {
     return reply.status(400).send({ error: 'Текущий пароль указан неверно' });
@@ -124,8 +122,9 @@ server.put('/api/auth/password', { preHandler: [(server as any).authenticate] },
   return { success: true, message: 'Пароль успешно обновлен' };
 });
 
-server.delete('/api/auth/account', { preHandler: [(server as any).authenticate] }, async (req: any, reply) => {
-  const { password } = req.body;
+server.delete('/api/auth/account', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const body = req.body || {};
+  const { password } = body;
   const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return reply.status(400).send({ error: 'Неверный пароль. Удаление отменено.' });
@@ -136,7 +135,7 @@ server.delete('/api/auth/account', { preHandler: [(server as any).authenticate] 
 });
 
 // ----------------- AUDIO STREAMING (Range requests, Direct Stream) -----------------
-server.get('/api/stream/:trackId', async (req: FastifyRequest<{ Params: { trackId: string } }>, reply) => {
+server.get('/api/stream/:trackId', async (req: any, reply: any) => {
   const trackId = req.params.trackId;
   const track: any = db.prepare('SELECT file_path FROM tracks WHERE id = ?').get(trackId);
   if (!track || !fs.existsSync(track.file_path)) {
@@ -187,8 +186,9 @@ server.get('/api/playlists', { preHandler: [(server as any).authenticate] }, asy
   return { playlists };
 });
 
-server.post('/api/playlists', { preHandler: [(server as any).authenticate] }, async (req: any, reply) => {
-  const { name, description } = req.body;
+server.post('/api/playlists', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const body = req.body || {};
+  const { name, description } = body;
   if (!name) return reply.status(400).send({ error: 'Название обязательно' });
 
   const info = db.prepare(`
@@ -199,7 +199,7 @@ server.post('/api/playlists', { preHandler: [(server as any).authenticate] }, as
   return { id: info.lastInsertRowid, name, description };
 });
 
-server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply) => {
+server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const playlistId = req.params.id;
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
   if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
@@ -215,7 +215,7 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
   return { playlist, tracks };
 });
 
-server.delete('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply) => {
+server.delete('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   db.prepare('DELETE FROM playlists WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   return { success: true };
 });
@@ -226,8 +226,9 @@ server.delete('/api/playlists/:id/tracks/:trackId', { preHandler: [(server as an
 });
 
 // ----------------- SPOTIFY IMPORT -----------------
-server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] }, async (req: any, reply) => {
-  const { url } = req.body;
+server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const body = req.body || {};
+  const { url } = body;
   if (!url) return reply.status(400).send({ error: 'Укажите ссылку на плейлист Spotify' });
 
   try {
@@ -314,8 +315,9 @@ server.get('/api/blacklist', { preHandler: [(server as any).authenticate] }, asy
   return { blacklist: list };
 });
 
-server.post('/api/blacklist', { preHandler: [(server as any).authenticate] }, async (req: any, reply) => {
-  const { title, artist, spotify_id } = req.body;
+server.post('/api/blacklist', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const body = req.body || {};
+  const { title, artist, spotify_id } = body;
   if (!title || !artist) return reply.status(400).send({ error: 'Название и артист обязательны' });
 
   db.prepare(`
@@ -357,7 +359,8 @@ server.get('/api/settings', { preHandler: [(server as any).authenticate] }, asyn
 });
 
 server.post('/api/settings', { preHandler: [(server as any).authenticate] }, async (req: any) => {
-  const { clientId, clientSecret } = req.body;
+  const body = req.body || {};
+  const { clientId, clientSecret } = body;
   if (clientId) {
     db.prepare(`INSERT INTO app_settings (key, value) VALUES ('spotify_client_id', ?) ON CONFLICT(key) DO UPDATE SET value = ?`).run(clientId, clientId);
   }
