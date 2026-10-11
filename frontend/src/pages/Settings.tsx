@@ -162,11 +162,11 @@ export const Settings: React.FC = () => {
 
   return (
     <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar">
-      <h1 className="text-2xl md:text-3xl font-extrabold text-cat-text mb-6">
-        Настройки
-      </h1>
+      <div className="max-w-3xl mx-auto space-y-6">
+        <h1 className="text-2xl md:text-3xl font-extrabold text-cat-text">
+          Настройки
+        </h1>
 
-      <div className="max-w-3xl space-y-6">
         {/* Section 1: Blacklist Management */}
         <div className="bg-cat-mantle rounded-3xl p-5 md:p-6 border border-cat-surface0/60 shadow-lg">
           <div className="flex items-center gap-3 mb-4">
