@@ -126,12 +126,14 @@ export async function fetchSpotifyPlaylist(urlOrId: string): Promise<SpotifyPlay
           }
         }
 
-        return {
-          name: pData.name || 'Spotify Playlist',
-          description: pData.description || '',
-          cover_url: pData.images?.[0]?.url,
-          tracks
-        };
+        if (tracks.length > 0) {
+          return {
+            name: pData.name || 'Spotify Playlist',
+            description: pData.description || '',
+            cover_url: pData.images?.[0]?.url,
+            tracks
+          };
+        }
       }
     } catch (e: any) {
       console.warn('[Spotify API error, falling back to embed parser]:', e.message);
@@ -164,7 +166,7 @@ export async function fetchSpotifyPlaylist(urlOrId: string): Promise<SpotifyPlay
           return {
             id: spId,
             title: t.title || t.name,
-            artist: t.subtitle || (t.artists?.map((a: any) => a.name).join(', ')) || 'Unknown Artist',
+            artist: (t.subtitle ? t.subtitle.replace(/\u00a0/g, ' ') : (t.artists?.map((a: any) => a.name).join(', '))) || 'Unknown Artist',
             album: t.album?.name || (entity.type === 'album' ? entity.title : '') || '',
             duration_ms: t.duration || 180000,
             cover_url: ''
