@@ -9,7 +9,7 @@ import dotenv from 'dotenv';
 import { db } from './db';
 import { checkAndNotifyUserLimit } from './notify';
 import { fetchSpotifyPlaylist, getSpotifyCredentials } from './spotify';
-import { enqueuePlaylistDownload } from './downloader';
+import { enqueuePlaylistDownload, resumePendingDownloads, resumePlaylistDownload } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
 
@@ -342,6 +342,12 @@ server.get('/api/spotify/jobs', { preHandler: [(server as any).authenticate] }, 
   return { jobs };
 });
 
+server.post('/api/playlists/:id/resume', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+  const playlistId = Number(req.params.id);
+  const result = await resumePlaylistDownload(playlistId);
+  return result;
+});
+
 // ----------------- LIKES -----------------
 server.get('/api/likes', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const tracks = db.prepare(`
@@ -443,10 +449,12 @@ server.setNotFoundHandler((req, reply) => {
 });
 
 // Start Server
-server.listen({ port: PORT, host: '0.0.0.0' }, (err, address) => {
+server.listen({ port: PORT, host: '0.0.0.0' }, async (err, address) => {
   if (err) {
     console.error(err);
     process.exit(1);
   }
   console.log(`[Jellyfin-Spotify] Server running at ${address}`);
+  // Automatically resume any downloads that were interrupted
+  await resumePendingDownloads();
 });

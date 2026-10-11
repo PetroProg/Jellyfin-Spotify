@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ArrowUpDown, ArrowLeft, Loader2 } from 'lucide-react';
+import { ArrowUpDown, ArrowLeft, Loader2, RefreshCw } from 'lucide-react';
 import { Playlist, Track } from '../types';
 import { apiRequest } from '../api/client';
 import { PlaylistHeader } from '../components/PlaylistHeader';
@@ -19,11 +19,25 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
   const [tracks, setTracks] = useState<Track[]>([]);
   const [activeJob, setActiveJob] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [resuming, setResuming] = useState(false);
   const [sortField, setSortField] = useState<SortField>('position');
   const [sortAsc, setSortAsc] = useState(true);
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
 
   const { playTrack, toggleShuffle, addToQueue } = usePlayerStore();
+
+  const handleResume = async () => {
+    if (resuming) return;
+    setResuming(true);
+    try {
+      await apiRequest(`/playlists/${playlistId}/resume`, { method: 'POST' });
+      await loadData();
+    } catch (err: any) {
+      alert(err.message || 'Ошибка возобновления загрузки');
+    } finally {
+      setResuming(false);
+    }
+  };
 
   const loadData = async () => {
     try {
@@ -125,29 +139,50 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
       />
 
       {/* Live Download Banner */}
-      {activeJob && activeJob.status === 'downloading' && (
+      {activeJob && (activeJob.status === 'downloading' || tracks.length < (activeJob.total_tracks || 0)) && (
         <div className="mb-4 p-4 rounded-2xl bg-cat-mantle border border-cat-mauve/40 shadow-lg">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2.5 min-w-0">
-              <Loader2 className="w-4 h-4 animate-spin text-cat-mauve shrink-0" />
+              {activeJob.status === 'downloading' ? (
+                <Loader2 className="w-4 h-4 animate-spin text-cat-mauve shrink-0" />
+              ) : (
+                <RefreshCw className="w-4 h-4 text-cat-subtext0 shrink-0" />
+              )}
               <div className="min-w-0">
                 <p className="text-xs font-bold text-cat-text">
-                  Идет фоновая загрузка треков в высоком качестве
+                  {activeJob.status === 'downloading'
+                    ? 'Идет фоновая загрузка треков в высоком качестве'
+                    : 'Загрузка плейлиста была приостановлена'}
                 </p>
                 <p className="text-[11px] text-cat-subtext0 truncate">
-                  {activeJob.current_track ? `Качается: ${activeJob.current_track}` : 'Поиск и загрузка аудио...'}
+                  {activeJob.status === 'downloading'
+                    ? (activeJob.current_track ? `Качается: ${activeJob.current_track}` : 'Поиск и загрузка аудио...')
+                    : `Скачано ${tracks.length} из ${activeJob.total_tracks} треков`}
                 </p>
               </div>
             </div>
-            <span className="text-xs font-black text-cat-mauve shrink-0 ml-3">
-              {activeJob.downloaded_tracks} / {activeJob.total_tracks}
-            </span>
+            <div className="flex items-center gap-2.5 shrink-0 ml-3">
+              <span className="text-xs font-black text-cat-mauve">
+                {activeJob.downloaded_tracks || tracks.length} / {activeJob.total_tracks}
+              </span>
+              <button
+                onClick={handleResume}
+                disabled={resuming}
+                title="Возобновить / проверить загрузку"
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cat-surface0 hover:bg-cat-surface1 text-xs text-cat-subtext0 hover:text-cat-text transition-colors disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${resuming ? 'animate-spin text-cat-mauve' : ''}`} />
+                <span className="hidden sm:inline">{resuming ? 'Запуск...' : 'Возобновить'}</span>
+              </button>
+            </div>
           </div>
           {/* Progress Bar */}
           <div className="w-full bg-cat-surface0 rounded-full h-1.5 overflow-hidden">
             <div
               className="bg-cat-mauve h-full rounded-full transition-all duration-500 ease-out"
-              style={{ width: `${Math.max(4, Math.min(100, ((activeJob.downloaded_tracks || 0) / (activeJob.total_tracks || 1)) * 100))}%` }}
+              style={{
+                width: `${Math.max(4, Math.min(100, (((activeJob.downloaded_tracks || tracks.length) || 0) / (activeJob.total_tracks || 1)) * 100))}%`
+              }}
             />
           </div>
         </div>
