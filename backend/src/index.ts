@@ -12,6 +12,7 @@ import { fetchSpotifyPlaylist, getSpotifyCredentials } from './spotify';
 import { enqueuePlaylistDownload } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
+import { sendWelcomeEmail, getSmtpConfig } from './email';
 
 dotenv.config();
 
@@ -46,9 +47,13 @@ server.decorate('authenticate', async (request: any, reply: any) => {
 // ----------------- AUTH ROUTES -----------------
 server.post('/api/auth/register', async (req: any, reply: any) => {
   const body = req.body || {};
-  const { username, password, display_name } = body;
+  const { username, password, confirm_password, display_name, email } = body;
   if (!username || !password) {
     return reply.status(400).send({ error: 'Логин и пароль обязательны' });
+  }
+
+  if (confirm_password && password !== confirm_password) {
+    return reply.status(400).send({ error: 'Пароли не совпадают' });
   }
 
   const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
@@ -58,9 +63,9 @@ server.post('/api/auth/register', async (req: any, reply: any) => {
 
   const passwordHash = bcrypt.hashSync(password, 10);
   const info = db.prepare(`
-    INSERT INTO users (username, password_hash, display_name)
-    VALUES (?, ?, ?)
-  `).run(username, passwordHash, display_name || username);
+    INSERT INTO users (username, password_hash, display_name, email)
+    VALUES (?, ?, ?, ?)
+  `).run(username, passwordHash, display_name || username, email || null);
 
   const userId = Number(info.lastInsertRowid);
   const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM users').get();
@@ -69,10 +74,15 @@ server.post('/api/auth/register', async (req: any, reply: any) => {
   // Check and notify if users >= 5
   checkAndNotifyUserLimit(totalUsers).catch(() => {});
 
+  // Send welcome email if provided
+  if (email) {
+    sendWelcomeEmail(email, display_name || username, username).catch(() => {});
+  }
+
   const token = server.jwt.sign({ id: userId, username });
   return {
     token,
-    user: { id: userId, username, display_name: display_name || username }
+    user: { id: userId, username, display_name: display_name || username, email }
   };
 });
 
@@ -343,6 +353,7 @@ server.get('/api/recommendations', { preHandler: [(server as any).authenticate] 
 // ----------------- SETTINGS & SYSTEM STATUS -----------------
 server.get('/api/settings', { preHandler: [(server as any).authenticate] }, async () => {
   const creds = getSpotifyCredentials();
+  const smtp = getSmtpConfig();
   const jfStatus = await getJellyfinStatus();
   const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM users').get();
   const tracksRow: any = db.prepare('SELECT COUNT(*) as cnt FROM tracks').get();
@@ -350,6 +361,9 @@ server.get('/api/settings', { preHandler: [(server as any).authenticate] }, asyn
   return {
     hasSpotifyCredentials: Boolean(creds.clientId && creds.clientSecret),
     spotifyClientId: creds.clientId ? `${creds.clientId.slice(0, 6)}...` : '',
+    hasSmtp: Boolean(smtp.host && smtp.user),
+    smtpHost: smtp.host,
+    smtpUser: smtp.user,
     jellyfin: jfStatus,
     stats: {
       users: countRow?.cnt || 0,
@@ -360,12 +374,27 @@ server.get('/api/settings', { preHandler: [(server as any).authenticate] }, asyn
 
 server.post('/api/settings', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const body = req.body || {};
-  const { clientId, clientSecret } = body;
+  const { clientId, clientSecret, smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom } = body;
   if (clientId) {
     db.prepare(`INSERT INTO app_settings (key, value) VALUES ('spotify_client_id', ?) ON CONFLICT(key) DO UPDATE SET value = ?`).run(clientId, clientId);
   }
   if (clientSecret) {
     db.prepare(`INSERT INTO app_settings (key, value) VALUES ('spotify_client_secret', ?) ON CONFLICT(key) DO UPDATE SET value = ?`).run(clientSecret, clientSecret);
+  }
+  if (smtpHost) {
+    db.prepare(`INSERT INTO app_settings (key, value) VALUES ('smtp_host', ?) ON CONFLICT(key) DO UPDATE SET value = ?`).run(smtpHost, smtpHost);
+  }
+  if (smtpPort) {
+    db.prepare(`INSERT INTO app_settings (key, value) VALUES ('smtp_port', ?) ON CONFLICT(key) DO UPDATE SET value = ?`).run(String(smtpPort), String(smtpPort));
+  }
+  if (smtpUser) {
+    db.prepare(`INSERT INTO app_settings (key, value) VALUES ('smtp_user', ?) ON CONFLICT(key) DO UPDATE SET value = ?`).run(smtpUser, smtpUser);
+  }
+  if (smtpPass) {
+    db.prepare(`INSERT INTO app_settings (key, value) VALUES ('smtp_pass', ?) ON CONFLICT(key) DO UPDATE SET value = ?`).run(smtpPass, smtpPass);
+  }
+  if (smtpFrom) {
+    db.prepare(`INSERT INTO app_settings (key, value) VALUES ('smtp_from', ?) ON CONFLICT(key) DO UPDATE SET value = ?`).run(smtpFrom, smtpFrom);
   }
   return { success: true };
 });

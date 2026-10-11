@@ -21,6 +21,7 @@ db.exec(`
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
     display_name TEXT NOT NULL,
+    email TEXT,
     jellyfin_user_id TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
@@ -95,3 +96,9 @@ db.exec(`
     value TEXT
   );
 `);
+
+// Safe migrations
+try {
+  db.exec('ALTER TABLE users ADD COLUMN email TEXT;');
+} catch (_) {}
+

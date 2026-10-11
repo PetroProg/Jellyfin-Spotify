@@ -10,7 +10,9 @@ interface RegisterProps {
 export const Register: React.FC<RegisterProps> = ({ onGoToLogin }) => {
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -20,6 +22,16 @@ export const Register: React.FC<RegisterProps> = ({ onGoToLogin }) => {
     e.preventDefault();
     if (!username || !password) return;
 
+    if (password !== confirmPassword) {
+      setError('Пароли не совпадают. Пожалуйста, проверьте ввод.');
+      return;
+    }
+
+    if (password.length < 4) {
+      setError('Пароль должен содержать минимум 4 символа.');
+      return;
+    }
+
     setLoading(true);
     setError('');
 
@@ -28,8 +40,10 @@ export const Register: React.FC<RegisterProps> = ({ onGoToLogin }) => {
         method: 'POST',
         body: JSON.stringify({ 
           username, 
-          password, 
-          display_name: displayName || username 
+          password,
+          confirm_password: confirmPassword,
+          display_name: displayName || username,
+          email: email.trim() || undefined
         })
       });
       login(data.token, data.user);
@@ -60,7 +74,7 @@ export const Register: React.FC<RegisterProps> = ({ onGoToLogin }) => {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-3.5">
           <div>
             <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1">
               Логин
@@ -90,6 +104,19 @@ export const Register: React.FC<RegisterProps> = ({ onGoToLogin }) => {
 
           <div>
             <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1">
+              Email (для приветствия)
+            </label>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve"
+              placeholder="example@mail.com"
+            />
+          </div>
+
+          <div>
+            <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1">
               Пароль
             </label>
             <input
@@ -102,10 +129,24 @@ export const Register: React.FC<RegisterProps> = ({ onGoToLogin }) => {
             />
           </div>
 
+          <div>
+            <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1">
+              Повторите пароль
+            </label>
+            <input
+              type="password"
+              required
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve"
+              placeholder="••••••••"
+            />
+          </div>
+
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-3 rounded-2xl bg-cat-mauve text-cat-base font-bold text-sm hover:opacity-95 active:scale-95 transition-all shadow-md flex items-center justify-center gap-2 disabled:opacity-40"
+            className="w-full py-3 rounded-2xl bg-cat-mauve text-cat-base font-bold text-sm hover:opacity-95 active:scale-95 transition-all shadow-md flex items-center justify-center gap-2 disabled:opacity-40 mt-2"
           >
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <span>Зарегистрироваться</span>}
           </button>
