@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   User as UserIcon, Lock, Trash2, Ban, HardDrive, Key, 
-  LogOut, Check, AlertTriangle, Loader2, Sparkles, Mail 
+  LogOut, Check, AlertTriangle, Loader2, Sparkles 
 } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { apiRequest } from '../api/client';
@@ -41,14 +41,6 @@ export const Settings: React.FC = () => {
   const [hasSpotifyCreds, setHasSpotifyCreds] = useState(false);
   const [savingCreds, setSavingCreds] = useState(false);
 
-  // SMTP State
-  const [smtpHost, setSmtpHost] = useState('');
-  const [smtpPort, setSmtpPort] = useState('465');
-  const [smtpUser, setSmtpUser] = useState('');
-  const [smtpPass, setSmtpPass] = useState('');
-  const [hasSmtp, setHasSmtp] = useState(false);
-  const [savingSmtp, setSavingSmtp] = useState(false);
-
   // Stats State
   const [stats, setStats] = useState({ users: 0, tracks: 0 });
 
@@ -70,9 +62,6 @@ export const Settings: React.FC = () => {
       // 3. Settings & Stats
       const stData = await apiRequest<any>('/settings');
       setHasSpotifyCreds(stData.hasSpotifyCredentials);
-      setHasSmtp(Boolean(stData.hasSmtp));
-      if (stData.smtpHost) setSmtpHost(stData.smtpHost);
-      if (stData.smtpUser) setSmtpUser(stData.smtpUser);
       setStats(stData.stats || { users: 0, tracks: 0 });
     } catch (e) {
       console.warn(e);
@@ -171,23 +160,6 @@ export const Settings: React.FC = () => {
     }
   };
 
-  const handleSaveSmtp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSavingSmtp(true);
-    try {
-      await apiRequest('/settings', {
-        method: 'POST',
-        body: JSON.stringify({ smtpHost, smtpPort, smtpUser, smtpPass })
-      });
-      setHasSmtp(Boolean(smtpHost && smtpUser));
-      alert('Почтовые настройки SMTP успешно сохранены!');
-    } catch (e: any) {
-      alert(e.message || 'Ошибка сохранения настроек SMTP');
-    } finally {
-      setSavingSmtp(false);
-    }
-  };
-
   return (
     <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar">
       <h1 className="text-2xl md:text-3xl font-extrabold text-cat-text mb-6">
@@ -250,17 +222,18 @@ export const Settings: React.FC = () => {
             <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block">
               Имя / Никнейм
             </label>
-            <div className="flex gap-3">
+            <div className="flex flex-col sm:flex-row gap-2.5">
               <input
                 type="text"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
-                className="flex-1 bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve transition-colors"
+                className="flex-1 min-w-0 w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve transition-colors"
+                placeholder="Ваше имя"
               />
               <button
                 type="submit"
                 disabled={savingName}
-                className="px-5 py-2.5 rounded-2xl bg-cat-mauve text-cat-base text-sm font-bold hover:opacity-95 active:scale-95 transition-all shadow-md flex items-center gap-2"
+                className="w-full sm:w-auto px-5 py-2.5 rounded-2xl bg-cat-mauve text-cat-base text-sm font-bold hover:opacity-95 active:scale-95 transition-all shadow-md flex items-center justify-center gap-2 shrink-0"
               >
                 {savingName ? <Loader2 className="w-4 h-4 animate-spin" /> : nameSuccess ? <Check className="w-4 h-4" /> : null}
                 Сохранить
@@ -304,14 +277,14 @@ export const Settings: React.FC = () => {
           </form>
 
           {/* Delete Account */}
-          <div className="pt-6 mt-6 border-t border-cat-surface0/60 flex items-center justify-between">
+          <div className="pt-6 mt-6 border-t border-cat-surface0/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <p className="text-sm font-bold text-cat-red">Удаление профиля</p>
               <p className="text-xs text-cat-subtext0">Удаляет ваши плейлисты и историю прослушивания</p>
             </div>
             <button
               onClick={() => setShowDeleteModal(true)}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-cat-red/20 text-cat-red hover:bg-cat-red hover:text-cat-base text-xs font-bold transition-all"
+              className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-cat-red/20 text-cat-red hover:bg-cat-red hover:text-cat-base text-xs font-bold transition-all shrink-0 self-start sm:self-auto"
             >
               <Trash2 className="w-4 h-4" />
               Удалить аккаунт
@@ -380,70 +353,6 @@ export const Settings: React.FC = () => {
           </form>
         </div>
 
-        {/* Section 5: Email SMTP Settings */}
-        <div className="bg-cat-mantle rounded-3xl p-5 md:p-6 border border-cat-surface0/60 shadow-lg">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-xl bg-cat-lavender/20 text-cat-lavender flex items-center justify-center">
-              <Mail className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 className="text-base font-bold text-cat-text">Настройки почты (Приветственные письма)</h2>
-              <p className="text-xs text-cat-subtext0">
-                {hasSmtp
-                  ? '✅ SMTP подключен: приветственные письма отправляются новым пользователям'
-                  : '⚠️ SMTP не подключен: новые регистрации сохраняются, письма логируются'}
-              </p>
-            </div>
-          </div>
-
-          <form onSubmit={handleSaveSmtp} className="space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="sm:col-span-2">
-                <input
-                  type="text"
-                  placeholder="SMTP Host (напр. smtp.gmail.com)"
-                  value={smtpHost}
-                  onChange={(e) => setSmtpHost(e.target.value)}
-                  className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve"
-                />
-              </div>
-              <div>
-                <input
-                  type="number"
-                  placeholder="Порт (465 или 587)"
-                  value={smtpPort}
-                  onChange={(e) => setSmtpPort(e.target.value)}
-                  className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <input
-                type="text"
-                placeholder="Логин / Email (user@gmail.com)"
-                value={smtpUser}
-                onChange={(e) => setSmtpUser(e.target.value)}
-                className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve"
-              />
-              <input
-                type="password"
-                placeholder="Пароль приложения SMTP"
-                value={smtpPass}
-                onChange={(e) => setSmtpPass(e.target.value)}
-                className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={savingSmtp || (!smtpHost && !smtpUser)}
-              className="px-5 py-2.5 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-text text-xs font-bold transition-all disabled:opacity-40"
-            >
-              {savingSmtp ? 'Сохранение...' : 'Сохранить настройки почты'}
-            </button>
-          </form>
-        </div>
 
         {/* Section 6: Logout */}
         <div className="pt-2">
