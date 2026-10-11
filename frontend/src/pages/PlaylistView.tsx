@@ -5,6 +5,7 @@ import { apiRequest } from '../api/client';
 import { PlaylistHeader } from '../components/PlaylistHeader';
 import { TrackRow } from '../components/TrackRow';
 import { ContextMenu } from '../components/ContextMenu';
+import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { usePlayerStore } from '../store/playerStore';
 
 interface PlaylistViewProps {
@@ -12,7 +13,7 @@ interface PlaylistViewProps {
   onBack?: () => void;
 }
 
-type SortField = 'position' | 'title' | 'artist' | 'date' | 'duration';
+type SortField = 'position' | 'title' | 'artist' | 'album' | 'date' | 'duration';
 
 export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }) => {
   const [playlist, setPlaylist] = useState<Playlist | null>(null);
@@ -23,6 +24,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
   const [sortField, setSortField] = useState<SortField>('position');
   const [sortAsc, setSortAsc] = useState(true);
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
+  const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
 
   const { playTrack, toggleShuffle, addToQueue } = usePlayerStore();
 
@@ -78,6 +80,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
     let comp = 0;
     if (sortField === 'title') comp = a.title.localeCompare(b.title);
     else if (sortField === 'artist') comp = a.artist.localeCompare(b.artist);
+    else if (sortField === 'album') comp = (a.album || '').localeCompare(b.album || '');
     else if (sortField === 'duration') comp = a.duration_ms - b.duration_ms;
     else if (sortField === 'date') comp = (a.added_at || '').localeCompare(b.added_at || '');
     else comp = (a.position || 0) - (b.position || 0);
@@ -94,6 +97,15 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
       setTracks(prev => prev.filter(t => t.id !== track.id));
     } catch (e) {
       console.warn(e);
+    }
+  };
+
+  const handleRemoveTrack = async (track: Track) => {
+    try {
+      await apiRequest(`/playlists/${playlistId}/tracks/${track.id}`, { method: 'DELETE' });
+      setTracks(prev => prev.filter(t => t.id !== track.id));
+    } catch (e: any) {
+      alert(e.message || 'Ошибка удаления трека из плейлиста');
     }
   };
 
@@ -190,7 +202,8 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
 
       {/* Sorting / Table Header */}
       <div className="border-b border-cat-surface0/60 pb-2 mb-2 flex items-center justify-between text-xs font-semibold text-cat-subtext0 px-3">
-        <div className="flex items-center gap-4 flex-1">
+        {/* Col 1: # and Title */}
+        <div className="flex items-center gap-4 flex-1 md:w-2/5 md:flex-initial">
           <span className="w-6 text-center">#</span>
           <button
             onClick={() => handleSort('title')}
@@ -200,7 +213,8 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
           </button>
         </div>
 
-        <div className="hidden lg:flex items-center w-1/4">
+        {/* Col 2: Artist */}
+        <div className="hidden md:flex items-center w-1/5 pr-3">
           <button
             onClick={() => handleSort('artist')}
             className="flex items-center gap-1 hover:text-cat-text transition-colors"
@@ -209,6 +223,27 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
           </button>
         </div>
 
+        {/* Col 3: Album */}
+        <div className="hidden lg:flex items-center w-1/5 pr-3">
+          <button
+            onClick={() => handleSort('album')}
+            className="flex items-center gap-1 hover:text-cat-text transition-colors"
+          >
+            Альбом <ArrowUpDown className="w-3 h-3" />
+          </button>
+        </div>
+
+        {/* Col 4: Date Added */}
+        <div className="hidden xl:flex items-center w-28 pr-3">
+          <button
+            onClick={() => handleSort('date')}
+            className="flex items-center gap-1 hover:text-cat-text transition-colors"
+          >
+            Дата <ArrowUpDown className="w-3 h-3" />
+          </button>
+        </div>
+
+        {/* Col 5: Duration */}
         <div className="flex items-center gap-6">
           <button
             onClick={() => handleSort('duration')}
@@ -240,6 +275,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
               key={`${track.id}-${i}`}
               track={track}
               index={i}
+              playlistName={playlist.name}
               onPlay={() => playTrack(track, sortedTracks, i)}
               onOpenMenu={(e, t) => setMenuState({ track: t, pos: { x: e.clientX, y: e.clientY } })}
             />
@@ -254,7 +290,19 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
           position={menuState.pos}
           onClose={() => setMenuState(null)}
           onAddToQueue={(t) => addToQueue(t)}
+          onAddToPlaylist={(t) => setAddToPlaylistTrack(t)}
+          onRemoveFromPlaylist={handleRemoveTrack}
           onBlacklist={handleBlacklist}
+        />
+      )}
+
+      {/* Add To Playlist Modal */}
+      {addToPlaylistTrack && (
+        <AddToPlaylistModal
+          track={addToPlaylistTrack}
+          isOpen={!!addToPlaylistTrack}
+          onClose={() => setAddToPlaylistTrack(null)}
+          onUpdated={loadData}
         />
       )}
     </div>

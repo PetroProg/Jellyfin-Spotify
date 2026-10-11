@@ -4,12 +4,14 @@ import { Track } from '../types';
 import { apiRequest } from '../api/client';
 import { TrackRow } from '../components/TrackRow';
 import { ContextMenu } from '../components/ContextMenu';
+import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { usePlayerStore } from '../store/playerStore';
 
 export const LikedSongs: React.FC = () => {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
+  const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
 
   const { playTrack, toggleShuffle, addToQueue } = usePlayerStore();
 
@@ -76,6 +78,27 @@ export const LikedSongs: React.FC = () => {
         </div>
       </div>
 
+      {/* Sorting / Table Header */}
+      <div className="border-b border-cat-surface0/60 pb-2 mb-2 flex items-center justify-between text-xs font-semibold text-cat-subtext0 px-3">
+        <div className="flex items-center gap-4 flex-1 md:w-2/5 md:flex-initial">
+          <span className="w-6 text-center">#</span>
+          <span>Название</span>
+        </div>
+        <div className="hidden md:flex items-center w-1/5 pr-3">
+          <span>Исполнитель</span>
+        </div>
+        <div className="hidden lg:flex items-center w-1/5 pr-3">
+          <span>Альбом</span>
+        </div>
+        <div className="hidden xl:flex items-center w-28 pr-3">
+          <span>Дата</span>
+        </div>
+        <div className="flex items-center gap-6">
+          <span>Время</span>
+          <span className="w-7" />
+        </div>
+      </div>
+
       {/* Tracklist */}
       <div className="space-y-0.5">
         {loading ? (
@@ -101,7 +124,17 @@ export const LikedSongs: React.FC = () => {
           position={menuState.pos}
           onClose={() => setMenuState(null)}
           onAddToQueue={(t) => addToQueue(t)}
+          onAddToPlaylist={(t) => setAddToPlaylistTrack(t)}
           onBlacklist={handleBlacklist}
+        />
+      )}
+
+      {addToPlaylistTrack && (
+        <AddToPlaylistModal
+          track={addToPlaylistTrack}
+          isOpen={!!addToPlaylistTrack}
+          onClose={() => setAddToPlaylistTrack(null)}
+          onUpdated={loadLikes}
         />
       )}
     </div>

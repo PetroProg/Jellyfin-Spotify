@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Repeat1, 
-  Volume2, VolumeX, Heart, Music2, Sparkles, ListMusic 
+  Volume2, VolumeX, Heart, Music2, Sparkles, ListMusic, FolderPlus 
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { apiRequest } from '../api/client';
+import { AddToPlaylistModal } from './AddToPlaylistModal';
 
 interface DesktopPlayerProps {
   onToggleQueue?: () => void;
@@ -32,6 +33,7 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
 
   const [isLiked, setIsLiked] = useState(false);
   const [prevVolume, setPrevVolume] = useState(1);
+  const [isAddToPlaylistOpen, setIsAddToPlaylistOpen] = useState(false);
 
   const toggleMute = () => {
     if (volume > 0) {
@@ -85,6 +87,13 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
           <h4 className="text-sm font-semibold text-cat-text truncate">{currentTrack.title}</h4>
           <p className="text-xs text-cat-subtext0 truncate mt-0.5">{currentTrack.artist}</p>
         </div>
+        <button
+          onClick={() => setIsAddToPlaylistOpen(true)}
+          title="Добавить в плейлист"
+          className="p-1.5 rounded-full text-cat-subtext0 hover:text-cat-text transition-transform active:scale-125"
+        >
+          <FolderPlus className="w-5 h-5" />
+        </button>
         <button
           onClick={toggleLike}
           className={`p-1.5 rounded-full transition-transform active:scale-125 ${
@@ -196,6 +205,12 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
           />
         </div>
       </div>
+
+      <AddToPlaylistModal
+        track={currentTrack}
+        isOpen={isAddToPlaylistOpen}
+        onClose={() => setIsAddToPlaylistOpen(false)}
+      />
     </div>
   );
 };

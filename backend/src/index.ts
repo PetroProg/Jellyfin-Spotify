@@ -284,6 +284,41 @@ server.delete('/api/playlists/:id/tracks/:trackId', { preHandler: [(server as an
   return { success: true };
 });
 
+server.post('/api/playlists/:id/tracks', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const playlistId = Number(req.params.id);
+  const body = req.body || {};
+  const trackId = Number(body.trackId);
+  if (!trackId) return reply.status(400).send({ error: 'trackId обязателен' });
+
+  const playlist = db.prepare('SELECT id FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
+  if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
+
+  const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
+  const nextPos = (maxPosRow?.maxPos !== null && maxPosRow?.maxPos !== undefined) ? maxPosRow.maxPos + 1 : 0;
+
+  db.prepare(`
+    INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
+    VALUES (?, ?, ?)
+  `).run(playlistId, trackId, nextPos);
+
+  return { success: true };
+});
+
+server.get('/api/tracks/:id/playlists', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+  const trackId = Number(req.params.id);
+  const playlists = db.prepare(`
+    SELECT p.id, p.name, p.cover_url, COUNT(pt_all.track_id) as track_count,
+           CASE WHEN EXISTS (SELECT 1 FROM playlist_tracks pt WHERE pt.playlist_id = p.id AND pt.track_id = ?) THEN 1 ELSE 0 END as has_track
+    FROM playlists p
+    LEFT JOIN playlist_tracks pt_all ON p.id = pt_all.playlist_id
+    WHERE p.user_id = ?
+    GROUP BY p.id
+    ORDER BY p.created_at DESC
+  `).all(trackId, req.user.id);
+
+  return { playlists };
+});
+
 // ----------------- SPOTIFY IMPORT -----------------
 server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const body = req.body || {};

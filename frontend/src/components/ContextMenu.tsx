@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { ListPlus, Ban, FolderPlus } from 'lucide-react';
+import { ListPlus, Ban, FolderPlus, Trash2 } from 'lucide-react';
 import { Track } from '../types';
 
 interface ContextMenuProps {
@@ -8,6 +8,7 @@ interface ContextMenuProps {
   onClose: () => void;
   onAddToQueue: (track: Track) => void;
   onAddToPlaylist?: (track: Track) => void;
+  onRemoveFromPlaylist?: (track: Track) => void;
   onBlacklist: (track: Track) => void;
 }
 
@@ -17,6 +18,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   onClose,
   onAddToQueue,
   onAddToPlaylist,
+  onRemoveFromPlaylist,
   onBlacklist,
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -66,7 +68,20 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
           className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-text hover:bg-cat-surface0 text-left transition-colors"
         >
           <FolderPlus className="w-4 h-4 text-cat-peach" />
-          В плейлист
+          Добавить в плейлист
+        </button>
+      )}
+
+      {onRemoveFromPlaylist && (
+        <button
+          onClick={() => {
+            onRemoveFromPlaylist(track);
+            onClose();
+          }}
+          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-red hover:bg-cat-surface0 text-left transition-colors"
+        >
+          <Trash2 className="w-4 h-4 text-cat-red" />
+          Удалить из плейлиста
         </button>
       )}
 
@@ -75,7 +90,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
           onBlacklist(track);
           onClose();
         }}
-        className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-red hover:bg-cat-surface0 text-left transition-colors"
+        className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-red/80 hover:text-cat-red hover:bg-cat-surface0 text-left transition-colors"
       >
         <Ban className="w-4 h-4" />
         Никогда не включать

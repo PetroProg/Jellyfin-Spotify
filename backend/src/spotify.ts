@@ -137,7 +137,7 @@ export async function fetchSpotifyPlaylist(urlOrId: string): Promise<SpotifyPlay
             id: spId,
             title: t.title || t.name,
             artist: t.subtitle || (t.artists?.map((a: any) => a.name).join(', ')) || 'Unknown Artist',
-            album: entity.title || '',
+            album: t.album?.name || (entity.type === 'album' ? entity.title : '') || '',
             duration_ms: t.duration || 180000,
             cover_url: ''
           };

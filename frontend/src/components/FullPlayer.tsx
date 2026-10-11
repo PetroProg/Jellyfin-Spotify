@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { 
   ChevronDown, Heart, Shuffle, SkipBack, Play, Pause, 
-  SkipForward, Repeat, Repeat1, Music2, Sparkles, Volume2, VolumeX 
+  SkipForward, Repeat, Repeat1, Music2, Sparkles, Volume2, VolumeX, FolderPlus 
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { apiRequest } from '../api/client';
+import { AddToPlaylistModal } from './AddToPlaylistModal';
 
 export const FullPlayer: React.FC = () => {
   const {
@@ -30,6 +31,7 @@ export const FullPlayer: React.FC = () => {
 
   const [isLiked, setIsLiked] = useState(false);
   const [prevVolume, setPrevVolume] = useState(1);
+  const [isAddToPlaylistOpen, setIsAddToPlaylistOpen] = useState(false);
 
   const toggleMute = () => {
     if (volume > 0) {
@@ -120,14 +122,23 @@ export const FullPlayer: React.FC = () => {
             {currentTrack.artist}
           </p>
         </div>
-        <button
-          onClick={toggleLike}
-          className={`p-2 rounded-full transition-transform active:scale-125 ${
-            isLiked ? 'text-cat-red' : 'text-cat-subtext0 hover:text-cat-text'
-          }`}
-        >
-          <Heart className={`w-7 h-7 ${isLiked ? 'fill-current' : ''}`} />
-        </button>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            onClick={() => setIsAddToPlaylistOpen(true)}
+            title="Добавить в плейлист"
+            className="p-2 rounded-full text-cat-subtext0 hover:text-cat-text transition-transform active:scale-125"
+          >
+            <FolderPlus className="w-7 h-7" />
+          </button>
+          <button
+            onClick={toggleLike}
+            className={`p-2 rounded-full transition-transform active:scale-125 ${
+              isLiked ? 'text-cat-red' : 'text-cat-subtext0 hover:text-cat-text'
+            }`}
+          >
+            <Heart className={`w-7 h-7 ${isLiked ? 'fill-current' : ''}`} />
+          </button>
+        </div>
       </div>
 
       {/* Timeline Scrubber */}
@@ -211,6 +222,12 @@ export const FullPlayer: React.FC = () => {
           className="flex-1 h-1.5 bg-cat-surface1 rounded-lg appearance-none cursor-pointer accent-cat-peach"
         />
       </div>
+
+      <AddToPlaylistModal
+        track={currentTrack}
+        isOpen={isAddToPlaylistOpen}
+        onClose={() => setIsAddToPlaylistOpen(false)}
+      />
     </div>
   );
 };

@@ -1,11 +1,12 @@
 import React from 'react';
-import { Play, Pause, MoreHorizontal, Music2 } from 'lucide-react';
+import { Play, MoreHorizontal, Music2 } from 'lucide-react';
 import { Track } from '../types';
 import { usePlayerStore } from '../store/playerStore';
 
 interface TrackRowProps {
   track: Track;
   index: number;
+  playlistName?: string;
   onPlay: () => void;
   onOpenMenu: (e: React.MouseEvent, track: Track) => void;
 }
@@ -13,6 +14,7 @@ interface TrackRowProps {
 export const TrackRow: React.FC<TrackRowProps> = ({
   track,
   index,
+  playlistName,
   onPlay,
   onOpenMenu,
 }) => {
@@ -26,6 +28,21 @@ export const TrackRow: React.FC<TrackRowProps> = ({
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
+  const formatDate = (dateStr?: string) => {
+    if (!dateStr) return '-';
+    try {
+      const d = new Date(dateStr.includes('T') ? dateStr : `${dateStr.replace(' ', 'T')}Z`);
+      if (isNaN(d.getTime())) return '-';
+      return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' });
+    } catch {
+      return '-';
+    }
+  };
+
+  const displayAlbum = (!track.album || (playlistName && track.album.toLowerCase() === playlistName.toLowerCase()))
+    ? '-'
+    : track.album;
+
   return (
     <div
       onClick={onPlay}
@@ -35,8 +52,8 @@ export const TrackRow: React.FC<TrackRowProps> = ({
           : 'hover:bg-cat-surface0/50 text-cat-text'
       }`}
     >
-      {/* Left: Index / Play Icon & Title/Artist */}
-      <div className="flex items-center gap-3 min-w-0 flex-1 pr-2">
+      {/* Col 1: Index / Play Icon & Cover & Title (+ mobile artist) */}
+      <div className="flex items-center gap-3 min-w-0 flex-1 md:w-2/5 md:flex-initial pr-2">
         <div className="w-6 text-center text-xs font-mono text-cat-subtext0 flex-shrink-0">
           {isCurrent && isPlaying ? (
             <div className="flex items-center justify-center gap-0.5 h-3">
@@ -62,18 +79,28 @@ export const TrackRow: React.FC<TrackRowProps> = ({
           <h4 className={`text-sm font-medium truncate ${isCurrent ? 'text-cat-mauve font-semibold' : 'text-cat-text'}`}>
             {track.title}
           </h4>
-          <p className="text-xs text-cat-subtext0 truncate mt-0.5">
+          <p className="text-xs text-cat-subtext0 truncate mt-0.5 md:hidden">
             {track.artist}
           </p>
         </div>
       </div>
 
-      {/* Middle: Album (desktop only) */}
-      <div className="hidden lg:block w-1/4 text-xs text-cat-subtext0 truncate pr-4">
-        {track.album || '-'}
+      {/* Col 2: Artist (desktop md+) */}
+      <div className="hidden md:block w-1/5 text-xs text-cat-subtext0 hover:text-cat-text truncate pr-3 transition-colors">
+        {track.artist}
       </div>
 
-      {/* Right: Duration & 3-Dots Menu */}
+      {/* Col 3: Album (desktop lg+) */}
+      <div className="hidden lg:block w-1/5 text-xs text-cat-subtext0 truncate pr-3">
+        {displayAlbum}
+      </div>
+
+      {/* Col 4: Date Added (desktop xl+) */}
+      <div className="hidden xl:block w-28 text-xs text-cat-subtext0/80 truncate pr-3 font-sans">
+        {formatDate(track.added_at)}
+      </div>
+
+      {/* Col 5: Duration & 3-Dots Menu */}
       <div className="flex items-center gap-3 flex-shrink-0">
         <span className="text-xs font-mono text-cat-subtext0">
           {formatDuration(track.duration_ms)}
