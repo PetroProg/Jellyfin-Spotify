@@ -532,12 +532,12 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
 
 server.post('/api/tracks/download-single', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const body = req.body || {};
-  const { track } = body;
+  const { track, playlistId } = body;
   if (!track || !track.title || !track.artist) {
     return reply.status(400).send({ error: 'Трек не указан или отсутствуют данные' });
   }
 
-  const result = await downloadSingleSpotifyTrackDirect(track, req.user.id);
+  const result = await downloadSingleSpotifyTrackDirect(track, req.user.id, playlistId ? Number(playlistId) : undefined);
   if (!result.success) {
     return reply.status(500).send({ error: result.error || 'Ошибка скачивания трека' });
   }

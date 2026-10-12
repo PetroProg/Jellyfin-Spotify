@@ -381,8 +381,9 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
 
 export async function downloadSingleSpotifyTrackDirect(
   track: SpotifyTrack,
-  userId?: number
-): Promise<{ success: boolean; track?: any; error?: string }> {
+  userId?: number,
+  playlistId?: number
+): Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean }> {
   try {
     // 1. Resolve full details if needed
     if (track.id) {
@@ -398,6 +399,23 @@ export async function downloadSingleSpotifyTrackDirect(
       }
     }
 
+    // Helper to attach to playlist if playlistId is provided
+    const attachToPlaylist = (trackRecord: any) => {
+      if (!playlistId || !trackRecord?.id) return;
+      const inPl: any = db.prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').get(playlistId, trackRecord.id);
+      if (!inPl) {
+        const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
+        const nextPos = (maxPosRow?.maxPos !== null && maxPosRow?.maxPos !== undefined) ? maxPosRow.maxPos + 1 : 0;
+        db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)').run(playlistId, trackRecord.id, nextPos);
+      }
+      const playlistRow: any = db.prepare('SELECT name FROM playlists WHERE id = ?').get(playlistId);
+      if (playlistRow && (playlistRow.name === 'Любимые треки' || playlistRow.name.toLowerCase() === 'liked songs')) {
+        if (userId) {
+          db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, trackRecord.id);
+        }
+      }
+    };
+
     // 2. Check if already exists in DB
     const existing: any = db.prepare(`
       SELECT * FROM tracks 
@@ -407,7 +425,8 @@ export async function downloadSingleSpotifyTrackDirect(
     `).get(track.id, track.title, track.artist);
 
     if (existing) {
-      return { success: true, track: existing };
+      attachToPlaylist(existing);
+      return { success: true, track: existing, addedToPlaylist: !!playlistId };
     }
 
     // 3. Prepare target path
@@ -479,8 +498,9 @@ export async function downloadSingleSpotifyTrackDirect(
     );
 
     const newTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
+    attachToPlaylist(newTrack);
     await refreshJellyfinLibrary();
-    return { success: true, track: newTrack };
+    return { success: true, track: newTrack, addedToPlaylist: !!playlistId };
   } catch (err: any) {
     console.error('[Download Single Track Error]', err);
     return { success: false, error: err.message };

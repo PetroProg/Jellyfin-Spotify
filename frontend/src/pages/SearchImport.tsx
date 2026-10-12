@@ -12,7 +12,8 @@ import {
   Check,
   MoreHorizontal,
   Sparkles,
-  Library
+  Library,
+  ListPlus
 } from 'lucide-react';
 import { DownloadJob, Track, SpotifySearchResult } from '../types';
 import { apiRequest } from '../api/client';
@@ -41,6 +42,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
   // Modals & Menu
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
+  const [addToPlaylistSpotify, setAddToPlaylistSpotify] = useState<SpotifySearchResult | null>(null);
 
   const { playTrack, addToQueue } = usePlayerStore();
 
@@ -169,6 +171,22 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
     } finally {
       setDownloadingTrackId(null);
     }
+  };
+
+  const handleSpotifyTrackDownloaded = (st: SpotifySearchResult, newTrack: Track) => {
+    setSpotifyResults((prev) =>
+      prev.map((item) =>
+        item.id === st.id
+          ? {
+              ...item,
+              is_downloaded: true,
+              local_track_id: newTrack.id,
+              local_track: newTrack
+            }
+          : item
+      )
+    );
+    setLocalResults((prev) => [newTrack, ...prev.filter((t) => t.id !== newTrack.id)]);
   };
 
   const handleBlacklist = async (track: Track) => {
@@ -318,7 +336,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                           </span>
 
                           {st.is_downloaded ? (
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-1.5 sm:gap-2">
                               <span className="text-[11px] px-2.5 py-1 rounded-full bg-cat-green/20 text-cat-green font-semibold flex items-center gap-1">
                                 <Check className="w-3.5 h-3.5 stroke-[2.5]" />
                                 <span className="hidden sm:inline">В медиатеке</span>
@@ -334,26 +352,44 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                               >
                                 <Play className="w-4 h-4 fill-current ml-0.5" />
                               </button>
+                              <button
+                                onClick={() => setAddToPlaylistTrack(st.local_track || null)}
+                                title="Добавить в плейлист"
+                                className="p-2 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-mauve transition-all cursor-pointer active:scale-95"
+                              >
+                                <ListPlus className="w-4 h-4" />
+                              </button>
                             </div>
                           ) : (
-                            <button
-                              onClick={() => handleDownloadSingle(st)}
-                              disabled={downloadingTrackId === st.id}
-                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cat-mauve/20 hover:bg-cat-mauve text-cat-mauve hover:text-cat-base text-xs font-bold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
-                              title="Скачать на сервер в высоком качестве"
-                            >
-                              {downloadingTrackId === st.id ? (
-                                <>
-                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                  <span>Качается...</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Download className="w-3.5 h-3.5" />
-                                  <span>Скачать</span>
-                                </>
-                              )}
-                            </button>
+                            <div className="flex items-center gap-1.5 sm:gap-2">
+                              <button
+                                onClick={() => setAddToPlaylistSpotify(st)}
+                                disabled={downloadingTrackId === st.id}
+                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-mauve text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
+                                title="Добавить в плейлист (трек скачается автоматически)"
+                              >
+                                <ListPlus className="w-3.5 h-3.5 text-cat-mauve" />
+                                <span className="hidden xs:inline">В плейлист</span>
+                              </button>
+                              <button
+                                onClick={() => handleDownloadSingle(st)}
+                                disabled={downloadingTrackId === st.id}
+                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cat-mauve/20 hover:bg-cat-mauve text-cat-mauve hover:text-cat-base text-xs font-bold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
+                                title="Скачать на сервер в высоком качестве"
+                              >
+                                {downloadingTrackId === st.id ? (
+                                  <>
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    <span className="hidden xs:inline">Качается...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Download className="w-3.5 h-3.5" />
+                                    <span>Скачать</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
                           )}
 
                           {st.local_track && (
@@ -512,11 +548,16 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
       )}
 
       {/* Add To Playlist Modal */}
-      {addToPlaylistTrack && (
+      {(addToPlaylistTrack || addToPlaylistSpotify) && (
         <AddToPlaylistModal
           track={addToPlaylistTrack}
-          isOpen={!!addToPlaylistTrack}
-          onClose={() => setAddToPlaylistTrack(null)}
+          spotifyTrack={addToPlaylistSpotify}
+          isOpen={!!(addToPlaylistTrack || addToPlaylistSpotify)}
+          onClose={() => {
+            setAddToPlaylistTrack(null);
+            setAddToPlaylistSpotify(null);
+          }}
+          onSpotifyTrackDownloaded={handleSpotifyTrackDownloaded}
         />
       )}
     </div>

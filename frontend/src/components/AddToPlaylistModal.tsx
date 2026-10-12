@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Search, Plus, CheckCircle2, Circle, Loader2, Music2, X } from 'lucide-react';
-import { Track } from '../types';
+import { Track, SpotifySearchResult } from '../types';
 import { apiRequest } from '../api/client';
 
 interface PlaylistWithStatus {
@@ -13,17 +13,22 @@ interface PlaylistWithStatus {
 
 interface AddToPlaylistModalProps {
   track: Track | null;
+  spotifyTrack?: SpotifySearchResult | null;
   isOpen: boolean;
   onClose: () => void;
   onUpdated?: () => void;
+  onSpotifyTrackDownloaded?: (spotifyTrack: SpotifySearchResult, localTrack: Track) => void;
 }
 
 export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   track,
+  spotifyTrack,
   isOpen,
   onClose,
   onUpdated,
+  onSpotifyTrackDownloaded,
 }) => {
+  const [activeTrack, setActiveTrack] = useState<Track | null>(track);
   const [playlists, setPlaylists] = useState<PlaylistWithStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -35,19 +40,20 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   const [savingNew, setSavingNew] = useState(false);
 
   useEffect(() => {
-    if (isOpen && track) {
-      loadPlaylists();
+    if (isOpen) {
+      const current = track || spotifyTrack?.local_track || null;
+      setActiveTrack(current);
       setSearch('');
       setCreatingNew(false);
       setNewPlaylistName('');
+      loadPlaylists(current?.id || 0);
     }
-  }, [isOpen, track?.id]);
+  }, [isOpen, track?.id, spotifyTrack?.id]);
 
-  const loadPlaylists = async () => {
-    if (!track) return;
+  const loadPlaylists = async (tId: number = 0) => {
     setLoading(true);
     try {
-      const data = await apiRequest<{ playlists: PlaylistWithStatus[] }>(`/tracks/${track.id}/playlists`);
+      const data = await apiRequest<{ playlists: PlaylistWithStatus[] }>(`/tracks/${tId || 0}/playlists`);
       setPlaylists(data.playlists || []);
     } catch (e) {
       console.warn('[Load playlists error]:', e);
@@ -57,48 +63,86 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   };
 
   const handleToggle = async (playlist: PlaylistWithStatus) => {
-    if (!track || togglingId !== null) return;
+    if (togglingId !== null) return;
     setTogglingId(playlist.id);
 
-    const isCurrentlyAdded = playlist.has_track === 1;
+    // 1. If already downloaded (either as local track or just finished downloading)
+    if (activeTrack) {
+      const isCurrentlyAdded = playlist.has_track === 1;
 
-    // Optimistic UI update
-    setPlaylists((prev) =>
-      prev.map((p) =>
-        p.id === playlist.id
-          ? {
-              ...p,
-              has_track: isCurrentlyAdded ? 0 : 1,
-              track_count: Math.max(0, p.track_count + (isCurrentlyAdded ? -1 : 1)),
-            }
-          : p
-      )
-    );
+      // Optimistic UI update
+      setPlaylists((prev) =>
+        prev.map((p) =>
+          p.id === playlist.id
+            ? {
+                ...p,
+                has_track: isCurrentlyAdded ? 0 : 1,
+                track_count: Math.max(0, p.track_count + (isCurrentlyAdded ? -1 : 1)),
+              }
+            : p
+        )
+      );
 
-    try {
-      if (isCurrentlyAdded) {
-        // Remove from playlist
-        await apiRequest(`/playlists/${playlist.id}/tracks/${track.id}`, { method: 'DELETE' });
-      } else {
-        // Add to playlist
-        await apiRequest(`/playlists/${playlist.id}/tracks`, {
-          method: 'POST',
-          body: JSON.stringify({ trackId: track.id }),
-        });
+      try {
+        if (isCurrentlyAdded) {
+          // Remove from playlist
+          await apiRequest(`/playlists/${playlist.id}/tracks/${activeTrack.id}`, { method: 'DELETE' });
+        } else {
+          // Add to playlist
+          await apiRequest(`/playlists/${playlist.id}/tracks`, {
+            method: 'POST',
+            body: JSON.stringify({ trackId: activeTrack.id }),
+          });
+        }
+        onUpdated?.();
+      } catch (err: any) {
+        console.warn('[Toggle playlist error]:', err);
+        // Revert on error
+        await loadPlaylists(activeTrack.id);
+      } finally {
+        setTogglingId(null);
       }
-      onUpdated?.();
-    } catch (err: any) {
-      console.warn('[Toggle playlist error]:', err);
-      // Revert on error
-      await loadPlaylists();
-    } finally {
-      setTogglingId(null);
+      return;
+    }
+
+    // 2. If Spotify track not yet downloaded: automatically download and add to playlist!
+    if (spotifyTrack) {
+      try {
+        const res = await apiRequest<{ success: boolean; track: Track }>('/tracks/download-single', {
+          method: 'POST',
+          body: JSON.stringify({
+            track: spotifyTrack,
+            playlistId: playlist.id,
+          }),
+        });
+
+        if (res.success && res.track) {
+          setActiveTrack(res.track);
+          setPlaylists((prev) =>
+            prev.map((p) =>
+              p.id === playlist.id
+                ? {
+                    ...p,
+                    has_track: 1,
+                    track_count: p.track_count + 1,
+                  }
+                : p
+            )
+          );
+          onSpotifyTrackDownloaded?.(spotifyTrack, res.track);
+          onUpdated?.();
+        }
+      } catch (err: any) {
+        alert(err.message || 'Ошибка скачивания и добавления в плейлист');
+      } finally {
+        setTogglingId(null);
+      }
     }
   };
 
   const handleCreatePlaylist = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!track || !newPlaylistName.trim() || savingNew) return;
+    if (!newPlaylistName.trim() || savingNew) return;
     setSavingNew(true);
 
     try {
@@ -108,15 +152,34 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
       });
 
       if (res.id) {
-        // Add current track to newly created playlist
-        await apiRequest(`/playlists/${res.id}/tracks`, {
-          method: 'POST',
-          body: JSON.stringify({ trackId: track.id }),
-        });
-        setCreatingNew(false);
-        setNewPlaylistName('');
-        await loadPlaylists();
-        onUpdated?.();
+        if (activeTrack) {
+          // Add current track to newly created playlist
+          await apiRequest(`/playlists/${res.id}/tracks`, {
+            method: 'POST',
+            body: JSON.stringify({ trackId: activeTrack.id }),
+          });
+          setCreatingNew(false);
+          setNewPlaylistName('');
+          await loadPlaylists(activeTrack.id);
+          onUpdated?.();
+        } else if (spotifyTrack) {
+          // Download Spotify track directly and attach to the newly created playlist
+          const dlRes = await apiRequest<{ success: boolean; track: Track }>('/tracks/download-single', {
+            method: 'POST',
+            body: JSON.stringify({
+              track: spotifyTrack,
+              playlistId: res.id,
+            }),
+          });
+          if (dlRes.success && dlRes.track) {
+            setActiveTrack(dlRes.track);
+            onSpotifyTrackDownloaded?.(spotifyTrack, dlRes.track);
+          }
+          setCreatingNew(false);
+          setNewPlaylistName('');
+          await loadPlaylists(dlRes.track?.id || 0);
+          onUpdated?.();
+        }
       }
     } catch (err: any) {
       alert(err.message || 'Ошибка создания плейлиста');
@@ -125,7 +188,10 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
     }
   };
 
-  if (!isOpen || !track) return null;
+  if (!isOpen || (!track && !spotifyTrack)) return null;
+
+  const displayArtist = activeTrack?.artist || spotifyTrack?.artist || '';
+  const displayTitle = activeTrack?.title || spotifyTrack?.title || '';
 
   const filteredPlaylists = playlists.filter((p) =>
     p.name.toLowerCase().includes(search.toLowerCase().trim())
@@ -148,8 +214,13 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
           <div>
             <h3 className="font-bold text-base text-cat-text">Добавить в плейлист</h3>
             <p className="text-xs text-cat-subtext0 truncate max-w-[240px]">
-              {track.artist} — {track.title}
+              {displayArtist} — {displayTitle}
             </p>
+            {!activeTrack && spotifyTrack && (
+              <span className="text-[10px] text-cat-mauve block mt-0.5 font-medium">
+                ⚡ Скачается автоматически при выборе
+              </span>
+            )}
           </div>
           <button
             onClick={onClose}
@@ -256,7 +327,12 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
 
                         <div className="shrink-0 pl-2">
                           {togglingId === p.id ? (
-                            <Loader2 className="w-5 h-5 text-cat-mauve animate-spin" />
+                            <div className="flex items-center gap-1.5 text-cat-mauve">
+                              <Loader2 className="w-5 h-5 animate-spin" />
+                              {!activeTrack && spotifyTrack && (
+                                <span className="text-[10px] font-semibold hidden xs:inline">Качается...</span>
+                              )}
+                            </div>
                           ) : (
                             <CheckCircle2 className="w-5 h-5 text-cat-green fill-cat-green/20" />
                           )}
@@ -303,7 +379,12 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
 
                         <div className="shrink-0 pl-2">
                           {togglingId === p.id ? (
-                            <Loader2 className="w-5 h-5 text-cat-mauve animate-spin" />
+                            <div className="flex items-center gap-1.5 text-cat-mauve">
+                              <Loader2 className="w-5 h-5 animate-spin" />
+                              {!activeTrack && spotifyTrack && (
+                                <span className="text-[10px] font-semibold hidden xs:inline">Качается...</span>
+                              )}
+                            </div>
                           ) : (
                             <Circle className="w-5 h-5 text-cat-surface2 group-hover:text-cat-subtext0 transition-colors" />
                           )}
