@@ -491,10 +491,11 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
     return { localTracks: [], spotifyTracks: [] };
   }
 
-  // 1. Search Local Database (up to 5 tracks)
+  // 1. Search Local Database (up to 5 tracks, deduplicated by title & artist)
   const localTracks = db.prepare(`
     SELECT * FROM tracks
     WHERE LOWER(title) LIKE LOWER(?) OR LOWER(artist) LIKE LOWER(?) OR LOWER(album) LIKE LOWER(?)
+    GROUP BY LOWER(title), LOWER(artist)
     ORDER BY
       CASE WHEN LOWER(title) = LOWER(?) THEN 1
            WHEN LOWER(title) LIKE LOWER(?) THEN 2

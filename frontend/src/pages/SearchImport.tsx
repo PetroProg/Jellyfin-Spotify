@@ -160,8 +160,15 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
           )
         );
 
-        // Prepend to local results
-        setLocalResults((prev) => [res.track, ...prev.filter((t) => t.id !== res.track.id)]);
+        // Prepend to local results (deduplicating by id and title+artist)
+        setLocalResults((prev) => [
+          res.track,
+          ...prev.filter(
+            (t) =>
+              t.id !== res.track.id &&
+              !(t.title.toLowerCase() === res.track.title.toLowerCase() && t.artist.toLowerCase() === res.track.artist.toLowerCase())
+          )
+        ]);
 
         // Immediately start playing downloaded track
         playTrack(res.track, [res.track], 0);
@@ -186,7 +193,14 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
           : item
       )
     );
-    setLocalResults((prev) => [newTrack, ...prev.filter((t) => t.id !== newTrack.id)]);
+    setLocalResults((prev) => [
+      newTrack,
+      ...prev.filter(
+        (t) =>
+          t.id !== newTrack.id &&
+          !(t.title.toLowerCase() === newTrack.title.toLowerCase() && t.artist.toLowerCase() === newTrack.artist.toLowerCase())
+      )
+    ]);
   };
 
   const handleBlacklist = async (track: Track) => {

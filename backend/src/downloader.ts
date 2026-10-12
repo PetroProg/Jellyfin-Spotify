@@ -330,20 +330,30 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
         const durationSec = Math.round(track.duration_ms / 1000) || 180;
 
         try {
-          const info = db.prepare(`
-            INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run(
-            track.title,
-            track.artist,
-            track.album,
-            track.duration_ms,
-            finalFile,
-            track.cover_url || '',
-            track.id
-          );
+          const doubleCheck: any = db.prepare(`
+            SELECT * FROM tracks 
+            WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+               OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+            LIMIT 1
+          `).get(track.id, track.title, track.artist);
 
-          const trackId = info.lastInsertRowid;
+          let trackId = doubleCheck?.id;
+          if (!trackId) {
+            const info = db.prepare(`
+              INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              track.title,
+              track.artist,
+              track.album,
+              track.duration_ms,
+              finalFile,
+              track.cover_url || '',
+              track.id
+            );
+            trackId = info.lastInsertRowid;
+          }
+
           db.prepare(`
             INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
             VALUES (?, ?, ?)
@@ -379,7 +389,38 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
   });
 }
 
+const inFlightSingleDownloads = new Map<string, Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean }>>();
+
 export async function downloadSingleSpotifyTrackDirect(
+  track: SpotifyTrack,
+  userId?: number,
+  playlistId?: number
+): Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean }> {
+  const downloadKey = (track.id || `${track.artist}:::${track.title}`).toLowerCase();
+  if (inFlightSingleDownloads.has(downloadKey)) {
+    const result = await inFlightSingleDownloads.get(downloadKey)!;
+    if (result.success && result.track && playlistId) {
+      const inPl: any = db.prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').get(playlistId, result.track.id);
+      if (!inPl) {
+        const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
+        const nextPos = (maxPosRow?.maxPos !== null && maxPosRow?.maxPos !== undefined) ? maxPosRow.maxPos + 1 : 0;
+        db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)').run(playlistId, result.track.id, nextPos);
+      }
+      return { ...result, addedToPlaylist: true };
+    }
+    return result;
+  }
+
+  const promise = downloadSingleSpotifyTrackDirectInternal(track, userId, playlistId);
+  inFlightSingleDownloads.set(downloadKey, promise);
+  try {
+    return await promise;
+  } finally {
+    inFlightSingleDownloads.delete(downloadKey);
+  }
+}
+
+async function downloadSingleSpotifyTrackDirectInternal(
   track: SpotifyTrack,
   userId?: number,
   playlistId?: number
@@ -484,20 +525,32 @@ export async function downloadSingleSpotifyTrackDirect(
     }
 
     const finalFile = path.join(targetDir, `${safeTitle}.mp3`);
-    const info = db.prepare(`
-      INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      track.title,
-      track.artist,
-      track.album || '',
-      track.duration_ms || 180000,
-      finalFile,
-      track.cover_url || '',
-      track.id
-    );
 
-    const newTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
+    // Safety re-check before insert
+    const doubleCheck: any = db.prepare(`
+      SELECT * FROM tracks 
+      WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+         OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+      LIMIT 1
+    `).get(track.id, track.title, track.artist);
+
+    let newTrack: any = doubleCheck;
+    if (!newTrack) {
+      const info = db.prepare(`
+        INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        track.title,
+        track.artist,
+        track.album || '',
+        track.duration_ms || 180000,
+        finalFile,
+        track.cover_url || '',
+        track.id
+      );
+      newTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
+    }
+
     attachToPlaylist(newTrack);
     await refreshJellyfinLibrary();
     return { success: true, track: newTrack, addedToPlaylist: !!playlistId };

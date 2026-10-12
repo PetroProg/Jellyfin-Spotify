@@ -102,3 +102,42 @@ try {
   db.exec('ALTER TABLE users ADD COLUMN email TEXT;');
 } catch (_) {}
 
+// Automatic deduplication of tracks: merge any duplicate (title + artist) tracks in playlist_tracks and liked_tracks
+try {
+  const duplicates = db.prepare(`
+    SELECT LOWER(title) as l_title, LOWER(artist) as l_artist, MIN(id) as keep_id, GROUP_CONCAT(id) as all_ids
+    FROM tracks
+    GROUP BY LOWER(title), LOWER(artist)
+    HAVING COUNT(*) > 1
+  `).all() as any[];
+
+  for (const dup of duplicates) {
+    const keepId = dup.keep_id;
+    const allIds = String(dup.all_ids).split(',').map(Number);
+    const removeIds = allIds.filter((id: number) => id !== keepId);
+
+    for (const removeId of removeIds) {
+      db.prepare(`
+        UPDATE OR IGNORE playlist_tracks
+        SET track_id = ?
+        WHERE track_id = ?
+      `).run(keepId, removeId);
+
+      db.prepare('DELETE FROM playlist_tracks WHERE track_id = ?').run(removeId);
+
+      db.prepare(`
+        UPDATE OR IGNORE liked_tracks
+        SET track_id = ?
+        WHERE track_id = ?
+      `).run(keepId, removeId);
+
+      db.prepare('DELETE FROM liked_tracks WHERE track_id = ?').run(removeId);
+
+      db.prepare('DELETE FROM tracks WHERE id = ?').run(removeId);
+    }
+  }
+} catch (e: any) {
+  console.warn('[DB Deduplication routine]:', e.message);
+}
+
+
