@@ -67,13 +67,21 @@ export const FullPlayer: React.FC = () => {
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
+  const handleClose = () => {
+    if (window.history.state?.isFullPlayer) {
+      window.history.back();
+    } else {
+      setFullPlayerOpen(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-cat-base flex flex-col justify-between px-6 py-6 pb-[env(safe-area-inset-bottom)] select-none animate-in fade-in slide-in-from-bottom duration-300">
       {/* Top Bar with Chevron Down */}
       <div className="flex items-center justify-between pt-2">
         <button
-          onClick={() => setFullPlayerOpen(false)}
-          className="p-2 -ml-2 text-cat-subtext0 hover:text-cat-text active:scale-95 transition-all"
+          onClick={handleClose}
+          className="p-2 -ml-2 text-cat-subtext0 hover:text-cat-text active:scale-95 transition-all cursor-pointer"
         >
           <ChevronDown className="w-7 h-7" />
         </button>

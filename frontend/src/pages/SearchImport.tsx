@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Download, Loader2, Play, Music2, ExternalLink } from 'lucide-react';
+import { Search, Download, Loader2, Play, Music2, ExternalLink, ArrowLeft } from 'lucide-react';
 import { DownloadJob, Track } from '../types';
 import { apiRequest } from '../api/client';
 import { TrackRow } from '../components/TrackRow';
@@ -7,9 +7,10 @@ import { usePlayerStore } from '../store/playerStore';
 
 interface SearchImportProps {
   onOpenPlaylist: (id: number) => void;
+  onBack?: () => void;
 }
 
-export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist }) => {
+export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBack }) => {
   const [spotifyUrl, setSpotifyUrl] = useState('');
   const [isImporting, setIsImporting] = useState(false);
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
@@ -61,6 +62,17 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist }) =>
 
   return (
     <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar">
+      {onBack && (
+        <button
+          onClick={onBack}
+          className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-cat-surface0/80 hover:bg-cat-surface1 border border-cat-surface1/50 text-sm font-semibold text-cat-subtext0 hover:text-cat-text transition-all duration-200 mb-4 cursor-pointer active:scale-95 group shadow-sm w-fit"
+          title="Вернуться назад"
+        >
+          <ArrowLeft className="w-4 h-4 text-cat-mauve transition-transform group-hover:-translate-x-1" />
+          <span>Назад</span>
+        </button>
+      )}
+
       {/* Page Title */}
       <h1 className="text-2xl md:text-3xl font-extrabold text-cat-text mb-6">
         Поиск & Импорт Spotify

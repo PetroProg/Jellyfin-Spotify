@@ -1,14 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import { 
   User as UserIcon, Lock, Trash2, Ban, HardDrive, Key, 
-  LogOut, Check, AlertTriangle, Loader2, Sparkles 
+  LogOut, Check, AlertTriangle, Loader2, Sparkles, ArrowLeft 
 } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { apiRequest } from '../api/client';
 import { BlacklistItem } from '../types';
 import { getOfflineStorageUsage, clearAllOfflineCache } from '../utils/offline';
 
-export const Settings: React.FC = () => {
+interface SettingsProps {
+  onBack?: () => void;
+}
+
+export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const { user, updateDisplayName, logout } = useAuthStore();
 
   // Profile State
@@ -163,6 +167,17 @@ export const Settings: React.FC = () => {
   return (
     <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar">
       <div className="max-w-3xl mx-auto space-y-6">
+        {onBack && (
+          <button
+            onClick={onBack}
+            className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-cat-surface0/80 hover:bg-cat-surface1 border border-cat-surface1/50 text-sm font-semibold text-cat-subtext0 hover:text-cat-text transition-all duration-200 mb-2 cursor-pointer active:scale-95 group shadow-sm w-fit"
+            title="Вернуться назад"
+          >
+            <ArrowLeft className="w-4 h-4 text-cat-mauve transition-transform group-hover:-translate-x-1" />
+            <span>Назад</span>
+          </button>
+        )}
+
         <h1 className="text-2xl md:text-3xl font-extrabold text-cat-text">
           Настройки
         </h1>

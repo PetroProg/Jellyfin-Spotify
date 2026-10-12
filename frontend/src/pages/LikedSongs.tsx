@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Heart, Play, Shuffle, ChevronUp } from 'lucide-react';
+import { Heart, Play, Shuffle, ChevronUp, ArrowLeft } from 'lucide-react';
 import { Track } from '../types';
 import { apiRequest } from '../api/client';
 import { TrackRow } from '../components/TrackRow';
@@ -7,7 +7,11 @@ import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { usePlayerStore } from '../store/playerStore';
 
-export const LikedSongs: React.FC = () => {
+interface LikedSongsProps {
+  onBack?: () => void;
+}
+
+export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
@@ -19,11 +23,11 @@ export const LikedSongs: React.FC = () => {
     const el = containerRef.current;
     if (!el) return;
     const handleScroll = () => {
-      setShowScrollTop(el.scrollTop > 280);
+      setShowScrollTop(el.scrollTop > 200);
     };
     el.addEventListener('scroll', handleScroll, { passive: true });
     return () => el.removeEventListener('scroll', handleScroll);
-  }, []);
+  }, [loading]);
 
   const scrollToTop = () => {
     containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
@@ -59,7 +63,22 @@ export const LikedSongs: React.FC = () => {
   };
 
   return (
-    <div ref={containerRef} className="flex-1 overflow-y-auto px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar">
+    <div
+      ref={containerRef}
+      onScroll={(e) => setShowScrollTop(e.currentTarget.scrollTop > 200)}
+      className="flex-1 overflow-y-auto px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar"
+    >
+      {onBack && (
+        <button
+          onClick={onBack}
+          className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-cat-surface0/80 hover:bg-cat-surface1 border border-cat-surface1/50 text-sm font-semibold text-cat-subtext0 hover:text-cat-text transition-all duration-200 mb-4 cursor-pointer active:scale-95 group shadow-sm w-fit"
+          title="Вернуться назад"
+        >
+          <ArrowLeft className="w-4 h-4 text-cat-mauve transition-transform group-hover:-translate-x-1" />
+          <span>Назад</span>
+        </button>
+      )}
+
       {/* Header */}
       <div className="flex items-center gap-5 mb-8">
         <div className="w-28 h-28 md:w-36 md:h-36 rounded-3xl bg-gradient-to-br from-cat-mauve to-cat-pink flex items-center justify-center text-cat-base shadow-xl flex-shrink-0">
@@ -159,7 +178,8 @@ export const LikedSongs: React.FC = () => {
         <button
           onClick={scrollToTop}
           title="Наверх"
-          className="fixed bottom-24 right-5 md:right-8 z-40 p-3 rounded-full bg-cat-mauve text-cat-base shadow-2xl hover:scale-110 active:scale-95 transition-all duration-200 animate-in fade-in zoom-in-75 cursor-pointer"
+          aria-label="Прокрутить наверх"
+          className="fixed bottom-36 md:bottom-28 right-5 md:right-8 z-40 p-3.5 rounded-full bg-cat-mauve text-cat-base shadow-2xl hover:scale-110 active:scale-95 transition-all duration-200 cursor-pointer flex items-center justify-center border-2 border-cat-base animate-in fade-in zoom-in-75"
         >
           <ChevronUp className="w-5 h-5 stroke-[2.5]" />
         </button>

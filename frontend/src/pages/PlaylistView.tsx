@@ -32,11 +32,11 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
     const el = containerRef.current;
     if (!el) return;
     const handleScroll = () => {
-      setShowScrollTop(el.scrollTop > 280);
+      setShowScrollTop(el.scrollTop > 200);
     };
     el.addEventListener('scroll', handleScroll, { passive: true });
     return () => el.removeEventListener('scroll', handleScroll);
-  }, []);
+  }, [loading]);
 
   const scrollToTop = () => {
     containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
@@ -142,13 +142,19 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
   }
 
   return (
-    <div ref={containerRef} className="flex-1 overflow-y-auto px-4 md:px-8 py-4 pb-28 md:pb-24 select-none custom-scrollbar">
+    <div
+      ref={containerRef}
+      onScroll={(e) => setShowScrollTop(e.currentTarget.scrollTop > 200)}
+      className="flex-1 overflow-y-auto px-4 md:px-8 py-4 pb-28 md:pb-24 select-none custom-scrollbar"
+    >
       {onBack && (
         <button
           onClick={onBack}
-          className="md:hidden flex items-center gap-1.5 text-xs text-cat-subtext0 mb-3 hover:text-cat-text"
+          className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-cat-surface0/80 hover:bg-cat-surface1 border border-cat-surface1/50 text-sm font-semibold text-cat-subtext0 hover:text-cat-text transition-all duration-200 mb-4 cursor-pointer active:scale-95 group shadow-sm w-fit"
+          title="Вернуться назад"
         >
-          <ArrowLeft className="w-4 h-4" /> Назад
+          <ArrowLeft className="w-4 h-4 text-cat-mauve transition-transform group-hover:-translate-x-1" />
+          <span>Назад</span>
         </button>
       )}
 
@@ -327,7 +333,8 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
         <button
           onClick={scrollToTop}
           title="Наверх"
-          className="fixed bottom-24 right-5 md:right-8 z-40 p-3 rounded-full bg-cat-mauve text-cat-base shadow-2xl hover:scale-110 active:scale-95 transition-all duration-200 animate-in fade-in zoom-in-75 cursor-pointer"
+          aria-label="Прокрутить наверх"
+          className="fixed bottom-36 md:bottom-28 right-5 md:right-8 z-40 p-3.5 rounded-full bg-cat-mauve text-cat-base shadow-2xl hover:scale-110 active:scale-95 transition-all duration-200 cursor-pointer flex items-center justify-center border-2 border-cat-base animate-in fade-in zoom-in-75"
         >
           <ChevronUp className="w-5 h-5 stroke-[2.5]" />
         </button>

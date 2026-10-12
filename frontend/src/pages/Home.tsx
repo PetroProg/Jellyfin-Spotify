@@ -1,5 +1,5 @@
-import React from 'react';
-import { Play, Plus, Music2, Download, Heart } from 'lucide-react';
+import React, { useState, useRef } from 'react';
+import { Play, Plus, Music2, Download, Heart, ChevronUp } from 'lucide-react';
 import { Playlist, Track } from '../types';
 import { useAuthStore } from '../store/authStore';
 import { usePlayerStore } from '../store/playerStore';
@@ -21,9 +21,19 @@ export const Home: React.FC<HomeProps> = ({
 }) => {
   const { user } = useAuthStore();
   const { playTrack } = usePlayerStore();
+  const [showScrollTop, setShowScrollTop] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const scrollToTop = () => {
+    containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar">
+    <div
+      ref={containerRef}
+      onScroll={(e) => setShowScrollTop(e.currentTarget.scrollTop > 200)}
+      className="flex-1 overflow-y-auto px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar"
+    >
       {/* Header Greeting */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <div>
@@ -124,6 +134,18 @@ export const Home: React.FC<HomeProps> = ({
           </div>
         )}
       </div>
+
+      {/* Floating Scroll to Top Arrow */}
+      {showScrollTop && (
+        <button
+          onClick={scrollToTop}
+          title="Наверх"
+          aria-label="Прокрутить наверх"
+          className="fixed bottom-36 md:bottom-28 right-5 md:right-8 z-40 p-3.5 rounded-full bg-cat-mauve text-cat-base shadow-2xl hover:scale-110 active:scale-95 transition-all duration-200 cursor-pointer flex items-center justify-center border-2 border-cat-base animate-in fade-in zoom-in-75"
+        >
+          <ChevronUp className="w-5 h-5 stroke-[2.5]" />
+        </button>
+      )}
     </div>
   );
 };

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuthStore } from './store/authStore';
 import { apiRequest } from './api/client';
 import { Playlist } from './types';
@@ -31,9 +31,116 @@ export const App: React.FC = () => {
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [newPlaylistDesc, setNewPlaylistDesc] = useState('');
 
+  const isFullPlayerOpen = usePlayerStore((s) => s.isFullPlayerOpen);
+
+  const modalsRef = useRef({ showCreateModal, isQueueOpen });
+  useEffect(() => {
+    modalsRef.current = { showCreateModal, isQueueOpen };
+  }, [showCreateModal, isQueueOpen]);
+
   useEffect(() => {
     fetchMe();
+    if (!window.history.state) {
+      window.history.replaceState({ tab: 'home', playlistId: null, isFullPlayer: false }, '', window.location.pathname);
+    }
   }, []);
+
+  // Sync mobile fullPlayer opening with history
+  useEffect(() => {
+    if (isFullPlayerOpen) {
+      if (!window.history.state?.isFullPlayer) {
+        window.history.pushState(
+          { tab: currentTab, playlistId: selectedPlaylistId, isFullPlayer: true },
+          '',
+          window.location.pathname
+        );
+      }
+    }
+  }, [isFullPlayerOpen]);
+
+  // Intercept Android hardware/gesture Back button and browser navigation
+  useEffect(() => {
+    const handlePopState = (e: PopStateEvent) => {
+      const playerStore = usePlayerStore.getState();
+
+      if (playerStore.isFullPlayerOpen) {
+        playerStore.setFullPlayerOpen(false);
+        if (!e.state?.isFullPlayer) {
+          return;
+        }
+      }
+
+      if (modalsRef.current.showCreateModal) {
+        setShowCreateModal(false);
+        return;
+      }
+
+      if (modalsRef.current.isQueueOpen) {
+        setIsQueueOpen(false);
+        return;
+      }
+
+      const state = e.state;
+      if (state && typeof state.tab === 'string') {
+        setCurrentTab(state.tab);
+        setSelectedPlaylistId(state.playlistId ?? null);
+      } else {
+        setCurrentTab('home');
+        setSelectedPlaylistId(null);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const navigateTo = (tab: string, playlistId: number | null = null, push: boolean = true) => {
+    if (tab === currentTab && playlistId === selectedPlaylistId) return;
+
+    setCurrentTab(tab);
+    setSelectedPlaylistId(playlistId);
+
+    if (push) {
+      window.history.pushState(
+        { tab, playlistId, isFullPlayer: false },
+        '',
+        window.location.pathname
+      );
+    }
+  };
+
+  const handleSelectPlaylist = (id: number) => {
+    navigateTo('playlist', id, true);
+  };
+
+  const handleBack = () => {
+    const playerStore = usePlayerStore.getState();
+
+    if (playerStore.isFullPlayerOpen) {
+      if (window.history.state?.isFullPlayer) {
+        window.history.back();
+      } else {
+        playerStore.setFullPlayerOpen(false);
+      }
+      return;
+    }
+
+    if (showCreateModal) {
+      setShowCreateModal(false);
+      return;
+    }
+
+    if (isQueueOpen) {
+      setIsQueueOpen(false);
+      return;
+    }
+
+    if (window.history.state && (window.history.state.tab !== 'home' || window.history.state.playlistId !== null)) {
+      window.history.back();
+    } else if (currentTab !== 'home' || selectedPlaylistId !== null) {
+      navigateTo('home', null, true);
+    }
+  };
 
   const loadPlaylists = async () => {
     if (!isAuthenticated) return;
@@ -51,11 +158,6 @@ export const App: React.FC = () => {
       usePlayerStore.getState().loadLikes();
     }
   }, [isAuthenticated]);
-
-  const handleSelectPlaylist = (id: number) => {
-    setSelectedPlaylistId(id);
-    setCurrentTab('playlist');
-  };
 
   const handleCreatePlaylist = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -100,10 +202,7 @@ export const App: React.FC = () => {
         {/* Left Desktop Sidebar */}
         <Sidebar
           currentTab={currentTab}
-          setCurrentTab={(tab) => {
-            setCurrentTab(tab);
-            setSelectedPlaylistId(null);
-          }}
+          setCurrentTab={(tab) => navigateTo(tab, null, true)}
           playlists={playlists}
           selectedPlaylistId={selectedPlaylistId}
           onSelectPlaylist={handleSelectPlaylist}
@@ -117,24 +216,15 @@ export const App: React.FC = () => {
               playlists={playlists}
               onSelectPlaylist={handleSelectPlaylist}
               onCreatePlaylist={() => setShowCreateModal(true)}
-              onOpenImport={() => {
-                setCurrentTab('search');
-                setSelectedPlaylistId(null);
-              }}
-              onOpenLiked={() => {
-                setCurrentTab('liked');
-                setSelectedPlaylistId(null);
-              }}
+              onOpenImport={() => navigateTo('search', null, true)}
+              onOpenLiked={() => navigateTo('liked', null, true)}
             />
           )}
 
           {currentTab === 'playlist' && selectedPlaylistId && (
             <PlaylistView
               playlistId={selectedPlaylistId}
-              onBack={() => {
-                setCurrentTab('home');
-                setSelectedPlaylistId(null);
-              }}
+              onBack={handleBack}
             />
           )}
 
@@ -144,12 +234,13 @@ export const App: React.FC = () => {
                 handleSelectPlaylist(id);
                 loadPlaylists();
               }}
+              onBack={handleBack}
             />
           )}
 
-          {currentTab === 'liked' && <LikedSongs />}
+          {currentTab === 'liked' && <LikedSongs onBack={handleBack} />}
 
-          {currentTab === 'settings' && <Settings />}
+          {currentTab === 'settings' && <Settings onBack={handleBack} />}
         </main>
 
         {/* Right Desktop Queue & Recommendations Panel */}
@@ -165,7 +256,7 @@ export const App: React.FC = () => {
       {/* Mobile Bottom Navigation Bar */}
       <BottomNav
         currentTab={currentTab}
-        setCurrentTab={setCurrentTab}
+        setCurrentTab={(tab) => navigateTo(tab, null, true)}
         onClearSelectedPlaylist={() => setSelectedPlaylistId(null)}
       />
 
