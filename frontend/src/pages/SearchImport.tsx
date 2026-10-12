@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Download, Loader2, Play, Music2, ExternalLink, ArrowLeft } from 'lucide-react';
+import { Search, Download, Loader2, Play, Music2, ExternalLink, ArrowLeft, X, Trash2 } from 'lucide-react';
 import { DownloadJob, Track } from '../types';
 import { apiRequest } from '../api/client';
 import { TrackRow } from '../components/TrackRow';
@@ -26,6 +26,26 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
       setJobs(data.jobs || []);
     } catch (e) {
       console.warn(e);
+    }
+  };
+
+  const handleDeleteJob = async (jobId: string) => {
+    setJobs((prev) => prev.filter((j) => j.id !== jobId));
+    try {
+      await apiRequest(`/spotify/jobs/${jobId}`, { method: 'DELETE' });
+    } catch (e) {
+      console.warn(e);
+      loadJobs();
+    }
+  };
+
+  const handleClearCompleted = async () => {
+    setJobs((prev) => prev.filter((j) => j.status !== 'completed' && j.status !== 'failed'));
+    try {
+      await apiRequest('/spotify/jobs', { method: 'DELETE' });
+    } catch (e) {
+      console.warn(e);
+      loadJobs();
     }
   };
 
@@ -118,16 +138,28 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
       {/* Active & Recent Download Jobs */}
       {jobs.length > 0 && (
         <div className="mb-8">
-          <h3 className="text-sm font-bold uppercase tracking-wider text-cat-subtext0 mb-3">
-            Очередь скачивания на сервер
-          </h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-bold uppercase tracking-wider text-cat-subtext0">
+              Очередь скачивания на сервер
+            </h3>
+            {jobs.some((j) => j.status === 'completed' || j.status === 'failed') && (
+              <button
+                onClick={handleClearCompleted}
+                className="text-xs text-cat-subtext0 hover:text-cat-mauve transition-colors flex items-center gap-1.5 cursor-pointer py-1 px-2.5 rounded-lg hover:bg-cat-surface0 active:scale-95"
+                title="Очистить все завершенные задачи"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Очистить завершенные</span>
+              </button>
+            )}
+          </div>
           <div className="space-y-3">
             {jobs.map((job) => {
               const percent = job.total_tracks > 0 ? Math.round((job.downloaded_tracks / job.total_tracks) * 100) : 0;
               return (
                 <div
                   key={job.id}
-                  className="bg-cat-mantle p-4 rounded-2xl border border-cat-surface0/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
+                  className="bg-cat-mantle p-4 rounded-2xl border border-cat-surface0/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 group"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
@@ -159,15 +191,24 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                     </span>
                   </div>
 
-                  {job.playlist_id && (
+                  <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
+                    {job.playlist_id && (
+                      <button
+                        onClick={() => onOpenPlaylist(job.playlist_id)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cat-surface0 text-xs font-semibold text-cat-mauve hover:bg-cat-surface1 transition-colors"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        Слушать
+                      </button>
+                    )}
                     <button
-                      onClick={() => onOpenPlaylist(job.playlist_id)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cat-surface0 text-xs font-semibold text-cat-mauve hover:bg-cat-surface1 transition-colors flex-shrink-0"
+                      onClick={() => handleDeleteJob(job.id)}
+                      title="Убрать из списка"
+                      className="p-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-red transition-colors cursor-pointer active:scale-95"
                     >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      Слушать
+                      <X className="w-4 h-4" />
                     </button>
-                  )}
+                  </div>
                 </div>
               );
             })}

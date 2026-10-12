@@ -463,9 +463,19 @@ server.get('/api/spotify/jobs', { preHandler: [(server as any).authenticate] }, 
     SELECT * FROM download_jobs
     WHERE user_id = ?
     ORDER BY created_at DESC
-    LIMIT 5
+    LIMIT 10
   `).all(req.user.id);
   return { jobs };
+});
+
+server.delete('/api/spotify/jobs/:id', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+  db.prepare('DELETE FROM download_jobs WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  return { success: true };
+});
+
+server.delete('/api/spotify/jobs', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+  db.prepare("DELETE FROM download_jobs WHERE user_id = ? AND status IN ('completed', 'failed')").run(req.user.id);
+  return { success: true };
 });
 
 server.post('/api/playlists/:id/resume', { preHandler: [(server as any).authenticate] }, async (req: any) => {
