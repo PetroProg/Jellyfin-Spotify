@@ -175,7 +175,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
 
       {/* Live Download Banner */}
       {activeJob && (activeJob.status === 'downloading' || tracks.length < (activeJob.total_tracks || 0)) && (
-        <div className="mb-4 p-4 rounded-2xl bg-cat-mantle border border-cat-mauve/40 shadow-lg">
+        <div className="mb-4 p-4 rounded-2xl bg-cat-mantle border border-cat-mauve/40 shadow-lg overflow-hidden max-w-full box-border">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2.5 min-w-0">
               {activeJob.status === 'downloading' ? (

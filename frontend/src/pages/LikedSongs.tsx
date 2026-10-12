@@ -76,6 +76,9 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
     if (downloading) return;
 
     if (isDownloaded) {
+      const ok = window.confirm('Вы уверены, что хотите удалить все скачанные любимые треки из памяти устройства?');
+      if (!ok) return;
+
       try {
         await removeDownload(LIKED_PLAYLIST_ID, tracks);
       } catch (e: any) {
@@ -108,15 +111,15 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       )}
 
       {/* Header */}
-      <div className="flex items-center gap-5 mb-8">
+      <div className="flex flex-col sm:flex-row items-center sm:items-end gap-5 mb-8">
         <div className="w-28 h-28 md:w-36 md:h-36 rounded-3xl bg-gradient-to-br from-cat-mauve to-cat-pink flex items-center justify-center text-cat-base shadow-xl flex-shrink-0">
           <Heart className="w-14 h-14 fill-current" />
         </div>
-        <div>
+        <div className="flex-1 text-center sm:text-left min-w-0 w-full sm:w-auto">
           <span className="text-xs uppercase tracking-wider text-cat-subtext0 font-semibold">Плейлист</span>
-          <h1 className="text-2xl md:text-4xl font-extrabold text-cat-text mt-1">Любимые треки</h1>
+          <h1 className="text-2xl md:text-4xl font-extrabold text-cat-text mt-1 truncate">Любимые треки</h1>
           <p className="text-xs text-cat-subtext0 mt-2">{tracks.length} треков</p>
-          <div className="flex items-center gap-3 mt-4">
+          <div className="flex items-center justify-center sm:justify-start gap-3 mt-4 flex-wrap">
             <button
               onClick={() => tracks.length > 0 && playTrack(tracks[0], tracks, 0)}
               disabled={tracks.length === 0}
@@ -143,7 +146,7 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
               onClick={handleToggleDownload}
               disabled={tracks.length === 0 || downloading}
               title={isDownloaded ? 'Удалить из оффлайн' : 'Скачать все любимые треки оффлайн'}
-              className={`flex items-center gap-1.5 p-2.5 rounded-full active:scale-95 transition-all disabled:opacity-40 cursor-pointer ${
+              className={`flex items-center gap-1.5 p-2.5 rounded-full active:scale-95 transition-all disabled:opacity-40 cursor-pointer shrink-0 ${
                 isDownloaded
                   ? 'bg-cat-green/20 text-cat-green border border-cat-green/30'
                   : 'bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-text'

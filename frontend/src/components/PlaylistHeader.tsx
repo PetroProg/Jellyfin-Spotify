@@ -65,6 +65,9 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
     if (downloading) return;
 
     if (isDownloaded) {
+      const ok = window.confirm(`Вы уверены, что хотите удалить все скачанные треки плейлиста «${playlist.name}» из памяти устройства?`);
+      if (!ok) return;
+
       try {
         await removeDownload(playlist.id, tracks);
       } catch (e: any) {
@@ -141,7 +144,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
         </div>
 
         {/* Buttons Row */}
-        <div className="flex items-center justify-center md:justify-start gap-3 mt-4">
+        <div className="flex items-center justify-center md:justify-start gap-3 mt-4 flex-wrap">
           <button
             onClick={onPlayAll}
             disabled={tracks.length === 0}
@@ -155,7 +158,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
             onClick={onShuffleAll}
             disabled={tracks.length === 0}
             title="Перемешать"
-            className="p-3 rounded-full bg-cat-surface0 hover:bg-cat-surface1 text-cat-text active:scale-95 transition-all disabled:opacity-40"
+            className="p-3 rounded-full bg-cat-surface0 hover:bg-cat-surface1 text-cat-text active:scale-95 transition-all disabled:opacity-40 cursor-pointer"
           >
             <Shuffle className="w-5 h-5" />
           </button>
@@ -164,7 +167,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
             onClick={handleToggleDownload}
             disabled={tracks.length === 0 || downloading}
             title={isDownloaded ? 'Удалить из оффлайн' : 'Скачать весь плейлист оффлайн'}
-            className={`flex items-center gap-1.5 p-3 rounded-full active:scale-95 transition-all disabled:opacity-40 cursor-pointer ${
+            className={`flex items-center gap-1.5 p-3 rounded-full active:scale-95 transition-all disabled:opacity-40 cursor-pointer shrink-0 ${
               isDownloaded
                 ? 'bg-cat-green/20 text-cat-green border border-cat-green/30'
                 : 'bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-text'
