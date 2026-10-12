@@ -27,25 +27,66 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   const isLiked = likedTrackIds.includes(track.id);
 
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
+    const handleOutsideInteraction = (e: MouseEvent | TouchEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose();
       }
     };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+
+    const handleScrollOrMove = () => {
+      onClose();
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+
+    // Close on click or tap outside
+    document.addEventListener('mousedown', handleOutsideInteraction);
+    document.addEventListener('touchstart', handleOutsideInteraction, { passive: true });
+
+    // Close on any scroll anywhere in the window or scrollable containers
+    window.addEventListener('scroll', handleScrollOrMove, { capture: true, passive: true });
+    window.addEventListener('touchmove', handleScrollOrMove, { capture: true, passive: true });
+    window.addEventListener('wheel', handleScrollOrMove, { passive: true });
+    window.addEventListener('resize', handleScrollOrMove, { passive: true });
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideInteraction);
+      document.removeEventListener('touchstart', handleOutsideInteraction);
+      window.removeEventListener('scroll', handleScrollOrMove, { capture: true });
+      window.removeEventListener('touchmove', handleScrollOrMove, { capture: true });
+      window.removeEventListener('wheel', handleScrollOrMove);
+      window.removeEventListener('resize', handleScrollOrMove);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
   }, [onClose]);
 
   // Adjust position so it doesn't overflow screen
-  const safeX = Math.min(position.x, window.innerWidth - 220);
-  const safeY = Math.min(position.y, window.innerHeight - 180);
+  const safeX = Math.max(10, Math.min(position.x, window.innerWidth - 220));
+  const safeY = Math.max(10, Math.min(position.y, window.innerHeight - 260));
 
   return (
-    <div
-      ref={menuRef}
-      style={{ top: `${safeY}px`, left: `${safeX}px` }}
-      className="fixed z-50 w-52 bg-cat-mantle/95 backdrop-blur-md rounded-2xl p-1.5 shadow-2xl border border-cat-surface0/80 text-sm select-none animate-in fade-in zoom-in-95 duration-150"
-    >
+    <>
+      {/* Invisible backdrop to dismiss menu on tap anywhere outside */}
+      <div
+        className="fixed inset-0 z-40 bg-transparent"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
+        onTouchStart={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
+      />
+
+      <div
+        ref={menuRef}
+        style={{ top: `${safeY}px`, left: `${safeX}px` }}
+        className="fixed z-50 w-52 bg-cat-mantle/95 backdrop-blur-md rounded-2xl p-1.5 shadow-2xl border border-cat-surface0/80 text-sm select-none animate-in fade-in zoom-in-95 duration-150"
+      >
       <div className="px-3 py-1.5 border-b border-cat-surface0/40 mb-1">
         <p className="font-semibold text-cat-text truncate text-xs">{track.title}</p>
         <p className="text-cat-subtext0 truncate text-[11px]">{track.artist}</p>
@@ -110,5 +151,6 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         Никогда не включать
       </button>
     </div>
-  );
+  </>
+);
 };
