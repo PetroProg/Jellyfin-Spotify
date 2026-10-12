@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Play, Shuffle, Download, Check, Music2, Loader2, Camera } from 'lucide-react';
 import { Playlist, Track } from '../types';
-import { isPlaylistDownloaded, downloadPlaylistOffline, removePlaylistOffline } from '../utils/offline';
+import { useOfflineStore } from '../store/offlineStore';
 import { apiRequest } from '../api/client';
 
 interface PlaylistHeaderProps {
@@ -21,14 +21,14 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   onShuffleAll,
   onCoverChange,
 }) => {
-  const [downloaded, setDownloaded] = useState(false);
-  const [downloading, setDownloading] = useState(false);
-  const [progressText, setProgressText] = useState('');
-  const [uploadingCover, setUploadingCover] = useState(false);
+  const isDownloaded = useOfflineStore((s) => s.downloadedIds.includes(playlist.id));
+  const offlineProgress = useOfflineStore((s) => s.progress[playlist.id]);
+  const startDownload = useOfflineStore((s) => s.startDownload);
+  const removeDownload = useOfflineStore((s) => s.removeDownload);
 
-  useEffect(() => {
-    setDownloaded(isPlaylistDownloaded(playlist.id));
-  }, [playlist.id]);
+  const downloading = !!offlineProgress?.inProgress;
+  const progressText = offlineProgress ? `${offlineProgress.done}/${offlineProgress.total}` : '';
+  const [uploadingCover, setUploadingCover] = useState(false);
 
   const handleCoverFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -64,21 +64,17 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   const handleToggleDownload = async () => {
     if (downloading) return;
 
-    if (downloaded) {
-      await removePlaylistOffline(playlist.id, tracks);
-      setDownloaded(false);
-    } else {
-      setDownloading(true);
+    if (isDownloaded) {
       try {
-        await downloadPlaylistOffline(playlist.id, tracks, (done, total) => {
-          setProgressText(`${done}/${total}`);
-        });
-        setDownloaded(true);
+        await removeDownload(playlist.id, tracks);
+      } catch (e: any) {
+        alert(e.message || 'Ошибка удаления из оффлайн');
+      }
+    } else {
+      try {
+        await startDownload(playlist.id, tracks);
       } catch (e: any) {
         alert(e.message || 'Ошибка сохранения оффлайн');
-      } finally {
-        setDownloading(false);
-        setProgressText('');
       }
     }
   };
@@ -167,9 +163,9 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
           <button
             onClick={handleToggleDownload}
             disabled={tracks.length === 0 || downloading}
-            title={downloaded ? 'Удалить из оффлайн' : 'Скачать весь плейлист оффлайн'}
-            className={`flex items-center gap-1.5 p-3 rounded-full active:scale-95 transition-all disabled:opacity-40 ${
-              downloaded
+            title={isDownloaded ? 'Удалить из оффлайн' : 'Скачать весь плейлист оффлайн'}
+            className={`flex items-center gap-1.5 p-3 rounded-full active:scale-95 transition-all disabled:opacity-40 cursor-pointer ${
+              isDownloaded
                 ? 'bg-cat-green/20 text-cat-green border border-cat-green/30'
                 : 'bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-text'
             }`}
@@ -179,7 +175,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
                 <Loader2 className="w-5 h-5 animate-spin text-cat-mauve" />
                 <span className="text-xs font-mono">{progressText}</span>
               </>
-            ) : downloaded ? (
+            ) : isDownloaded ? (
               <Check className="w-5 h-5" />
             ) : (
               <Download className="w-5 h-5" />

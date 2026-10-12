@@ -57,8 +57,9 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
     }
   };
 
-  const loadData = async () => {
+  const loadData = async (silent = false) => {
     try {
+      if (!silent && !playlist) setLoading(true);
       const data = await apiRequest<{ playlist: Playlist; tracks: Track[]; activeJob?: any }>(`/playlists/${playlistId}`);
       setPlaylist(data.playlist);
       setTracks(data.tracks || []);
@@ -76,12 +77,12 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
 
   // Auto-refresh when downloads are in progress
   useEffect(() => {
-    if (!activeJob || activeJob.status !== 'downloading') return;
+    if (!activeJob || (activeJob.status !== 'downloading' && activeJob.status !== 'pending')) return;
     const interval = setInterval(() => {
-      loadData();
-    }, 3000);
+      loadData(true);
+    }, 2500);
     return () => clearInterval(interval);
-  }, [playlistId, activeJob?.status, activeJob?.downloaded_tracks]);
+  }, [playlistId, activeJob?.status, activeJob?.downloaded_tracks, activeJob?.current_track]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {

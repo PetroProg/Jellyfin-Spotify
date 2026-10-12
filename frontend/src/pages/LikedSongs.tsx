@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Heart, Play, Shuffle, ChevronUp, ArrowLeft, Download, Check, Loader2 } from 'lucide-react';
 import { Track } from '../types';
 import { apiRequest } from '../api/client';
-import { isPlaylistDownloaded, downloadPlaylistOffline, removePlaylistOffline } from '../utils/offline';
+import { useOfflineStore } from '../store/offlineStore';
 import { TrackRow } from '../components/TrackRow';
 import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
@@ -15,19 +15,19 @@ interface LikedSongsProps {
 export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
-  const [downloaded, setDownloaded] = useState(false);
-  const [downloading, setDownloading] = useState(false);
-  const [progressText, setProgressText] = useState('');
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const LIKED_PLAYLIST_ID = -1;
+  const isDownloaded = useOfflineStore((s) => s.downloadedIds.includes(LIKED_PLAYLIST_ID));
+  const offlineProgress = useOfflineStore((s) => s.progress[LIKED_PLAYLIST_ID]);
+  const startDownload = useOfflineStore((s) => s.startDownload);
+  const removeDownload = useOfflineStore((s) => s.removeDownload);
 
-  useEffect(() => {
-    setDownloaded(isPlaylistDownloaded(LIKED_PLAYLIST_ID));
-  }, []);
+  const downloading = !!offlineProgress?.inProgress;
+  const progressText = offlineProgress ? `${offlineProgress.done}/${offlineProgress.total}` : '';
 
   useEffect(() => {
     const el = containerRef.current;
@@ -75,21 +75,17 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
   const handleToggleDownload = async () => {
     if (downloading) return;
 
-    if (downloaded) {
-      await removePlaylistOffline(LIKED_PLAYLIST_ID, tracks);
-      setDownloaded(false);
-    } else {
-      setDownloading(true);
+    if (isDownloaded) {
       try {
-        await downloadPlaylistOffline(LIKED_PLAYLIST_ID, tracks, (done, total) => {
-          setProgressText(`${done}/${total}`);
-        });
-        setDownloaded(true);
+        await removeDownload(LIKED_PLAYLIST_ID, tracks);
+      } catch (e: any) {
+        alert(e.message || 'Ошибка удаления из оффлайн');
+      }
+    } else {
+      try {
+        await startDownload(LIKED_PLAYLIST_ID, tracks);
       } catch (e: any) {
         alert(e.message || 'Ошибка сохранения оффлайн');
-      } finally {
-        setDownloading(false);
-        setProgressText('');
       }
     }
   };
@@ -146,9 +142,9 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
             <button
               onClick={handleToggleDownload}
               disabled={tracks.length === 0 || downloading}
-              title={downloaded ? 'Удалить из оффлайн' : 'Скачать все любимые треки оффлайн'}
+              title={isDownloaded ? 'Удалить из оффлайн' : 'Скачать все любимые треки оффлайн'}
               className={`flex items-center gap-1.5 p-2.5 rounded-full active:scale-95 transition-all disabled:opacity-40 cursor-pointer ${
-                downloaded
+                isDownloaded
                   ? 'bg-cat-green/20 text-cat-green border border-cat-green/30'
                   : 'bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-text'
               }`}
@@ -158,7 +154,7 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
                   <Loader2 className="w-4 h-4 animate-spin text-cat-mauve" />
                   <span className="text-xs font-mono">{progressText}</span>
                 </>
-              ) : downloaded ? (
+              ) : isDownloaded ? (
                 <Check className="w-4 h-4" />
               ) : (
                 <Download className="w-4 h-4" />

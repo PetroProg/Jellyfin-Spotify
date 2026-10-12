@@ -245,7 +245,7 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
 
   const activeJob: any = db.prepare(`
     SELECT * FROM download_jobs
-    WHERE playlist_id = ? AND status = 'downloading'
+    WHERE playlist_id = ?
     ORDER BY created_at DESC LIMIT 1
   `).get(playlistId);
 

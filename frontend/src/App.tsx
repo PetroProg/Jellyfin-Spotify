@@ -8,6 +8,7 @@ import { MiniPlayer } from './components/MiniPlayer';
 import { FullPlayer } from './components/FullPlayer';
 import { DesktopPlayer } from './components/DesktopPlayer';
 import { QueuePanel } from './components/QueuePanel';
+import { GlobalDownloadBar } from './components/GlobalDownloadBar';
 import { Home } from './pages/Home';
 import { PlaylistView } from './pages/PlaylistView';
 import { SearchImport } from './pages/SearchImport';
@@ -16,6 +17,7 @@ import { Settings } from './pages/Settings';
 import { Login } from './pages/Login';
 import { Register } from './pages/Register';
 import { usePlayerStore } from './store/playerStore';
+import { useOfflineStore } from './store/offlineStore';
 
 export const App: React.FC = () => {
   const { isAuthenticated, isLoading, fetchMe } = useAuthStore();
@@ -40,6 +42,7 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     fetchMe();
+    useOfflineStore.getState().loadDownloaded();
     if (!window.history.state) {
       window.history.replaceState({ tab: 'home', playlistId: null, isFullPlayer: false }, '', window.location.pathname);
     }
@@ -246,6 +249,14 @@ export const App: React.FC = () => {
         {/* Right Desktop Queue & Recommendations Panel */}
         {isQueueOpen && <QueuePanel />}
       </div>
+
+      {/* Global Download Bar for Server & Offline Downloads */}
+      <GlobalDownloadBar
+        onOpenPlaylist={handleSelectPlaylist}
+        onOpenLiked={() => navigateTo('liked', null, true)}
+        currentPlaylistId={selectedPlaylistId}
+        currentTab={currentTab}
+      />
 
       {/* Desktop Bottom Player */}
       <DesktopPlayer onToggleQueue={() => setIsQueueOpen(!isQueueOpen)} />
