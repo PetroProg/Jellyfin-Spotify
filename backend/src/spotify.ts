@@ -246,3 +246,36 @@ export async function resolveSpotifyTrackCover(trackId: string): Promise<string 
   const details = await resolveSpotifyTrackDetails(trackId);
   return details.cover_url;
 }
+
+export async function searchSpotifyTracks(query: string, limit: number = 5): Promise<SpotifyTrack[]> {
+  const token = await getAccessToken();
+  if (!token) return [];
+
+  try {
+    const res = await fetch(`https://api.spotify.com/v1/search?type=track&limit=${limit}&q=${encodeURIComponent(query)}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) {
+      console.warn('[Spotify Search HTTP Error]', res.status, res.statusText);
+      return [];
+    }
+
+    const data: any = await res.json();
+    const tracks: SpotifyTrack[] = [];
+    for (const t of data.tracks?.items || []) {
+      if (!t) continue;
+      tracks.push({
+        id: t.id,
+        title: t.name,
+        artist: t.artists?.map((a: any) => a.name).join(', ') || 'Unknown Artist',
+        album: t.album?.name || '',
+        duration_ms: t.duration_ms || 180000,
+        cover_url: t.album?.images?.[0]?.url || ''
+      });
+    }
+    return tracks;
+  } catch (err: any) {
+    console.warn('[Spotify Search Error]', err.message);
+    return [];
+  }
+}

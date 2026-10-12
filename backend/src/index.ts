@@ -8,8 +8,8 @@ import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import { db } from './db';
 import { checkAndNotifyUserLimit } from './notify';
-import { fetchSpotifyPlaylist, getSpotifyCredentials, extractPlaylistId } from './spotify';
-import { enqueuePlaylistDownload, resumePendingDownloads, resumePlaylistDownload } from './downloader';
+import { fetchSpotifyPlaylist, getSpotifyCredentials, extractPlaylistId, searchSpotifyTracks } from './spotify';
+import { enqueuePlaylistDownload, resumePendingDownloads, resumePlaylistDownload, downloadSingleSpotifyTrackDirect } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
 
@@ -481,6 +481,66 @@ server.delete('/api/spotify/jobs', { preHandler: [(server as any).authenticate] 
 server.post('/api/playlists/:id/resume', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const playlistId = Number(req.params.id);
   const result = await resumePlaylistDownload(playlistId);
+  return result;
+});
+
+// ----------------- SEARCH (LOCAL MEDIATHEQUE & SPOTIFY) -----------------
+server.get('/api/search', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const query = (req.query.q || '').trim();
+  if (!query) {
+    return { localTracks: [], spotifyTracks: [] };
+  }
+
+  // 1. Search Local Database (up to 5 tracks)
+  const localTracks = db.prepare(`
+    SELECT * FROM tracks
+    WHERE LOWER(title) LIKE LOWER(?) OR LOWER(artist) LIKE LOWER(?) OR LOWER(album) LIKE LOWER(?)
+    ORDER BY
+      CASE WHEN LOWER(title) = LOWER(?) THEN 1
+           WHEN LOWER(title) LIKE LOWER(?) THEN 2
+           ELSE 3 END
+    LIMIT 5
+  `).all(`%${query}%`, `%${query}%`, `%${query}%`, query, `${query}%`);
+
+  // 2. Search Spotify API (up to 5 tracks)
+  let spotifyRaw: any[] = [];
+  try {
+    spotifyRaw = await searchSpotifyTracks(query, 5);
+  } catch (err: any) {
+    console.warn('[Search Spotify Error]', err.message);
+  }
+
+  // Map each Spotify track and check if already downloaded
+  const spotifyTracks = spotifyRaw.map((st) => {
+    const matchedLocal: any = db.prepare(`
+      SELECT * FROM tracks
+      WHERE (spotify_id IS NOT NULL AND spotify_id = ?)
+         OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+      LIMIT 1
+    `).get(st.id, st.title, st.artist);
+
+    return {
+      ...st,
+      is_downloaded: !!matchedLocal,
+      local_track_id: matchedLocal?.id || null,
+      local_track: matchedLocal || null
+    };
+  });
+
+  return { localTracks, spotifyTracks };
+});
+
+server.post('/api/tracks/download-single', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const body = req.body || {};
+  const { track } = body;
+  if (!track || !track.title || !track.artist) {
+    return reply.status(400).send({ error: 'Трек не указан или отсутствуют данные' });
+  }
+
+  const result = await downloadSingleSpotifyTrackDirect(track, req.user.id);
+  if (!result.success) {
+    return reply.status(500).send({ error: result.error || 'Ошибка скачивания трека' });
+  }
   return result;
 });
 

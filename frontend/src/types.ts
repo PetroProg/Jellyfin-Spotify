@@ -45,3 +45,15 @@ export interface BlacklistItem {
 }
 
 export type RepeatMode = 'off' | 'all' | 'one';
+
+export interface SpotifySearchResult {
+  id: string;
+  title: string;
+  artist: string;
+  album: string;
+  duration_ms: number;
+  cover_url: string;
+  is_downloaded: boolean;
+  local_track_id: number | null;
+  local_track?: Track | null;
+}

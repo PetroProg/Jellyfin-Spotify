@@ -378,3 +378,112 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
     });
   });
 }
+
+export async function downloadSingleSpotifyTrackDirect(
+  track: SpotifyTrack,
+  userId?: number
+): Promise<{ success: boolean; track?: any; error?: string }> {
+  try {
+    // 1. Resolve full details if needed
+    if (track.id) {
+      const details = await resolveSpotifyTrackDetails(track.id);
+      if (details.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
+        track.cover_url = details.cover_url;
+      }
+      if (details.album) {
+        track.album = details.album;
+      }
+      if (details.artist && (!track.artist || track.artist === 'Unknown Artist')) {
+        track.artist = details.artist;
+      }
+    }
+
+    // 2. Check if already exists in DB
+    const existing: any = db.prepare(`
+      SELECT * FROM tracks 
+      WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+         OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+      LIMIT 1
+    `).get(track.id, track.title, track.artist);
+
+    if (existing) {
+      return { success: true, track: existing };
+    }
+
+    // 3. Prepare target path
+    const artistFolder = sanitizeFilename(track.artist || 'Unknown Artist');
+    const targetDir = path.join(MUSIC_DIR, artistFolder);
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+
+    const safeTitle = sanitizeFilename(track.title);
+    const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
+    const searchQuery = `ytsearch1:${track.artist} - ${track.title} audio`;
+
+    // 4. Download with yt-dlp
+    const success = await new Promise<boolean>((resolve) => {
+      let isSettled = false;
+      const finish = (result: boolean) => {
+        if (!isSettled) {
+          isSettled = true;
+          clearTimeout(timer);
+          resolve(result);
+        }
+      };
+
+      const ytDlpProcess = spawn('nice', [
+        '-n', '19',
+        'ionice', '-c', '3',
+        'yt-dlp',
+        '--no-playlist',
+        '--extract-audio',
+        '--audio-format', 'mp3',
+        '--audio-quality', '0',
+        '--embed-thumbnail',
+        '--add-metadata',
+        '-o', outputTemplate,
+        searchQuery
+      ]);
+
+      const timer = setTimeout(() => {
+        try { ytDlpProcess.kill('SIGKILL'); } catch (_) {}
+        finish(false);
+      }, 90000);
+
+      ytDlpProcess.on('close', (code) => {
+        finish(code === 0);
+      });
+
+      ytDlpProcess.on('error', () => {
+        finish(false);
+      });
+    });
+
+    if (!success) {
+      return { success: false, error: 'Не удалось скачать аудиофайл с YouTube' };
+    }
+
+    const finalFile = path.join(targetDir, `${safeTitle}.mp3`);
+    const info = db.prepare(`
+      INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      track.title,
+      track.artist,
+      track.album || '',
+      track.duration_ms || 180000,
+      finalFile,
+      track.cover_url || '',
+      track.id
+    );
+
+    const newTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
+    await refreshJellyfinLibrary();
+    return { success: true, track: newTrack };
+  } catch (err: any) {
+    console.error('[Download Single Track Error]', err);
+    return { success: false, error: err.message };
+  }
+}
+
