@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Heart, Play, Shuffle, ChevronUp, ArrowLeft } from 'lucide-react';
+import { Heart, Play, Shuffle, ChevronUp, ArrowLeft, Download, Check, Loader2 } from 'lucide-react';
 import { Track } from '../types';
 import { apiRequest } from '../api/client';
+import { isPlaylistDownloaded, downloadPlaylistOffline, removePlaylistOffline } from '../utils/offline';
 import { TrackRow } from '../components/TrackRow';
 import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
@@ -14,10 +15,19 @@ interface LikedSongsProps {
 export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
+  const [downloaded, setDownloaded] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [progressText, setProgressText] = useState('');
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const LIKED_PLAYLIST_ID = -1;
+
+  useEffect(() => {
+    setDownloaded(isPlaylistDownloaded(LIKED_PLAYLIST_ID));
+  }, []);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -59,6 +69,28 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       setTracks(prev => prev.filter(t => t.id !== track.id));
     } catch (e) {
       console.warn(e);
+    }
+  };
+
+  const handleToggleDownload = async () => {
+    if (downloading) return;
+
+    if (downloaded) {
+      await removePlaylistOffline(LIKED_PLAYLIST_ID, tracks);
+      setDownloaded(false);
+    } else {
+      setDownloading(true);
+      try {
+        await downloadPlaylistOffline(LIKED_PLAYLIST_ID, tracks, (done, total) => {
+          setProgressText(`${done}/${total}`);
+        });
+        setDownloaded(true);
+      } catch (e: any) {
+        alert(e.message || 'Ошибка сохранения оффлайн');
+      } finally {
+        setDownloading(false);
+        setProgressText('');
+      }
     }
   };
 
@@ -105,9 +137,32 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
                 }
               }}
               disabled={tracks.length === 0}
-              className="p-2.5 rounded-full bg-cat-surface0 hover:bg-cat-surface1 text-cat-text active:scale-95 transition-all disabled:opacity-40"
+              title="Перемешать"
+              className="p-2.5 rounded-full bg-cat-surface0 hover:bg-cat-surface1 text-cat-text active:scale-95 transition-all disabled:opacity-40 cursor-pointer"
             >
               <Shuffle className="w-4 h-4" />
+            </button>
+
+            <button
+              onClick={handleToggleDownload}
+              disabled={tracks.length === 0 || downloading}
+              title={downloaded ? 'Удалить из оффлайн' : 'Скачать все любимые треки оффлайн'}
+              className={`flex items-center gap-1.5 p-2.5 rounded-full active:scale-95 transition-all disabled:opacity-40 cursor-pointer ${
+                downloaded
+                  ? 'bg-cat-green/20 text-cat-green border border-cat-green/30'
+                  : 'bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-text'
+              }`}
+            >
+              {downloading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin text-cat-mauve" />
+                  <span className="text-xs font-mono">{progressText}</span>
+                </>
+              ) : downloaded ? (
+                <Check className="w-4 h-4" />
+              ) : (
+                <Download className="w-4 h-4" />
+              )}
             </button>
           </div>
         </div>
