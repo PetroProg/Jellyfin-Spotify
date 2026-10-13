@@ -101,6 +101,21 @@ db.exec(`
 try {
   db.exec('ALTER TABLE users ADD COLUMN email TEXT;');
 } catch (_) {}
+try {
+  db.exec('ALTER TABLE users ADD COLUMN spotify_access_token TEXT;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE users ADD COLUMN spotify_refresh_token TEXT;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE users ADD COLUMN spotify_token_expires INTEGER;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE users ADD COLUMN spotify_user_id TEXT;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE users ADD COLUMN spotify_display_name TEXT;');
+} catch (_) {}
 
 // Automatic deduplication of tracks: merge any duplicate (title + artist) tracks in playlist_tracks and liked_tracks
 try {

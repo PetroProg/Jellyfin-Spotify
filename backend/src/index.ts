@@ -8,7 +8,18 @@ import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import { db } from './db';
 import { checkAndNotifyUserLimit } from './notify';
-import { fetchSpotifyPlaylist, getSpotifyCredentials, extractPlaylistId, searchSpotifyTracks } from './spotify';
+import { 
+  fetchSpotifyPlaylist, 
+  getSpotifyCredentials, 
+  extractPlaylistId, 
+  searchSpotifyTracks,
+  getSpotifyAuthUrl,
+  handleSpotifyOAuthCallback,
+  disconnectSpotify,
+  fetchSpotifyLikedSongs,
+  parseTrackListText,
+  getUserSpotifyToken
+} from './spotify';
 import { 
   enqueuePlaylistDownload, 
   resumePendingDownloads, 
@@ -358,7 +369,7 @@ server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] 
   if (!url) return reply.status(400).send({ error: 'Укажите ссылку на плейлист Spotify' });
 
   try {
-    const playlistData = await fetchSpotifyPlaylist(url);
+    const playlistData = await fetchSpotifyPlaylist(url, req.user.id);
     if (!playlistData.tracks || playlistData.tracks.length === 0) {
       return reply.status(400).send({ error: 'Не удалось извлечь треки из плейлиста' });
     }
@@ -497,6 +508,223 @@ server.post('/api/playlists/:id/resume', { preHandler: [(server as any).authenti
   const playlistId = Number(req.params.id);
   const result = await resumePlaylistDownload(playlistId);
   return result;
+});
+
+// ----------------- SPOTIFY OAUTH & ADVANCED IMPORT -----------------
+server.get('/api/spotify/auth-url', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  try {
+    const userRow: any = db.prepare('SELECT spotify_access_token, spotify_display_name, spotify_user_id FROM users WHERE id = ?').get(req.user.id);
+    const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
+    const proto = req.headers['x-forwarded-proto'] || (req.raw.socket.encrypted ? 'https' : 'http');
+    const redirectUri = `${proto}://${host}/api/spotify/callback`;
+    const origin = `${proto}://${host}`;
+
+    const creds = getSpotifyCredentials();
+    if (!creds.clientId || !creds.clientSecret) {
+      return {
+        configured: false,
+        isConnected: false,
+        error: 'Spotify Client ID / Secret не настроены в Настройках'
+      };
+    }
+
+    const authUrl = getSpotifyAuthUrl(req.user.id, redirectUri, origin);
+    return {
+      configured: true,
+      authUrl,
+      redirectUri,
+      isConnected: Boolean(userRow?.spotify_access_token),
+      spotifyDisplayName: userRow?.spotify_display_name || userRow?.spotify_user_id || ''
+    };
+  } catch (err: any) {
+    return reply.status(500).send({ error: err.message });
+  }
+});
+
+server.get('/api/spotify/callback', async (req: any, reply: any) => {
+  const code = req.query.code;
+  const state = req.query.state;
+  const error = req.query.error;
+
+  if (error || !code || !state) {
+    return reply.redirect('/settings?spotify_error=' + encodeURIComponent(error || 'Отсутствует код авторизации'));
+  }
+
+  try {
+    const result = await handleSpotifyOAuthCallback(code, state);
+    return reply.redirect('/settings?spotify_connected=1');
+  } catch (err: any) {
+    console.error('[Spotify OAuth Callback Error]', err.message);
+    return reply.redirect('/settings?spotify_error=' + encodeURIComponent(err.message));
+  }
+});
+
+server.post('/api/spotify/disconnect', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+  disconnectSpotify(req.user.id);
+  return { success: true };
+});
+
+server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  try {
+    const playlistData = await fetchSpotifyLikedSongs(req.user.id);
+    if (!playlistData.tracks || playlistData.tracks.length === 0) {
+      return reply.status(400).send({ error: 'В вашем разделе «Любимые треки» Spotify нет песен' });
+    }
+
+    // Find or create 'Любимые треки' playlist
+    let existingPlaylist: any = db.prepare(`
+      SELECT * FROM playlists WHERE user_id = ? AND (name = 'Любимые треки' OR LOWER(name) = 'liked songs')
+      LIMIT 1
+    `).get(req.user.id);
+
+    let playlistId: number;
+    if (!existingPlaylist) {
+      const pInfo = db.prepare(`
+        INSERT INTO playlists (user_id, name, description, cover_url)
+        VALUES (?, 'Любимые треки', 'Синхронизировано из Spotify Liked Songs', ?)
+      `).run(req.user.id, playlistData.cover_url || '');
+      playlistId = Number(pInfo.lastInsertRowid);
+    } else {
+      playlistId = existingPlaylist.id;
+    }
+
+    // Existing tracks
+    const existingRows: any[] = db.prepare(`
+      SELECT t.id, t.spotify_id, LOWER(t.title) as title, LOWER(t.artist) as artist
+      FROM playlist_tracks pt
+      JOIN tracks t ON pt.track_id = t.id
+      WHERE pt.playlist_id = ?
+    `).all(playlistId);
+
+    const missingTracks = playlistData.tracks.filter((st) => {
+      return !existingRows.some((er) => {
+        if (st.id && er.spotify_id && er.spotify_id === st.id) return true;
+        return er.title === st.title.toLowerCase().trim() && er.artist === st.artist.toLowerCase().trim();
+      });
+    });
+
+    if (missingTracks.length === 0) {
+      return {
+        success: true,
+        playlistId,
+        playlistName: 'Любимые треки',
+        alreadyUpToDate: true,
+        totalTracks: existingRows.length,
+        newTracks: 0,
+        message: 'Все любимые треки уже синхронизированы!'
+      };
+    }
+
+    const jobId = Math.random().toString(36).substring(2, 10);
+    const totalCount = existingRows.length + missingTracks.length;
+
+    db.prepare(`
+      INSERT INTO download_jobs (id, user_id, playlist_id, playlist_name, total_tracks, downloaded_tracks, status)
+      VALUES (?, ?, ?, 'Любимые треки', ?, ?, 'downloading')
+    `).run(jobId, req.user.id, playlistId, totalCount, existingRows.length);
+
+    enqueuePlaylistDownload(jobId, req.user.id, playlistId, missingTracks);
+
+    return {
+      success: true,
+      jobId,
+      playlistId,
+      playlistName: 'Любимые треки',
+      newTracks: missingTracks.length,
+      totalTracks: totalCount,
+      message: `Найдено новых любимых треков: ${missingTracks.length}. Загрузка начата.`
+    };
+  } catch (err: any) {
+    return reply.status(500).send({ error: err.message || 'Ошибка импорта любимых треков' });
+  }
+});
+
+server.post('/api/spotify/import-list', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const body = req.body || {};
+  const { text, playlistName, playlistId: requestedPlaylistId } = body;
+  if (!text || !text.trim()) {
+    return reply.status(400).send({ error: 'Вставьте список треков или ссылок' });
+  }
+
+  try {
+    const tracks = await parseTrackListText(text, req.user.id);
+    if (!tracks || tracks.length === 0) {
+      return reply.status(400).send({ error: 'Не удалось распознать ни одного трека из текста' });
+    }
+
+    let targetPlaylistId = requestedPlaylistId ? Number(requestedPlaylistId) : null;
+    let finalPlaylistName = playlistName ? playlistName.trim() : 'Импортированный список';
+
+    if (targetPlaylistId) {
+      const pl: any = db.prepare('SELECT id, name FROM playlists WHERE id = ? AND user_id = ?').get(targetPlaylistId, req.user.id);
+      if (pl) {
+        finalPlaylistName = pl.name;
+      } else {
+        targetPlaylistId = null;
+      }
+    }
+
+    if (!targetPlaylistId) {
+      const existing: any = db.prepare('SELECT id FROM playlists WHERE user_id = ? AND LOWER(name) = LOWER(?)').get(req.user.id, finalPlaylistName);
+      if (existing) {
+        targetPlaylistId = existing.id;
+      } else {
+        const pInfo = db.prepare(`
+          INSERT INTO playlists (user_id, name, description, cover_url)
+          VALUES (?, ?, 'Импортировано из списка треков', ?)
+        `).run(req.user.id, finalPlaylistName, tracks[0]?.cover_url || '');
+        targetPlaylistId = Number(pInfo.lastInsertRowid);
+      }
+    }
+
+    const existingRows: any[] = db.prepare(`
+      SELECT t.id, t.spotify_id, LOWER(t.title) as title, LOWER(t.artist) as artist
+      FROM playlist_tracks pt
+      JOIN tracks t ON pt.track_id = t.id
+      WHERE pt.playlist_id = ?
+    `).all(targetPlaylistId);
+
+    const missingTracks = tracks.filter((st) => {
+      return !existingRows.some((er) => {
+        if (st.id && er.spotify_id && er.spotify_id === st.id) return true;
+        return er.title === st.title.toLowerCase().trim() && er.artist === st.artist.toLowerCase().trim();
+      });
+    });
+
+    if (missingTracks.length === 0) {
+      return {
+        success: true,
+        playlistId: targetPlaylistId,
+        playlistName: finalPlaylistName,
+        alreadyUpToDate: true,
+        totalTracks: existingRows.length,
+        newTracks: 0,
+        message: 'Все треки из списка уже загружены в этот плейлист!'
+      };
+    }
+
+    const jobId = Math.random().toString(36).substring(2, 10);
+    const totalCount = existingRows.length + missingTracks.length;
+
+    db.prepare(`
+      INSERT INTO download_jobs (id, user_id, playlist_id, playlist_name, total_tracks, downloaded_tracks, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'downloading')
+    `).run(jobId, req.user.id, targetPlaylistId, finalPlaylistName, totalCount, existingRows.length);
+
+    enqueuePlaylistDownload(jobId, req.user.id, targetPlaylistId, missingTracks);
+
+    return {
+      success: true,
+      jobId,
+      playlistId: targetPlaylistId,
+      playlistName: finalPlaylistName,
+      newTracks: missingTracks.length,
+      totalTracks: totalCount,
+      message: `Распознано треков: ${missingTracks.length}. Загрузка начата.`
+    };
+  } catch (err: any) {
+    return reply.status(500).send({ error: err.message || 'Ошибка импорта списка треков' });
+  }
 });
 
 // ----------------- SEARCH (LOCAL MEDIATHEQUE & SPOTIFY) -----------------

@@ -13,7 +13,9 @@ import {
   MoreHorizontal,
   Sparkles,
   Library,
-  ListPlus
+  ListPlus,
+  Link2,
+  ClipboardList
 } from 'lucide-react';
 import { DownloadJob, Track, SpotifySearchResult } from '../types';
 import { apiRequest } from '../api/client';
@@ -32,6 +34,14 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
   const [isImporting, setIsImporting] = useState(false);
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
 
+  // List Import State
+  const [importMode, setImportMode] = useState<'url' | 'list'>('url');
+  const [listText, setListText] = useState('');
+  const [listPlaylistName, setListPlaylistName] = useState('');
+  const [listTargetPlaylistId, setListTargetPlaylistId] = useState<string>('new');
+  const [playlists, setPlaylists] = useState<Array<{ id: number; name: string }>>([]);
+  const [isImportingList, setIsImportingList] = useState(false);
+
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
   const [localResults, setLocalResults] = useState<Track[]>([]);
@@ -45,6 +55,13 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
   const [addToPlaylistSpotify, setAddToPlaylistSpotify] = useState<SpotifySearchResult | null>(null);
 
   const { playTrack, addToQueue } = usePlayerStore();
+
+  const loadPlaylists = async () => {
+    try {
+      const data = await apiRequest<{ playlists: Array<{ id: number; name: string }> }>('/playlists');
+      setPlaylists(data.playlists || []);
+    } catch (_) {}
+  };
 
   const loadJobs = async () => {
     try {
@@ -77,6 +94,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
 
   useEffect(() => {
     loadJobs();
+    loadPlaylists();
     const interval = setInterval(loadJobs, 2500);
     return () => clearInterval(interval);
   }, []);
@@ -116,7 +134,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
 
     setIsImporting(true);
     try {
-      const res = await apiRequest('/spotify/import', {
+      const res = await apiRequest<any>('/spotify/import', {
         method: 'POST',
         body: JSON.stringify({ url: spotifyUrl })
       });
@@ -132,6 +150,37 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
       alert(err.message || 'Ошибка импорта плейлиста');
     } finally {
       setIsImporting(false);
+    }
+  };
+
+  const handleImportList = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!listText.trim()) return;
+
+    setIsImportingList(true);
+    try {
+      const res = await apiRequest<any>('/spotify/import-list', {
+        method: 'POST',
+        body: JSON.stringify({
+          text: listText,
+          playlistName: listPlaylistName.trim() || undefined,
+          playlistId: listTargetPlaylistId !== 'new' ? Number(listTargetPlaylistId) : undefined
+        })
+      });
+      setListText('');
+      setListPlaylistName('');
+      loadJobs();
+      loadPlaylists();
+      if (res.message) {
+        alert(res.message);
+      }
+      if (res.playlistId) {
+        onOpenPlaylist(res.playlistId);
+      }
+    } catch (err: any) {
+      alert(err.message || 'Ошибка импорта списка треков');
+    } finally {
+      setIsImportingList(false);
     }
   };
 
@@ -431,41 +480,146 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
         </div>
       )}
 
-      {/* Spotify Import Playlist Box */}
+      {/* Spotify Import Box with Tabs */}
       <div className="bg-cat-mantle rounded-3xl p-5 md:p-6 border border-cat-surface0/60 shadow-xl mb-8">
-        <div className="flex items-center gap-3 mb-3">
-          <div className="w-10 h-10 rounded-xl bg-cat-green/20 text-cat-green flex items-center justify-center">
-            <Download className="w-5 h-5" />
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-cat-green/20 text-cat-green flex items-center justify-center">
+              <Download className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-cat-text">Импорт музыки из Spotify</h2>
+              <p className="text-xs text-cat-subtext0">По ссылке на плейлист или напрямую списком из буфера обмена</p>
+            </div>
           </div>
-          <div>
-            <h2 className="text-base font-bold text-cat-text">Импортировать плейлист из Spotify</h2>
-            <p className="text-xs text-cat-subtext0">Вставьте публичную ссылку на плейлист (open.spotify.com/playlist/...)</p>
+
+          {/* Toggle buttons between URL and List */}
+          <div className="flex items-center bg-cat-surface0/80 p-1 rounded-2xl border border-cat-surface1/40 self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={() => setImportMode('url')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                importMode === 'url'
+                  ? 'bg-cat-mauve text-cat-base shadow-sm'
+                  : 'text-cat-subtext0 hover:text-cat-text'
+              }`}
+            >
+              <Link2 className="w-3.5 h-3.5" />
+              <span>По ссылке</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setImportMode('list')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                importMode === 'list'
+                  ? 'bg-cat-mauve text-cat-base shadow-sm'
+                  : 'text-cat-subtext0 hover:text-cat-text'
+              }`}
+            >
+              <ClipboardList className="w-3.5 h-3.5" />
+              <span>Списком (Ctrl+V)</span>
+            </button>
           </div>
         </div>
 
-        <form onSubmit={handleImport} className="flex flex-col sm:flex-row gap-3 mt-4">
-          <input
-            type="text"
-            value={spotifyUrl}
-            onChange={(e) => setSpotifyUrl(e.target.value)}
-            placeholder="https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
-            className="flex-1 bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-3 text-sm text-cat-text placeholder-cat-subtext0/60 focus:outline-none focus:border-cat-mauve transition-colors"
-          />
-          <button
-            type="submit"
-            disabled={isImporting || !spotifyUrl.trim()}
-            className="flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-cat-mauve text-cat-base font-bold hover:opacity-95 active:scale-95 transition-all shadow-md disabled:opacity-40"
-          >
-            {isImporting ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Импорт...</span>
-              </>
-            ) : (
-              <span>Импортировать</span>
-            )}
-          </button>
-        </form>
+        {importMode === 'url' ? (
+          <form onSubmit={handleImport} className="flex flex-col sm:flex-row gap-3 mt-2">
+            <input
+              type="text"
+              value={spotifyUrl}
+              onChange={(e) => setSpotifyUrl(e.target.value)}
+              placeholder="https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
+              className="flex-1 bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-3 text-sm text-cat-text placeholder-cat-subtext0/60 focus:outline-none focus:border-cat-mauve transition-colors"
+            />
+            <button
+              type="submit"
+              disabled={isImporting || !spotifyUrl.trim()}
+              className="flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-cat-mauve text-cat-base font-bold hover:opacity-95 active:scale-95 transition-all shadow-md disabled:opacity-40 cursor-pointer"
+            >
+              {isImporting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Импорт...</span>
+                </>
+              ) : (
+                <span>Импортировать</span>
+              )}
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleImportList} className="space-y-4 mt-2">
+            <div className="p-3 rounded-2xl bg-cat-surface0/50 border border-cat-surface1/30 text-xs text-cat-subtext0 space-y-1">
+              <p className="font-semibold text-cat-text flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-cat-yellow" />
+                <span>Лайфхак для плейлистов любого размера (&gt;100 треков):</span>
+              </p>
+              <p>
+                В приложении Spotify на ПК откройте любой плейлист, нажмите <kbd className="px-1.5 py-0.5 rounded bg-cat-surface1 font-mono text-cat-text">Ctrl+A</kbd> (выделить всё), затем <kbd className="px-1.5 py-0.5 rounded bg-cat-surface1 font-mono text-cat-text">Ctrl+C</kbd> (скопировать) и вставьте сюда через <kbd className="px-1.5 py-0.5 rounded bg-cat-surface1 font-mono text-cat-text">Ctrl+V</kbd>. Приложение загрузит все треки без каких-либо лимитов!
+              </p>
+            </div>
+
+            <textarea
+              rows={5}
+              value={listText}
+              onChange={(e) => setListText(e.target.value)}
+              placeholder={"Вставьте ссылки на треки или названия (каждый с новой строки):\nhttps://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT\nThree Days Grace - Never Too Late\nLinkin Park - Numb"}
+              className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl p-4 text-xs font-mono text-cat-text placeholder-cat-subtext0/50 focus:outline-none focus:border-cat-mauve transition-colors custom-scrollbar"
+            />
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1.5">
+                  Куда сохранить треки
+                </label>
+                <select
+                  value={listTargetPlaylistId}
+                  onChange={(e) => setListTargetPlaylistId(e.target.value)}
+                  className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-3.5 py-2.5 text-xs text-cat-text focus:outline-none focus:border-cat-mauve cursor-pointer"
+                >
+                  <option value="new">+ Создать новый плейлист</option>
+                  {playlists.map((pl) => (
+                    <option key={pl.id} value={pl.id}>
+                      {pl.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {listTargetPlaylistId === 'new' && (
+                <div>
+                  <label className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1.5">
+                    Название нового плейлиста
+                  </label>
+                  <input
+                    type="text"
+                    value={listPlaylistName}
+                    onChange={(e) => setListPlaylistName(e.target.value)}
+                    placeholder="Например: Моя коллекция"
+                    className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-3.5 py-2.5 text-xs text-cat-text focus:outline-none focus:border-cat-mauve"
+                  />
+                </div>
+              )}
+            </div>
+
+            <button
+              type="submit"
+              disabled={isImportingList || !listText.trim()}
+              className="flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-cat-mauve text-cat-base text-xs font-bold hover:opacity-95 active:scale-95 transition-all shadow-md disabled:opacity-40 cursor-pointer"
+            >
+              {isImportingList ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Импорт списка...</span>
+                </>
+              ) : (
+                <>
+                  <Download className="w-4 h-4" />
+                  <span>Импортировать список треков</span>
+                </>
+              )}
+            </button>
+          </form>
+        )}
       </div>
 
       {/* Active & Recent Download Jobs */}

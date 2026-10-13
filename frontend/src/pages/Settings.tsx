@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { 
   User as UserIcon, Lock, Trash2, Ban, HardDrive, Key, 
-  LogOut, Check, AlertTriangle, Loader2, Sparkles, ArrowLeft 
+  LogOut, Check, AlertTriangle, Loader2, Sparkles, ArrowLeft,
+  Copy, ExternalLink, Heart, ShieldCheck, Unlink
 } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { apiRequest } from '../api/client';
@@ -45,6 +46,19 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const [hasSpotifyCreds, setHasSpotifyCreds] = useState(false);
   const [savingCreds, setSavingCreds] = useState(false);
 
+  // Spotify OAuth State
+  const [spotifyAuthInfo, setSpotifyAuthInfo] = useState<{
+    configured: boolean;
+    authUrl?: string;
+    redirectUri?: string;
+    isConnected: boolean;
+    spotifyDisplayName?: string;
+    error?: string;
+  } | null>(null);
+  const [syncingLiked, setSyncingLiked] = useState(false);
+  const [syncLikedMsg, setSyncLikedMsg] = useState<string | null>(null);
+  const [copiedRedirect, setCopiedRedirect] = useState(false);
+
   // Stats State
   const [stats, setStats] = useState({ users: 0, tracks: 0 });
 
@@ -69,6 +83,17 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
 
   useEffect(() => {
     loadSettingsData();
+
+    // Check for Spotify OAuth query params
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('spotify_connected')) {
+      alert('Аккаунт Spotify успешно подключен! Лимит на 100 треков снят.');
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+    if (params.get('spotify_error')) {
+      alert('Ошибка подключения Spotify: ' + params.get('spotify_error'));
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
   }, []);
 
   useEffect(() => {
@@ -111,6 +136,12 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       try {
         const upData = await apiRequest<any>('/tracks/upgrade-quality/status');
         if (upData) setUpgradeStatus(upData);
+      } catch (_) {}
+
+      // 5. Spotify OAuth Info
+      try {
+        const sAuth = await apiRequest<any>('/spotify/auth-url');
+        setSpotifyAuthInfo(sAuth);
       } catch (_) {}
     } catch (e) {
       console.warn(e);
@@ -224,6 +255,37 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       alert(e.message);
     } finally {
       setSavingCreds(false);
+    }
+  };
+
+  const handleDisconnectSpotify = async () => {
+    if (!window.confirm('Отключить аккаунт Spotify?')) return;
+    try {
+      await apiRequest('/spotify/disconnect', { method: 'POST' });
+      await loadSettingsData();
+    } catch (e: any) {
+      alert(e.message);
+    }
+  };
+
+  const handleSyncLiked = async () => {
+    setSyncingLiked(true);
+    setSyncLikedMsg(null);
+    try {
+      const res = await apiRequest<any>('/spotify/import-liked', { method: 'POST' });
+      setSyncLikedMsg(res.message || 'Синхронизация любимых треков начата!');
+    } catch (e: any) {
+      alert(e.message || 'Ошибка синхронизации любимых треков');
+    } finally {
+      setSyncingLiked(false);
+    }
+  };
+
+  const handleCopyRedirect = () => {
+    if (spotifyAuthInfo?.redirectUri) {
+      navigator.clipboard.writeText(spotifyAuthInfo.redirectUri);
+      setCopiedRedirect(true);
+      setTimeout(() => setCopiedRedirect(false), 2500);
     }
   };
 
@@ -531,6 +593,120 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           </form>
         </div>
 
+        {/* Section 5: Spotify Account Connection (OAuth) */}
+        <div className="bg-cat-mantle rounded-3xl p-5 md:p-6 border border-cat-surface0/60 shadow-lg">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-xl bg-cat-green/20 text-cat-green flex items-center justify-center">
+              <ShieldCheck className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-bold text-cat-text">Подключение аккаунта Spotify</h2>
+                {spotifyAuthInfo?.isConnected ? (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-cat-green/20 text-cat-green border border-cat-green/30">
+                    Аккаунт привязан
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-cat-yellow/20 text-cat-yellow border border-cat-yellow/30">
+                    Не подключен
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-cat-subtext0">
+                Снимает ограничение в 100 треков и позволяет импортировать «Любимые треки» (Liked Songs)
+              </p>
+            </div>
+          </div>
+
+          {spotifyAuthInfo?.isConnected ? (
+            <div className="space-y-4">
+              <div className="p-3.5 rounded-2xl bg-cat-surface0/60 border border-cat-surface1/30 flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-cat-subtext0">Подключенный профиль Spotify:</p>
+                  <p className="text-sm font-bold text-cat-text">{spotifyAuthInfo.spotifyDisplayName || 'Spotify User'}</p>
+                </div>
+                <button
+                  onClick={handleDisconnectSpotify}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cat-red/20 text-cat-red hover:bg-cat-red hover:text-cat-base text-xs font-semibold transition-all active:scale-95 cursor-pointer"
+                >
+                  <Unlink className="w-3.5 h-3.5" />
+                  <span>Отключить</span>
+                </button>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-cat-surface0/40 border border-cat-surface1/30 space-y-2.5">
+                <div className="flex items-center gap-2 text-xs font-semibold text-cat-text">
+                  <Heart className="w-4 h-4 text-cat-red fill-cat-red" />
+                  <span>Синхронизация раздела «Любимые треки»</span>
+                </div>
+                <p className="text-xs text-cat-subtext0">
+                  Автоматически скачает все треки с лайком из вашего аккаунта Spotify в медиатеку в качестве 320 kbps.
+                </p>
+                <button
+                  onClick={handleSyncLiked}
+                  disabled={syncingLiked}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-cat-mauve text-cat-base text-xs font-bold hover:opacity-95 active:scale-95 transition-all shadow-md disabled:opacity-50 cursor-pointer"
+                >
+                  {syncingLiked ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Синхронизация...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Heart className="w-4 h-4 fill-cat-base" />
+                      <span>Синхронизировать «Любимые треки»</span>
+                    </>
+                  )}
+                </button>
+                {syncLikedMsg && (
+                  <p className="text-xs text-cat-green font-medium pt-1">{syncLikedMsg}</p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <p className="text-xs text-cat-subtext0 leading-relaxed">
+                По умолчанию Spotify ограничивает гостевой просмотр плейлистов первыми 100 треками. Вход через ваш аккаунт Spotify даёт доступ к полной пагинации (до 10 000 треков) и личным коллекциям.
+              </p>
+
+              {spotifyAuthInfo?.authUrl ? (
+                <div className="space-y-3">
+                  <a
+                    href={spotifyAuthInfo.authUrl}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-[#1DB954] hover:bg-[#1ed760] text-black font-extrabold text-xs transition-all shadow-lg active:scale-95"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                    <span>Войти через Spotify (Снять лимиты)</span>
+                  </a>
+
+                  {spotifyAuthInfo.redirectUri && (
+                    <div className="p-3 rounded-2xl bg-cat-surface0/60 border border-cat-surface1/30 space-y-1.5 text-xs">
+                      <div className="flex items-center justify-between text-cat-subtext0">
+                        <span>Redirect URI для Spotify Developer Dashboard:</span>
+                        <button
+                          type="button"
+                          onClick={handleCopyRedirect}
+                          className="flex items-center gap-1 text-cat-mauve hover:underline font-semibold cursor-pointer"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>{copiedRedirect ? 'Скопировано!' : 'Копировать'}</span>
+                        </button>
+                      </div>
+                      <code className="block bg-cat-mantle px-2.5 py-1.5 rounded-xl font-mono text-[11px] text-cat-text break-all select-all">
+                        {spotifyAuthInfo.redirectUri}
+                      </code>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-cat-yellow">
+                  {spotifyAuthInfo?.error || 'Сначала сохраните Client ID и Client Secret выше для включения входа через Spotify'}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Section 6: Logout */}
         <div className="pt-2">
