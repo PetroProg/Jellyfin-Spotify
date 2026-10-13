@@ -7,6 +7,7 @@ import { TrackRow } from '../components/TrackRow';
 import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { usePlayerStore } from '../store/playerStore';
+import { toast, confirmDialog } from '../store/toastStore';
 
 interface LikedSongsProps {
   onBack?: () => void;
@@ -76,19 +77,27 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
     if (downloading) return;
 
     if (isDownloaded) {
-      const ok = window.confirm('Вы уверены, что хотите удалить все скачанные любимые треки из памяти устройства?');
+      const ok = await confirmDialog({
+        title: 'Удалить любимые треки?',
+        message: 'Вы уверены, что хотите удалить все скачанные любимые треки из памяти устройства?',
+        confirmText: 'Удалить',
+        cancelText: 'Отмена',
+        isDestructive: true
+      });
       if (!ok) return;
 
       try {
         await removeDownload(LIKED_PLAYLIST_ID, tracks);
+        toast.info('Скачанные любимые треки удалены из памяти');
       } catch (e: any) {
-        alert(e.message || 'Ошибка удаления из оффлайн');
+        toast.error(e.message || 'Ошибка удаления из оффлайн');
       }
     } else {
       try {
         await startDownload(LIKED_PLAYLIST_ID, tracks);
+        toast.success('Скачивание любимых треков начато');
       } catch (e: any) {
-        alert(e.message || 'Ошибка сохранения оффлайн');
+        toast.error(e.message || 'Ошибка сохранения оффлайн');
       }
     }
   };

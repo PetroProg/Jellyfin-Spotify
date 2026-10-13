@@ -3,6 +3,7 @@ import { Play, Shuffle, Download, Check, Music2, Loader2, Camera } from 'lucide-
 import { Playlist, Track } from '../types';
 import { useOfflineStore } from '../store/offlineStore';
 import { apiRequest } from '../api/client';
+import { toast, confirmDialog } from '../store/toastStore';
 
 interface PlaylistHeaderProps {
   playlist: Playlist;
@@ -35,7 +36,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
     if (!file) return;
 
     if (!file.type.startsWith('image/')) {
-      alert('Пожалуйста, выберите файл изображения (JPG, PNG, WebP)');
+      toast.warning('Пожалуйста, выберите файл изображения (JPG, PNG, WebP)');
       return;
     }
 
@@ -51,9 +52,10 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
         if (res.cover_url) {
           playlist.cover_url = res.cover_url;
           onCoverChange?.(res.cover_url);
+          toast.success('Обложка плейлиста обновлена!');
         }
       } catch (err: any) {
-        alert(err.message || 'Ошибка загрузки обложки');
+        toast.error(err.message || 'Ошибка загрузки обложки');
       } finally {
         setUploadingCover(false);
       }
@@ -65,19 +67,27 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
     if (downloading) return;
 
     if (isDownloaded) {
-      const ok = window.confirm(`Вы уверены, что хотите удалить все скачанные треки плейлиста «${playlist.name}» из памяти устройства?`);
+      const ok = await confirmDialog({
+        title: 'Удалить оффлайн-треки?',
+        message: `Вы уверены, что хотите удалить все скачанные треки плейлиста «${playlist.name}» из памяти устройства?`,
+        confirmText: 'Удалить',
+        cancelText: 'Отмена',
+        isDestructive: true
+      });
       if (!ok) return;
 
       try {
         await removeDownload(playlist.id, tracks);
+        toast.info(`Скачанные треки плейлиста «${playlist.name}» удалены из памяти`);
       } catch (e: any) {
-        alert(e.message || 'Ошибка удаления из оффлайн');
+        toast.error(e.message || 'Ошибка удаления из оффлайн');
       }
     } else {
       try {
         await startDownload(playlist.id, tracks);
+        toast.success(`Скачивание треков плейлиста «${playlist.name}» начато`);
       } catch (e: any) {
-        alert(e.message || 'Ошибка сохранения оффлайн');
+        toast.error(e.message || 'Ошибка сохранения оффлайн');
       }
     }
   };

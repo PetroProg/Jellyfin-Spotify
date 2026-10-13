@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Search, Plus, CheckCircle2, Circle, Loader2, Music2, X } from 'lucide-react';
 import { Track, SpotifySearchResult } from '../types';
 import { apiRequest } from '../api/client';
+import { toast } from '../store/toastStore';
 
 interface PlaylistWithStatus {
   id: number;
@@ -131,9 +132,10 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
           );
           onSpotifyTrackDownloaded?.(spotifyTrack, res.track);
           onUpdated?.();
+          toast.success(`Трек добавлен в «${playlist.name}»`);
         }
       } catch (err: any) {
-        alert(err.message || 'Ошибка скачивания и добавления в плейлист');
+        toast.error(err.message || 'Ошибка скачивания и добавления в плейлист');
       } finally {
         setTogglingId(null);
       }
@@ -182,7 +184,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         }
       }
     } catch (err: any) {
-      alert(err.message || 'Ошибка создания плейлиста');
+      toast.error(err.message || 'Ошибка создания плейлиста');
     } finally {
       setSavingNew(false);
     }

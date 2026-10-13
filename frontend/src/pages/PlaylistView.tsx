@@ -7,6 +7,7 @@ import { TrackRow } from '../components/TrackRow';
 import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { usePlayerStore } from '../store/playerStore';
+import { toast } from '../store/toastStore';
 
 interface PlaylistViewProps {
   playlistId: number;
@@ -49,9 +50,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
     setResuming(true);
     try {
       await apiRequest(`/playlists/${playlistId}/resume`, { method: 'POST' });
+      toast.info('Возобновление загрузки начато');
       await loadData();
     } catch (err: any) {
-      alert(err.message || 'Ошибка возобновления загрузки');
+      toast.error(err.message || 'Ошибка возобновления загрузки');
     } finally {
       setResuming(false);
     }
@@ -121,8 +123,9 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
     try {
       await apiRequest(`/playlists/${playlistId}/tracks/${track.id}`, { method: 'DELETE' });
       setTracks(prev => prev.filter(t => t.id !== track.id));
+      toast.success('Трек удален из плейлиста');
     } catch (e: any) {
-      alert(e.message || 'Ошибка удаления трека из плейлиста');
+      toast.error(e.message || 'Ошибка удаления трека из плейлиста');
     }
   };
 

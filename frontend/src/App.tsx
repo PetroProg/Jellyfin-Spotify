@@ -18,6 +18,9 @@ import { Login } from './pages/Login';
 import { Register } from './pages/Register';
 import { usePlayerStore } from './store/playerStore';
 import { useOfflineStore } from './store/offlineStore';
+import { ToastContainer } from './components/ToastContainer';
+import { ConfirmModal } from './components/ConfirmModal';
+import { toast } from './store/toastStore';
 
 export const App: React.FC = () => {
   const { isAuthenticated, isLoading, fetchMe } = useAuthStore();
@@ -41,6 +44,11 @@ export const App: React.FC = () => {
   }, [showCreateModal, isQueueOpen]);
 
   useEffect(() => {
+    // Gracefully override native window.alert with custom Catppuccin toast
+    window.alert = (msg?: any) => {
+      toast.info(String(msg ?? ''));
+    };
+
     fetchMe();
     useOfflineStore.getState().loadDownloaded();
     if (!window.history.state) {
@@ -179,7 +187,7 @@ export const App: React.FC = () => {
         handleSelectPlaylist(res.id);
       }
     } catch (e: any) {
-      alert(e.message || 'Ошибка создания плейлиста');
+      toast.error(e.message || 'Ошибка создания плейлиста');
     }
   };
 
@@ -327,6 +335,12 @@ export const App: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Toast Notifications */}
+      <ToastContainer />
+
+      {/* Modern Confirmation Modal */}
+      <ConfirmModal />
     </div>
   );
 };

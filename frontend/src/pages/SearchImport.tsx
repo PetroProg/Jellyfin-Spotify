@@ -23,6 +23,7 @@ import { TrackRow } from '../components/TrackRow';
 import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { usePlayerStore } from '../store/playerStore';
+import { toast } from '../store/toastStore';
 
 interface SearchImportProps {
   onOpenPlaylist: (id: number) => void;
@@ -141,13 +142,13 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
       setSpotifyUrl('');
       loadJobs();
       if (res.message) {
-        alert(res.message);
+        toast.success(res.message, 'Импорт из Spotify');
       }
       if (res.playlistId) {
         onOpenPlaylist(res.playlistId);
       }
     } catch (err: any) {
-      alert(err.message || 'Ошибка импорта плейлиста');
+      toast.error(err.message || 'Ошибка импорта плейлиста');
     } finally {
       setIsImporting(false);
     }
@@ -172,13 +173,13 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
       loadJobs();
       loadPlaylists();
       if (res.message) {
-        alert(res.message);
+        toast.success(res.message, 'Импорт треков');
       }
       if (res.playlistId) {
         onOpenPlaylist(res.playlistId);
       }
     } catch (err: any) {
-      alert(err.message || 'Ошибка импорта списка треков');
+      toast.error(err.message || 'Ошибка импорта списка треков');
     } finally {
       setIsImportingList(false);
     }
@@ -223,7 +224,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
         playTrack(res.track, [res.track], 0);
       }
     } catch (err: any) {
-      alert(err.message || 'Ошибка скачивания трека');
+      toast.error(err.message || 'Ошибка скачивания трека');
     } finally {
       setDownloadingTrackId(null);
     }

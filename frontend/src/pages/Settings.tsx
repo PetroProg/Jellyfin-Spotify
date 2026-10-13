@@ -8,6 +8,7 @@ import { useAuthStore } from '../store/authStore';
 import { apiRequest } from '../api/client';
 import { BlacklistItem } from '../types';
 import { getOfflineStorageUsage, clearAllOfflineCache } from '../utils/offline';
+import { toast, confirmDialog } from '../store/toastStore';
 
 interface SettingsProps {
   onBack?: () => void;
@@ -87,11 +88,11 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     // Check for Spotify OAuth query params
     const params = new URLSearchParams(window.location.search);
     if (params.get('spotify_connected')) {
-      alert('Аккаунт Spotify успешно подключен! Лимит на 100 треков снят.');
+      toast.success('Аккаунт Spotify успешно подключен! Лимит на 100 треков снят.', 'Spotify подключен');
       window.history.replaceState({}, document.title, window.location.pathname);
     }
     if (params.get('spotify_error')) {
-      alert('Ошибка подключения Spotify: ' + params.get('spotify_error'));
+      toast.error('Ошибка подключения Spotify: ' + params.get('spotify_error'), 'Ошибка Spotify');
       window.history.replaceState({}, document.title, window.location.pathname);
     }
   }, []);
@@ -149,18 +150,24 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   };
 
   const handleStartUpgrade = async () => {
-    if (!window.confirm('Перезагрузить все песни медиатеки в максимальном качестве 320 kbps со студийными источниками? Процесс выполняется в фоне без нагрузки на процессор.')) {
-      return;
-    }
+    const ok = await confirmDialog({
+      title: 'Обновить качество медиатеки',
+      message: 'Перезагрузить все песни медиатеки в максимальном качестве 320 kbps со студийными источниками? Процесс выполняется в фоне без нагрузки на процессор.',
+      confirmText: 'Запустить обновление',
+      cancelText: 'Отмена'
+    });
+    if (!ok) return;
+
     setStartingUpgrade(true);
     setUpgradeMsg(null);
     try {
       const res = await apiRequest<any>('/tracks/upgrade-quality', { method: 'POST' });
       setUpgradeMsg(res.message || 'Обновление запущено!');
+      toast.success(res.message || 'Обновление качества запущено!');
       const upData = await apiRequest<any>('/tracks/upgrade-quality/status');
       if (upData) setUpgradeStatus(upData);
     } catch (e: any) {
-      alert(e.message || 'Ошибка запуска обновления качества');
+      toast.error(e.message || 'Ошибка запуска обновления качества');
     } finally {
       setStartingUpgrade(false);
     }
@@ -178,9 +185,10 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       });
       updateDisplayName(displayName);
       setNameSuccess(true);
+      toast.success('Имя профиля успешно сохранено');
       setTimeout(() => setNameSuccess(false), 3000);
     } catch (e: any) {
-      alert(e.message || 'Ошибка обновления имени');
+      toast.error(e.message || 'Ошибка обновления имени');
     } finally {
       setSavingName(false);
     }
@@ -217,7 +225,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       logout();
       window.location.href = '/login';
     } catch (e: any) {
-      alert(e.message || 'Ошибка удаления аккаунта');
+      toast.error(e.message || 'Ошибка удаления аккаунта');
       setDeleting(false);
     }
   };
@@ -226,8 +234,9 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     try {
       await apiRequest(`/blacklist/${id}`, { method: 'DELETE' });
       setBlacklist(prev => prev.filter(b => b.id !== id));
+      toast.success('Трек удален из черного списка');
     } catch (e: any) {
-      alert(e.message);
+      toast.error(e.message);
     }
   };
 
@@ -237,6 +246,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     const size = await getOfflineStorageUsage();
     setCacheSize(size);
     setClearingCache(false);
+    toast.success('Кэш приложения успешно очищен');
   };
 
   const handleSaveSpotifyKeys = async (e: React.FormEvent) => {
@@ -250,21 +260,30 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       setHasSpotifyCreds(true);
       setClientId('');
       setClientSecret('');
-      alert('Ключи Spotify успешно сохранены!');
+      toast.success('Ключи Spotify успешно сохранены!');
     } catch (e: any) {
-      alert(e.message);
+      toast.error(e.message);
     } finally {
       setSavingCreds(false);
     }
   };
 
   const handleDisconnectSpotify = async () => {
-    if (!window.confirm('Отключить аккаунт Spotify?')) return;
+    const ok = await confirmDialog({
+      title: 'Отключение Spotify',
+      message: 'Отключить связанный аккаунт Spotify? Доступ к вашим приватным плейлистам и синхронизации лайков будет приостановлен.',
+      confirmText: 'Отключить',
+      cancelText: 'Отмена',
+      isDestructive: true
+    });
+    if (!ok) return;
+
     try {
       await apiRequest('/spotify/disconnect', { method: 'POST' });
       await loadSettingsData();
+      toast.info('Аккаунт Spotify отключен');
     } catch (e: any) {
-      alert(e.message);
+      toast.error(e.message);
     }
   };
 
@@ -274,8 +293,9 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     try {
       const res = await apiRequest<any>('/spotify/import-liked', { method: 'POST' });
       setSyncLikedMsg(res.message || 'Синхронизация любимых треков начата!');
+      toast.success(res.message || 'Синхронизация любимых треков начата!');
     } catch (e: any) {
-      alert(e.message || 'Ошибка синхронизации любимых треков');
+      toast.error(e.message || 'Ошибка синхронизации любимых треков');
     } finally {
       setSyncingLiked(false);
     }
