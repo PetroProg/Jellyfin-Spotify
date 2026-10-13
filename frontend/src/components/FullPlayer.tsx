@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { 
   ChevronDown, Heart, Shuffle, SkipBack, Play, Pause, 
-  SkipForward, Repeat, Repeat1, Music2, Sparkles, Volume2, VolumeX, FolderPlus 
+  SkipForward, Repeat, Repeat1, Music2, Sparkles, Volume2, VolumeX, FolderPlus,
+  SlidersHorizontal 
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { apiRequest } from '../api/client';
 import { AddToPlaylistModal } from './AddToPlaylistModal';
+import { EqualizerModal } from './EqualizerModal';
 
 export const FullPlayer: React.FC = () => {
   const {
@@ -30,6 +32,7 @@ export const FullPlayer: React.FC = () => {
     likedTrackIds,
     toggleLikeTrack,
     loadLikes,
+    setEqualizerOpen,
   } = usePlayerStore();
 
   const [prevVolume, setPrevVolume] = useState(1);
@@ -93,15 +96,24 @@ export const FullPlayer: React.FC = () => {
             {currentTrack.album || 'Из медиатеки'}
           </span>
         </div>
-        <button
-          onClick={toggleSmartShuffle}
-          title="Smart Shuffle (Умные рекомендации)"
-          className={`p-2 -mr-2 rounded-xl transition-all ${
-            smartShuffle ? 'text-cat-mauve' : 'text-cat-subtext0/50'
-          }`}
-        >
-          <Sparkles className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-1 -mr-2">
+          <button
+            onClick={() => setEqualizerOpen(true)}
+            title="Студийный звук & Эквалайзер"
+            className="p-2 text-cat-subtext0 hover:text-cat-mauve active:scale-95 transition-all cursor-pointer"
+          >
+            <SlidersHorizontal className="w-5 h-5" />
+          </button>
+          <button
+            onClick={toggleSmartShuffle}
+            title="Smart Shuffle (Умные рекомендации)"
+            className={`p-2 rounded-xl transition-all ${
+              smartShuffle ? 'text-cat-mauve' : 'text-cat-subtext0/50'
+            }`}
+          >
+            <Sparkles className="w-5 h-5" />
+          </button>
+        </div>
       </div>
 
       {/* Large Center Artwork */}
@@ -232,6 +244,8 @@ export const FullPlayer: React.FC = () => {
         isOpen={isAddToPlaylistOpen}
         onClose={() => setIsAddToPlaylistOpen(false)}
       />
+
+      <EqualizerModal />
     </div>
   );
 };

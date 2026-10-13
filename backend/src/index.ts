@@ -9,7 +9,14 @@ import dotenv from 'dotenv';
 import { db } from './db';
 import { checkAndNotifyUserLimit } from './notify';
 import { fetchSpotifyPlaylist, getSpotifyCredentials, extractPlaylistId, searchSpotifyTracks } from './spotify';
-import { enqueuePlaylistDownload, resumePendingDownloads, resumePlaylistDownload, downloadSingleSpotifyTrackDirect } from './downloader';
+import { 
+  enqueuePlaylistDownload, 
+  resumePendingDownloads, 
+  resumePlaylistDownload, 
+  downloadSingleSpotifyTrackDirect,
+  reDownloadAllTracksInHighQuality,
+  getUpgradeProgress 
+} from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
 
@@ -172,6 +179,12 @@ server.get('/api/stream/:trackId', async (req: any, reply: any) => {
   const total = stat.size;
   const range = req.headers.range;
 
+  const ext = path.extname(filePath).toLowerCase();
+  let contentType = 'audio/mpeg';
+  if (ext === '.m4a' || ext === '.aac') contentType = 'audio/mp4';
+  else if (ext === '.ogg' || ext === '.opus') contentType = 'audio/ogg';
+  else if (ext === '.flac') contentType = 'audio/flac';
+
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');
     const partialstart = parts[0];
@@ -185,14 +198,16 @@ server.get('/api/stream/:trackId', async (req: any, reply: any) => {
       'Content-Range': `bytes ${start}-${end}/${total}`,
       'Accept-Ranges': 'bytes',
       'Content-Length': chunksize,
-      'Content-Type': 'audio/mpeg'
+      'Content-Type': contentType,
+      'Access-Control-Allow-Origin': '*'
     });
     return reply.send(fileStream);
   } else {
     reply.raw.writeHead(200, {
       'Content-Length': total,
-      'Content-Type': 'audio/mpeg',
-      'Accept-Ranges': 'bytes'
+      'Content-Type': contentType,
+      'Accept-Ranges': 'bytes',
+      'Access-Control-Allow-Origin': '*'
     });
     return reply.send(fs.createReadStream(filePath));
   }
@@ -543,6 +558,14 @@ server.post('/api/tracks/download-single', { preHandler: [(server as any).authen
     return reply.status(500).send({ error: result.error || 'Ошибка скачивания трека' });
   }
   return result;
+});
+
+server.post('/api/tracks/upgrade-quality', { preHandler: [(server as any).authenticate] }, async () => {
+  return await reDownloadAllTracksInHighQuality();
+});
+
+server.get('/api/tracks/upgrade-quality/status', { preHandler: [(server as any).authenticate] }, async () => {
+  return getUpgradeProgress();
 });
 
 // ----------------- LIKES -----------------

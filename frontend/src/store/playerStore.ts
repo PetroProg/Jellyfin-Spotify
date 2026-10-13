@@ -2,6 +2,18 @@ import { create } from 'zustand';
 import { Track, RepeatMode } from '../types';
 import { apiRequest } from '../api/client';
 
+export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
+
+export const EQ_PRESETS: Record<string, { label: string; bands: number[] }> = {
+  flat: { label: 'Оригинал (Flat)', bands: [0, 0, 0, 0, 0] },
+  bass: { label: 'Усиление басов', bands: [6, 4, 1, 0, 0] },
+  rock: { label: 'Рок', bands: [5, 2, -1, 3, 5] },
+  pop: { label: 'Поп', bands: [-1, 2, 4, 3, 1] },
+  vocal: { label: 'Чистый вокал', bands: [-2, 0, 5, 4, 2] },
+  electronic: { label: 'Электроника', bands: [6, 4, -1, 3, 6] },
+  hiphop: { label: 'Хип-хоп', bands: [7, 4, 0, 2, 3] },
+};
+
 interface PlayerState {
   currentTrack: Track | null;
   isPlaying: boolean;
@@ -15,6 +27,12 @@ interface PlayerState {
   repeat: RepeatMode;
   volume: number;
   isFullPlayerOpen: boolean;
+
+  // Equalizer & Studio Sound
+  isEqualizerOpen: boolean;
+  eqBands: number[];
+  eqPreset: string;
+  isNormalizerEnabled: boolean;
 
   playTrack: (track: Track, newQueue?: Track[], index?: number) => void;
   togglePlay: () => void;
@@ -33,9 +51,18 @@ interface PlayerState {
   likedTrackIds: number[];
   loadLikes: () => Promise<void>;
   toggleLikeTrack: (trackId: number) => Promise<boolean>;
+
+  setEqGain: (bandIndex: number, gain: number) => void;
+  setEqPreset: (presetId: string) => void;
+  toggleNormalizer: () => void;
+  setEqualizerOpen: (open: boolean) => void;
+  resetEqualizer: () => void;
 }
 
 const STORAGE_KEY_VOLUME = 'jellyfy_player_volume';
+const STORAGE_KEY_EQ_BANDS = 'jellyfy_eq_bands';
+const STORAGE_KEY_EQ_PRESET = 'jellyfy_eq_preset';
+const STORAGE_KEY_NORMALIZER = 'jellyfy_normalizer_enabled';
 
 const loadSavedVolume = (): number => {
   try {
@@ -50,11 +77,96 @@ const loadSavedVolume = (): number => {
   return 1;
 };
 
+const loadSavedEqBands = (): number[] => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_EQ_BANDS);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length === 5) return parsed;
+    }
+  } catch (_) {}
+  return [0, 0, 0, 0, 0];
+};
+
+const loadSavedEqPreset = (): string => {
+  return localStorage.getItem(STORAGE_KEY_EQ_PRESET) || 'flat';
+};
+
+const loadSavedNormalizer = (): boolean => {
+  const val = localStorage.getItem(STORAGE_KEY_NORMALIZER);
+  return val === null ? true : val === 'true';
+};
+
 // Global Audio Instance
 const audio = new Audio();
 audio.preload = 'auto';
+audio.crossOrigin = 'anonymous';
 const initialVolume = loadSavedVolume();
 audio.volume = initialVolume;
+
+// Web Audio API Graph
+let audioCtx: AudioContext | null = null;
+let sourceNode: MediaElementAudioSourceNode | null = null;
+let compressorNode: DynamicsCompressorNode | null = null;
+let eqFilters: BiquadFilterNode[] = [];
+
+function ensureAudioGraph() {
+  if (audioCtx) return;
+  try {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) return;
+    audioCtx = new AudioContextClass();
+    sourceNode = audioCtx.createMediaElementSource(audio);
+
+    // 5-Band Equalizer filters
+    eqFilters = EQ_FREQUENCIES.map((freq, idx) => {
+      const filter = audioCtx!.createBiquadFilter();
+      if (idx === 0) {
+        filter.type = 'lowshelf';
+      } else if (idx === EQ_FREQUENCIES.length - 1) {
+        filter.type = 'highshelf';
+      } else {
+        filter.type = 'peaking';
+        filter.Q.value = 1.0;
+      }
+      filter.frequency.value = freq;
+      filter.gain.value = 0;
+      return filter;
+    });
+
+    // Dynamics Compressor (Spotify-like Loudness Normalizer)
+    compressorNode = audioCtx.createDynamicsCompressor();
+    compressorNode.threshold.value = -24;
+    compressorNode.knee.value = 30;
+    compressorNode.ratio.value = 12;
+    compressorNode.attack.value = 0.003;
+    compressorNode.release.value = 0.25;
+
+    // Connect audio chain: source -> eqFilters[0..4] -> compressor -> destination
+    let lastNode: AudioNode = sourceNode;
+    for (const filter of eqFilters) {
+      lastNode.connect(filter);
+      lastNode = filter;
+    }
+    lastNode.connect(compressorNode);
+    compressorNode.connect(audioCtx.destination);
+
+    // Apply saved bands
+    const savedBands = loadSavedEqBands();
+    savedBands.forEach((gain, i) => {
+      if (eqFilters[i]) eqFilters[i].gain.value = gain;
+    });
+
+    // Apply saved normalizer state
+    const isNorm = loadSavedNormalizer();
+    if (!isNorm) {
+      compressorNode.threshold.value = 0;
+      compressorNode.ratio.value = 1;
+    }
+  } catch (err) {
+    console.warn('[Web Audio API Init Error]:', err);
+  }
+}
 
 export const usePlayerStore = create<PlayerState>((set, get) => {
   // Sync Audio Events
@@ -112,6 +224,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     volume: initialVolume,
     isFullPlayerOpen: false,
 
+    isEqualizerOpen: false,
+    eqBands: loadSavedEqBands(),
+    eqPreset: loadSavedEqPreset(),
+    isNormalizerEnabled: loadSavedNormalizer(),
+
     playTrack: (track, newQueue, index) => {
       let q = newQueue ? [...newQueue] : get().queue;
       let idx = index !== undefined ? index : q.findIndex((t) => t.id === track.id);
@@ -129,6 +246,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         isPlaying: true,
       });
 
+      ensureAudioGraph();
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume().catch(() => {});
+      }
+
       audio.src = `/api/stream/${track.id}`;
       audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
       updateMediaSession(track);
@@ -142,6 +264,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audio.pause();
         set({ isPlaying: false });
       } else {
+        ensureAudioGraph();
+        if (audioCtx && audioCtx.state === 'suspended') {
+          audioCtx.resume().catch(() => {});
+        }
         audio.play().catch(() => {});
         set({ isPlaying: true });
       }
@@ -154,6 +280,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     resume: () => {
       if (get().currentTrack) {
+        ensureAudioGraph();
+        if (audioCtx && audioCtx.state === 'suspended') {
+          audioCtx.resume().catch(() => {});
+        }
         audio.play().catch(() => {});
         set({ isPlaying: true });
       }
@@ -167,7 +297,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       if (nextIndex >= queue.length) {
         if (smartShuffle) {
-          // Pre-fetch similar recommendations
           try {
             const current = queue[currentIndex];
             const data = await apiRequest<{ recommendations: any[] }>(
@@ -200,81 +329,86 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         }
       }
 
-      const next = queue[nextIndex];
-      playTrack(next, queue, nextIndex);
+      playTrack(queue[nextIndex], queue, nextIndex);
     },
 
     prevTrack: () => {
-      const { queue, currentIndex, currentTime, playTrack } = get();
-      if (currentTime > 3) {
+      const { queue, currentIndex, playTrack } = get();
+      if (queue.length === 0) return;
+
+      if (audio.currentTime > 3) {
         audio.currentTime = 0;
         return;
       }
-      if (currentIndex > 0) {
-        const prevIndex = currentIndex - 1;
-        playTrack(queue[prevIndex], queue, prevIndex);
-      } else {
-        audio.currentTime = 0;
+
+      let prevIndex = currentIndex - 1;
+      if (prevIndex < 0) {
+        prevIndex = queue.length - 1;
       }
+      playTrack(queue[prevIndex], queue, prevIndex);
     },
 
-    seek: (seconds) => {
+    seek: (seconds: number) => {
       audio.currentTime = seconds;
       set({ currentTime: seconds });
     },
 
-    setVolume: (val) => {
+    setVolume: (val: number) => {
       const clamped = Math.max(0, Math.min(1, val));
       audio.volume = clamped;
-      try {
-        localStorage.setItem(STORAGE_KEY_VOLUME, clamped.toString());
-      } catch (e) {}
+      localStorage.setItem(STORAGE_KEY_VOLUME, clamped.toString());
       set({ volume: clamped });
     },
 
     toggleShuffle: () => {
-      const { shuffle, queue, currentTrack, originalQueue } = get();
-      if (!shuffle) {
-        // Turn on shuffle
-        const shuffled = [...queue].sort(() => Math.random() - 0.5);
-        if (currentTrack) {
-          const idx = shuffled.findIndex((t) => t.id === currentTrack.id);
-          if (idx > -1) {
-            shuffled.splice(idx, 1);
-            shuffled.unshift(currentTrack);
-          }
+      const { shuffle, queue, currentTrack } = get();
+      const nextShuffle = !shuffle;
+
+      if (nextShuffle) {
+        const withoutCurrent = queue.filter((t) => t.id !== currentTrack?.id);
+        for (let i = withoutCurrent.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [withoutCurrent[i], withoutCurrent[j]] = [withoutCurrent[j], withoutCurrent[i]];
         }
-        set({ shuffle: true, queue: shuffled, currentIndex: 0 });
+        const newQueue = currentTrack ? [currentTrack, ...withoutCurrent] : withoutCurrent;
+        set({ shuffle: true, queue: newQueue, currentIndex: currentTrack ? 0 : -1 });
       } else {
-        // Turn off shuffle
-        set({ shuffle: false, queue: [...originalQueue] });
+        const orig = get().originalQueue;
+        const newIdx = currentTrack ? orig.findIndex((t) => t.id === currentTrack.id) : 0;
+        set({ shuffle: false, queue: orig, currentIndex: newIdx !== -1 ? newIdx : 0 });
       }
     },
 
     toggleSmartShuffle: () => {
-      set((state) => ({ smartShuffle: !state.smartShuffle }));
+      set({ smartShuffle: !get().smartShuffle });
     },
 
     toggleRepeat: () => {
       const current = get().repeat;
-      const next: RepeatMode = current === 'off' ? 'all' : current === 'all' ? 'one' : 'off';
-      set({ repeat: next });
+      const modes: RepeatMode[] = ['off', 'all', 'one'];
+      const nextIdx = (modes.indexOf(current) + 1) % modes.length;
+      set({ repeat: modes[nextIdx] });
     },
 
-    setFullPlayerOpen: (open) => {
+    setFullPlayerOpen: (open: boolean) => {
       set({ isFullPlayerOpen: open });
     },
 
-    addToQueue: (track) => {
-      set((state) => ({ queue: [...state.queue, track] }));
+    addToQueue: (track: Track) => {
+      const { queue } = get();
+      set({ queue: [...queue, track] });
     },
 
-    removeFromQueue: (index) => {
-      set((state) => {
-        const newQueue = [...state.queue];
-        newQueue.splice(index, 1);
-        return { queue: newQueue };
-      });
+    removeFromQueue: (index: number) => {
+      const { queue, currentIndex } = get();
+      const updated = queue.filter((_, i) => i !== index);
+      let newIdx = currentIndex;
+      if (index < currentIndex) {
+        newIdx--;
+      } else if (index === currentIndex && index >= updated.length) {
+        newIdx = Math.max(0, updated.length - 1);
+      }
+      set({ queue: updated, currentIndex: newIdx });
     },
 
     likedTrackIds: [],
@@ -295,7 +429,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         ? likedTrackIds.filter((id) => id !== trackId)
         : [...likedTrackIds, trackId];
 
-      // Optimistic update
       set({ likedTrackIds: newLiked });
 
       try {
@@ -306,10 +439,61 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         set({ likedTrackIds: updated });
         return res.liked;
       } catch (err) {
-        // Rollback on error
         set({ likedTrackIds });
         throw err;
       }
+    },
+
+    // Equalizer & Normalizer Actions
+    setEqualizerOpen: (open: boolean) => {
+      set({ isEqualizerOpen: open });
+    },
+
+    setEqGain: (bandIndex: number, gain: number) => {
+      ensureAudioGraph();
+      const bands = [...get().eqBands];
+      bands[bandIndex] = gain;
+      if (eqFilters[bandIndex] && audioCtx) {
+        eqFilters[bandIndex].gain.setValueAtTime(gain, audioCtx.currentTime);
+      }
+      localStorage.setItem(STORAGE_KEY_EQ_BANDS, JSON.stringify(bands));
+      set({ eqBands: bands, eqPreset: 'custom' });
+    },
+
+    setEqPreset: (presetId: string) => {
+      ensureAudioGraph();
+      const preset = EQ_PRESETS[presetId];
+      if (!preset) return;
+      const bands = [...preset.bands];
+      bands.forEach((g, i) => {
+        if (eqFilters[i] && audioCtx) {
+          eqFilters[i].gain.setValueAtTime(g, audioCtx.currentTime);
+        }
+      });
+      localStorage.setItem(STORAGE_KEY_EQ_BANDS, JSON.stringify(bands));
+      localStorage.setItem(STORAGE_KEY_EQ_PRESET, presetId);
+      set({ eqBands: bands, eqPreset: presetId });
+    },
+
+    toggleNormalizer: () => {
+      ensureAudioGraph();
+      const current = get().isNormalizerEnabled;
+      const next = !current;
+      if (compressorNode && audioCtx) {
+        if (next) {
+          compressorNode.threshold.setValueAtTime(-24, audioCtx.currentTime);
+          compressorNode.ratio.setValueAtTime(12, audioCtx.currentTime);
+        } else {
+          compressorNode.threshold.setValueAtTime(0, audioCtx.currentTime);
+          compressorNode.ratio.setValueAtTime(1, audioCtx.currentTime);
+        }
+      }
+      localStorage.setItem(STORAGE_KEY_NORMALIZER, String(next));
+      set({ isNormalizerEnabled: next });
+    },
+
+    resetEqualizer: () => {
+      get().setEqPreset('flat');
     },
   };
 });

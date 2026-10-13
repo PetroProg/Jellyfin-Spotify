@@ -242,6 +242,25 @@ export async function resolveSpotifyTrackDetails(trackId: string): Promise<Spoti
   return result;
 }
 
+export async function resolveDeezerTrackInfo(artist: string, title: string): Promise<{ cover_url?: string; album?: string; duration?: number; isrc?: string }> {
+  try {
+    const q = encodeURIComponent(`${artist} ${title}`.trim());
+    const res = await fetch(`https://api.deezer.com/search?q=${q}`);
+    if (!res.ok) return {};
+    const data: any = await res.json();
+    const item = data.data?.[0];
+    if (!item) return {};
+    return {
+      cover_url: item.album?.cover_xl || item.album?.cover_big || item.album?.cover_medium,
+      album: item.album?.title,
+      duration: item.duration,
+      isrc: item.isrc
+    };
+  } catch {
+    return {};
+  }
+}
+
 export async function resolveSpotifyTrackCover(trackId: string): Promise<string | undefined> {
   const details = await resolveSpotifyTrackDetails(trackId);
   return details.cover_url;
@@ -279,3 +298,4 @@ export async function searchSpotifyTracks(query: string, limit: number = 5): Pro
     return [];
   }
 }
+

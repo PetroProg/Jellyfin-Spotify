@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { db } from './db';
 import { refreshJellyfinLibrary } from './jellyfin';
-import { SpotifyTrack, resolveSpotifyTrackDetails, fetchSpotifyPlaylist } from './spotify';
+import { SpotifyTrack, resolveSpotifyTrackDetails, fetchSpotifyPlaylist, resolveDeezerTrackInfo } from './spotify';
 
 const MUSIC_DIR = process.env.MUSIC_DIR || path.join(process.cwd(), 'music');
 
@@ -217,10 +217,84 @@ async function runWorkerLoop() {
   console.log('[Downloader] Background worker loop completed and idle.');
 }
 
+export async function findBestStudioAudioSource(artist: string, title: string, durationMs?: number): Promise<string> {
+  const targetSec = durationMs ? Math.round(durationMs / 1000) : 0;
+  const cleanArtist = (artist || '').replace(/[\\/:*?"<>|]/g, ' ').trim();
+  const cleanTitle = (title || '').replace(/[\\/:*?"<>|]/g, ' ').trim();
+  const searchQuery = `ytsearch10:${cleanArtist} ${cleanTitle}`;
+
+  try {
+    const raw = await new Promise<string>((resolve) => {
+      const proc = spawn('yt-dlp', [
+        '--dump-json',
+        '--flat-playlist',
+        '--default-search', 'ytsearch10',
+        searchQuery
+      ]);
+      let stdout = '';
+      proc.stdout.on('data', d => stdout += d.toString());
+      proc.on('close', () => resolve(stdout));
+      proc.on('error', () => resolve(''));
+      setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch (_) {}
+        resolve(stdout);
+      }, 15000);
+    });
+
+    const candidates: any[] = [];
+    for (const line of raw.trim().split('\n')) {
+      if (!line) continue;
+      try {
+        const item = JSON.parse(line);
+        const dur = Number(item.duration) || 0;
+        const diff = targetSec > 0 ? Math.abs(dur - targetSec) : 0;
+        let score = 0;
+
+        if (targetSec > 0) {
+          if (diff <= 2) score += 50;
+          else if (diff <= 5) score += 30;
+          else if (diff <= 10) score += 10;
+          else score -= 35;
+        }
+
+        const tl = (item.title || '').toLowerCase();
+        const cl = (item.channel || item.uploader || '').toLowerCase();
+
+        if (cl.includes('topic')) score += 40;
+        if (tl.includes('official audio')) score += 35;
+        else if (tl.includes('audio')) score += 20;
+        else if (tl.includes('lyrics')) score += 15;
+
+        if (tl.includes('official video') || tl.includes('music video') || tl.includes('official music video') || tl.includes('clip')) {
+          score -= 40;
+        }
+        if (tl.includes('live') && !cleanTitle.toLowerCase().includes('live')) score -= 60;
+        if (tl.includes('cover') && !cleanTitle.toLowerCase().includes('cover')) score -= 70;
+        if (tl.includes('remix') && !cleanTitle.toLowerCase().includes('remix')) score -= 50;
+
+        candidates.push({ id: item.id, score, dur, diff, title: item.title });
+      } catch (_) {}
+    }
+
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => b.score - a.score);
+      const best = candidates[0];
+      if (best.id) {
+        console.log(`[Studio Audio Match] "${cleanArtist} - ${cleanTitle}": selected ${best.id} ("${best.title}", diff=${best.diff}s, score=${best.score})`);
+        return `https://www.youtube.com/watch?v=${best.id}`;
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Studio Audio Search Fallback]:', err.message);
+  }
+
+  return `ytsearch1:${cleanArtist} - ${cleanTitle} audio`;
+}
+
 async function downloadSingleTrack(item: QueueItem): Promise<void> {
   const { jobId, playlistId, track, position } = item;
 
-  // Resolve real individual track details (cover + real album) from Spotify
+  // Resolve real individual track details (cover + real album) from Spotify / Deezer
   const details = await resolveSpotifyTrackDetails(track.id);
   if (details.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
     track.cover_url = details.cover_url;
@@ -230,6 +304,21 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
   }
   if (details.artist && (!track.artist || track.artist === 'Unknown Artist')) {
     track.artist = details.artist;
+  }
+
+  if (!track.cover_url || !track.album) {
+    try {
+      const dz = await resolveDeezerTrackInfo(track.artist, track.title);
+      if (dz.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
+        track.cover_url = dz.cover_url;
+      }
+      if (dz.album && !track.album) {
+        track.album = dz.album;
+      }
+      if (dz.duration && (!track.duration_ms || track.duration_ms <= 0)) {
+        track.duration_ms = dz.duration * 1000;
+      }
+    } catch (_) {}
   }
 
   // Check if track already exists locally in DB
@@ -282,7 +371,9 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
 
   const safeTitle = sanitizeFilename(track.title);
   const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
-  const searchQuery = `ytsearch1:${track.artist} - ${track.title} audio`;
+
+  // Level 1 & 2: Smart Studio Candidate Selection
+  const audioSourceUrl = await findBestStudioAudioSource(track.artist, track.title, track.duration_ms);
 
   await new Promise<void>((resolve) => {
     let isSettled = false;
@@ -294,19 +385,21 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       }
     };
 
-    // Launch yt-dlp with low CPU/IO priority
+    // Launch yt-dlp with studio 320 kbps audio quality settings
     const ytDlpProcess = spawn('nice', [
       '-n', '19',
       'ionice', '-c', '3',
       'yt-dlp',
       '--no-playlist',
+      '-f', 'bestaudio/best',
       '--extract-audio',
       '--audio-format', 'mp3',
-      '--audio-quality', '0',
+      '--audio-quality', '320k',
+      '--postprocessor-args', 'ExtractAudio:-b:a 320k -ar 44100',
       '--embed-thumbnail',
       '--add-metadata',
       '-o', outputTemplate,
-      searchQuery
+      audioSourceUrl
     ]);
 
     // 100-second per-track safety timeout
@@ -440,6 +533,21 @@ async function downloadSingleSpotifyTrackDirectInternal(
       }
     }
 
+    if (!track.cover_url || !track.album) {
+      try {
+        const dz = await resolveDeezerTrackInfo(track.artist, track.title);
+        if (dz.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
+          track.cover_url = dz.cover_url;
+        }
+        if (dz.album && !track.album) {
+          track.album = dz.album;
+        }
+        if (dz.duration && (!track.duration_ms || track.duration_ms <= 0)) {
+          track.duration_ms = dz.duration * 1000;
+        }
+      } catch (_) {}
+    }
+
     // Helper to attach to playlist if playlistId is provided
     const attachToPlaylist = (trackRecord: any) => {
       if (!playlistId || !trackRecord?.id) return;
@@ -479,9 +587,11 @@ async function downloadSingleSpotifyTrackDirectInternal(
 
     const safeTitle = sanitizeFilename(track.title);
     const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
-    const searchQuery = `ytsearch1:${track.artist} - ${track.title} audio`;
 
-    // 4. Download with yt-dlp
+    // Level 1 & 2: Smart Studio Candidate Selection
+    const audioSourceUrl = await findBestStudioAudioSource(track.artist, track.title, track.duration_ms);
+
+    // 4. Download with yt-dlp (320 kbps high fidelity audio)
     const success = await new Promise<boolean>((resolve) => {
       let isSettled = false;
       const finish = (result: boolean) => {
@@ -497,13 +607,15 @@ async function downloadSingleSpotifyTrackDirectInternal(
         'ionice', '-c', '3',
         'yt-dlp',
         '--no-playlist',
+        '-f', 'bestaudio/best',
         '--extract-audio',
         '--audio-format', 'mp3',
-        '--audio-quality', '0',
+        '--audio-quality', '320k',
+        '--postprocessor-args', 'ExtractAudio:-b:a 320k -ar 44100',
         '--embed-thumbnail',
         '--add-metadata',
         '-o', outputTemplate,
-        searchQuery
+        audioSourceUrl
       ]);
 
       const timer = setTimeout(() => {
@@ -558,5 +670,130 @@ async function downloadSingleSpotifyTrackDirectInternal(
     console.error('[Download Single Track Error]', err);
     return { success: false, error: err.message };
   }
+}
+
+export interface UpgradeProgress {
+  isRunning: boolean;
+  total: number;
+  current: number;
+  currentTrack: string;
+  successCount: number;
+  errorCount: number;
+}
+
+const upgradeProgress: UpgradeProgress = {
+  isRunning: false,
+  total: 0,
+  current: 0,
+  currentTrack: '',
+  successCount: 0,
+  errorCount: 0
+};
+
+export function getUpgradeProgress(): UpgradeProgress {
+  return { ...upgradeProgress };
+}
+
+export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boolean; message: string }> {
+  if (upgradeProgress.isRunning) {
+    return { started: false, message: 'Процесс обновления уже выполняется' };
+  }
+
+  const allTracks = db.prepare('SELECT id, title, artist, album, duration_ms, file_path, spotify_id FROM tracks ORDER BY id ASC').all() as any[];
+
+  upgradeProgress.isRunning = true;
+  upgradeProgress.total = allTracks.length;
+  upgradeProgress.current = 0;
+  upgradeProgress.successCount = 0;
+  upgradeProgress.errorCount = 0;
+
+  // Background worker loop
+  (async () => {
+    console.log(`[Upgrade Quality] Starting high-fidelity (320 kbps) upgrade of ${allTracks.length} tracks...`);
+    for (let i = 0; i < allTracks.length; i++) {
+      const tr = allTracks[i];
+      upgradeProgress.current = i + 1;
+      upgradeProgress.currentTrack = `${tr.artist} - ${tr.title}`;
+
+      try {
+        const artistFolder = sanitizeFilename(tr.artist || 'Unknown Artist');
+        const targetDir = path.join(MUSIC_DIR, artistFolder);
+        if (!fs.existsSync(targetDir)) {
+          fs.mkdirSync(targetDir, { recursive: true });
+        }
+        const safeTitle = sanitizeFilename(tr.title);
+        const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
+
+        const audioSourceUrl = await findBestStudioAudioSource(tr.artist, tr.title, tr.duration_ms);
+
+        const ok = await new Promise<boolean>((resolve) => {
+          let settled = false;
+          const finish = (result: boolean) => {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              resolve(result);
+            }
+          };
+
+          const proc = spawn('nice', [
+            '-n', '19',
+            'ionice', '-c', '3',
+            'yt-dlp',
+            '--no-playlist',
+            '-f', 'bestaudio/best',
+            '--extract-audio',
+            '--audio-format', 'mp3',
+            '--audio-quality', '320k',
+            '--postprocessor-args', 'ExtractAudio:-b:a 320k -ar 44100',
+            '--embed-thumbnail',
+            '--add-metadata',
+            '-o', outputTemplate,
+            audioSourceUrl
+          ]);
+
+          const timer = setTimeout(() => {
+            try { proc.kill('SIGKILL'); } catch (_) {}
+            finish(false);
+          }, 90000);
+
+          proc.on('close', code => finish(code === 0));
+          proc.on('error', () => finish(false));
+        });
+
+        if (ok) {
+          const finalFile = path.join(targetDir, `${safeTitle}.mp3`);
+          if (!tr.cover_url || tr.cover_url.includes('mosaic.scdn.co')) {
+            try {
+              const dz = await resolveDeezerTrackInfo(tr.artist, tr.title);
+              if (dz.cover_url) {
+                db.prepare('UPDATE tracks SET cover_url = ? WHERE id = ?').run(dz.cover_url, tr.id);
+              }
+            } catch (_) {}
+          }
+          db.prepare('UPDATE tracks SET file_path = ? WHERE id = ?').run(finalFile, tr.id);
+          upgradeProgress.successCount++;
+        } else {
+          upgradeProgress.errorCount++;
+        }
+      } catch (err: any) {
+        console.warn(`[Upgrade Quality Error] on track "${tr.artist} - ${tr.title}":`, err.message);
+        upgradeProgress.errorCount++;
+      }
+
+      // Small cooldown to prevent CPU throttling
+      await new Promise(r => setTimeout(r, 600));
+    }
+
+    upgradeProgress.isRunning = false;
+    upgradeProgress.currentTrack = '';
+    console.log(`[Upgrade Quality Completed] Success: ${upgradeProgress.successCount}, Errors: ${upgradeProgress.errorCount}`);
+    await refreshJellyfinLibrary();
+  })().catch(err => {
+    upgradeProgress.isRunning = false;
+    console.error('[Upgrade Quality Fatal]', err);
+  });
+
+  return { started: true, message: `Запущено обновление ${allTracks.length} треков в студийное качество (320 kbps)` };
 }
 

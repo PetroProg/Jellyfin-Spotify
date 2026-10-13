@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Repeat1, 
-  Volume2, VolumeX, Heart, Music2, Sparkles, ListMusic, FolderPlus 
+  Volume2, VolumeX, Heart, Music2, Sparkles, ListMusic, FolderPlus,
+  SlidersHorizontal 
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { apiRequest } from '../api/client';
 import { AddToPlaylistModal } from './AddToPlaylistModal';
+import { EqualizerModal } from './EqualizerModal';
 
 interface DesktopPlayerProps {
   onToggleQueue?: () => void;
@@ -32,6 +34,7 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
     likedTrackIds,
     toggleLikeTrack,
     loadLikes,
+    setEqualizerOpen,
   } = usePlayerStore();
 
   const [prevVolume, setPrevVolume] = useState(1);
@@ -174,6 +177,14 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
           <Sparkles className="w-4 h-4" />
         </button>
 
+        <button
+          onClick={() => setEqualizerOpen(true)}
+          title="Студийный звук & Эквалайзер"
+          className="p-1.5 rounded-lg hover:text-cat-mauve text-cat-subtext0 transition-colors cursor-pointer active:scale-95"
+        >
+          <SlidersHorizontal className="w-4 h-4" />
+        </button>
+
         {onToggleQueue && (
           <button
             onClick={onToggleQueue}
@@ -209,6 +220,8 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
         isOpen={isAddToPlaylistOpen}
         onClose={() => setIsAddToPlaylistOpen(false)}
       />
+
+      <EqualizerModal />
     </div>
   );
 };

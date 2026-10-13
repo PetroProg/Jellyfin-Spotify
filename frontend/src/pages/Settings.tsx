@@ -48,9 +48,48 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   // Stats State
   const [stats, setStats] = useState({ users: 0, tracks: 0 });
 
+  // Audio Quality Upgrade State
+  const [upgradeStatus, setUpgradeStatus] = useState<{
+    isRunning: boolean;
+    total: number;
+    current: number;
+    currentTrack: string;
+    successCount: number;
+    errorCount: number;
+  }>({
+    isRunning: false,
+    total: 0,
+    current: 0,
+    currentTrack: '',
+    successCount: 0,
+    errorCount: 0
+  });
+  const [startingUpgrade, setStartingUpgrade] = useState(false);
+  const [upgradeMsg, setUpgradeMsg] = useState<string | null>(null);
+
   useEffect(() => {
     loadSettingsData();
   }, []);
+
+  useEffect(() => {
+    let interval: any = null;
+    if (upgradeStatus.isRunning) {
+      interval = setInterval(async () => {
+        try {
+          const upData = await apiRequest<any>('/tracks/upgrade-quality/status');
+          if (upData) {
+            setUpgradeStatus(upData);
+            if (!upData.isRunning) {
+              clearInterval(interval);
+            }
+          }
+        } catch (_) {}
+      }, 2000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [upgradeStatus.isRunning]);
 
   const loadSettingsData = async () => {
     try {
@@ -67,8 +106,32 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       const stData = await apiRequest<any>('/settings');
       setHasSpotifyCreds(stData.hasSpotifyCredentials);
       setStats(stData.stats || { users: 0, tracks: 0 });
+
+      // 4. Quality Upgrade Status
+      try {
+        const upData = await apiRequest<any>('/tracks/upgrade-quality/status');
+        if (upData) setUpgradeStatus(upData);
+      } catch (_) {}
     } catch (e) {
       console.warn(e);
+    }
+  };
+
+  const handleStartUpgrade = async () => {
+    if (!window.confirm('Перезагрузить все песни медиатеки в максимальном качестве 320 kbps со студийными источниками? Процесс выполняется в фоне без нагрузки на процессор.')) {
+      return;
+    }
+    setStartingUpgrade(true);
+    setUpgradeMsg(null);
+    try {
+      const res = await apiRequest<any>('/tracks/upgrade-quality', { method: 'POST' });
+      setUpgradeMsg(res.message || 'Обновление запущено!');
+      const upData = await apiRequest<any>('/tracks/upgrade-quality/status');
+      if (upData) setUpgradeStatus(upData);
+    } catch (e: any) {
+      alert(e.message || 'Ошибка запуска обновления качества');
+    } finally {
+      setStartingUpgrade(false);
     }
   };
 
@@ -325,6 +388,106 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           >
             {clearingCache ? 'Очистка...' : 'Очистить оффлайн-кеш'}
           </button>
+        </div>
+
+        {/* Section: Studio Audio Quality & Hi-Fi Re-download */}
+        <div className="bg-cat-mantle rounded-3xl p-5 md:p-6 border border-cat-surface0/60 shadow-lg">
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-cat-mauve/20 text-cat-mauve flex items-center justify-center shrink-0">
+                <Sparkles className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-base font-bold text-cat-text">Студийное качество звука (320 kbps)</h2>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-cat-green/20 text-cat-green border border-cat-green/30">
+                    Hi-Fi Master
+                  </span>
+                </div>
+                <p className="text-xs text-cat-subtext0">
+                  Поиск студийных релизов без интро/клиповых эффектов, прямое кодирование 320 kbps MP3 LAME
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-cat-surface0/50 rounded-2xl p-4 border border-cat-surface1/30 space-y-3 mb-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <div className="p-2.5 rounded-xl bg-cat-surface1/40">
+                <span className="font-semibold text-cat-text block mb-0.5">Уровень 1: Источники</span>
+                <span className="text-cat-subtext0">Фильтрация клипов и точное совпадение длительности (±2 сек)</span>
+              </div>
+              <div className="p-2.5 rounded-xl bg-cat-surface1/40">
+                <span className="font-semibold text-cat-text block mb-0.5">Уровень 2: 320 kbps</span>
+                <span className="text-cat-subtext0">LAME 320k CBR 44.1kHz + обложки Deezer Hi-Res</span>
+              </div>
+              <div className="p-2.5 rounded-xl bg-cat-surface1/40">
+                <span className="font-semibold text-cat-text block mb-0.5">Уровень 3: Web Audio</span>
+                <span className="text-cat-subtext0">5-полосный графический эквалайзер и нормализация громкости</span>
+              </div>
+            </div>
+
+            {upgradeStatus.isRunning ? (
+              <div className="space-y-2 pt-2">
+                <div className="flex items-center justify-between text-xs font-semibold">
+                  <span className="text-cat-mauve flex items-center gap-1.5">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Перезагрузка треков в качестве 320 kbps...
+                  </span>
+                  <span className="text-cat-subtext0 font-mono">
+                    {upgradeStatus.current} / {upgradeStatus.total} ({upgradeStatus.total > 0 ? Math.round((upgradeStatus.current / upgradeStatus.total) * 100) : 0}%)
+                  </span>
+                </div>
+
+                <div className="w-full h-2.5 bg-cat-surface1 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-cat-mauve to-cat-pink transition-all duration-300 rounded-full"
+                    style={{
+                      width: `${upgradeStatus.total > 0 ? (upgradeStatus.current / upgradeStatus.total) * 100 : 0}%`
+                    }}
+                  />
+                </div>
+
+                {upgradeStatus.currentTrack && (
+                  <p className="text-[11px] text-cat-subtext0 truncate font-mono">
+                    Сейчас: <span className="text-cat-text">{upgradeStatus.currentTrack}</span>
+                  </p>
+                )}
+                <div className="flex gap-4 text-[11px] text-cat-subtext0">
+                  <span className="text-cat-green">Успешно: {upgradeStatus.successCount}</span>
+                  {upgradeStatus.errorCount > 0 && <span className="text-cat-red">Ошибок: {upgradeStatus.errorCount}</span>}
+                </div>
+              </div>
+            ) : (
+              upgradeStatus.total > 0 && upgradeStatus.current >= upgradeStatus.total && (
+                <div className="flex items-center gap-2 text-xs text-cat-green font-medium pt-1">
+                  <Check className="w-4 h-4" />
+                  <span>Все {upgradeStatus.total} треков успешно обновлены до качества 320 kbps!</span>
+                </div>
+              )
+            )}
+          </div>
+
+          <button
+            onClick={handleStartUpgrade}
+            disabled={startingUpgrade || upgradeStatus.isRunning}
+            className="flex items-center justify-center gap-2 px-5 py-2.5 rounded-2xl bg-cat-mauve text-cat-base text-xs font-bold hover:opacity-95 active:scale-95 transition-all shadow-md disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+          >
+            {startingUpgrade || upgradeStatus.isRunning ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Обновление в процессе...</span>
+              </>
+            ) : (
+              <>
+                <Sparkles className="w-4 h-4" />
+                <span>Перезагрузить все песни в максимальном качестве (320 kbps)</span>
+              </>
+            )}
+          </button>
+          {upgradeMsg && (
+            <p className="text-xs text-cat-green mt-2">{upgradeMsg}</p>
+          )}
         </div>
 
         {/* Section 4: Spotify API Keys */}
