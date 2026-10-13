@@ -12,11 +12,12 @@ import { toast } from '../store/toastStore';
 interface PlaylistViewProps {
   playlistId: number;
   onBack?: () => void;
+  onDeleted?: () => void;
 }
 
 type SortField = 'position' | 'title' | 'artist' | 'album' | 'date' | 'duration';
 
-export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }) => {
+export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, onDeleted }) => {
   const [playlist, setPlaylist] = useState<Playlist | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [activeJob, setActiveJob] = useState<any>(null);
@@ -174,6 +175,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack }
           }
         }}
         onCoverChange={(newUrl) => setPlaylist(prev => prev ? { ...prev, cover_url: newUrl } : null)}
+        onDelete={onDeleted || onBack}
       />
 
       {/* Live Download Banner */}

@@ -318,7 +318,10 @@ server.get('/api/playlists/:id/cover', async (req: any, reply: any) => {
 });
 
 server.delete('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any) => {
-  db.prepare('DELETE FROM playlists WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  const playlistId = req.params.id;
+  db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ?').run(playlistId);
+  db.prepare('DELETE FROM download_jobs WHERE playlist_id = ?').run(playlistId);
+  db.prepare('DELETE FROM playlists WHERE id = ? AND user_id = ?').run(playlistId, req.user.id);
   return { success: true };
 });
 

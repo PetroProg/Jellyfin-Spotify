@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Shuffle, Download, Check, Music2, Loader2, Camera } from 'lucide-react';
+import { Play, Shuffle, Download, Check, Music2, Loader2, Camera, Trash2 } from 'lucide-react';
 import { Playlist, Track } from '../types';
 import { useOfflineStore } from '../store/offlineStore';
 import { apiRequest } from '../api/client';
@@ -12,6 +12,7 @@ interface PlaylistHeaderProps {
   onPlayAll: () => void;
   onShuffleAll: () => void;
   onCoverChange?: (newUrl: string) => void;
+  onDelete?: () => void;
 }
 
 export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
@@ -21,6 +22,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   onPlayAll,
   onShuffleAll,
   onCoverChange,
+  onDelete,
 }) => {
   const isDownloaded = useOfflineStore((s) => s.downloadedIds.includes(playlist.id));
   const offlineProgress = useOfflineStore((s) => s.progress[playlist.id]);
@@ -30,6 +32,35 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   const downloading = !!offlineProgress?.inProgress;
   const progressText = offlineProgress ? `${offlineProgress.done}/${offlineProgress.total}` : '';
   const [uploadingCover, setUploadingCover] = useState(false);
+  const [deletingPlaylist, setDeletingPlaylist] = useState(false);
+
+  const handleDeletePlaylist = async () => {
+    if (deletingPlaylist) return;
+
+    const ok = await confirmDialog({
+      title: 'Удалить плейлист?',
+      message: `Вы уверены, что хотите безвозвратно удалить плейлист «${playlist.name}»? Это действие нельзя отменить.`,
+      confirmText: 'Удалить плейлист',
+      cancelText: 'Отмена',
+      isDestructive: true
+    });
+    if (!ok) return;
+
+    setDeletingPlaylist(true);
+    try {
+      if (isDownloaded) {
+        try {
+          await removeDownload(playlist.id, tracks);
+        } catch (_) {}
+      }
+      await apiRequest(`/playlists/${playlist.id}`, { method: 'DELETE' });
+      toast.success(`Плейлист «${playlist.name}» успешно удален`);
+      onDelete?.();
+    } catch (e: any) {
+      toast.error(e.message || 'Ошибка удаления плейлиста');
+      setDeletingPlaylist(false);
+    }
+  };
 
   const handleCoverFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -194,6 +225,22 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
               <Download className="w-5 h-5" />
             )}
           </button>
+
+          {/* Delete Playlist Button */}
+          {onDelete && (
+            <button
+              onClick={handleDeletePlaylist}
+              disabled={deletingPlaylist}
+              title="Удалить плейлист"
+              className="p-3 rounded-full bg-cat-surface0 hover:bg-cat-red/20 text-cat-subtext0 hover:text-cat-red active:scale-95 transition-all disabled:opacity-40 cursor-pointer shrink-0"
+            >
+              {deletingPlaylist ? (
+                <Loader2 className="w-5 h-5 animate-spin text-cat-red" />
+              ) : (
+                <Trash2 className="w-5 h-5" />
+              )}
+            </button>
+          )}
         </div>
       </div>
     </div>

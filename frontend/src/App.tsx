@@ -236,6 +236,10 @@ export const App: React.FC = () => {
             <PlaylistView
               playlistId={selectedPlaylistId}
               onBack={handleBack}
+              onDeleted={() => {
+                loadPlaylists();
+                navigateTo('home', null, true);
+              }}
             />
           )}
 
