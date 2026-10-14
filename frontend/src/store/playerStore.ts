@@ -35,6 +35,7 @@ interface PlayerState {
   isNormalizerEnabled: boolean;
 
   playTrack: (track: Track, newQueue?: Track[], index?: number) => void;
+  shufflePlay: (tracks: Track[]) => void;
   togglePlay: () => void;
   pause: () => void;
   resume: () => void;
@@ -255,6 +256,40 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       audio.src = `/api/stream/${track.id}`;
       audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
       updateMediaSession(track);
+    },
+
+    shufflePlay: (tracks: Track[]) => {
+      if (!tracks || tracks.length === 0) return;
+
+      const original = [...tracks];
+      const randomIndex = Math.floor(Math.random() * tracks.length);
+      const chosenTrack = tracks[randomIndex];
+
+      const remaining = tracks.filter((_, idx) => idx !== randomIndex);
+      // Fisher-Yates shuffle remaining tracks
+      for (let i = remaining.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
+      }
+      const shuffledQueue = [chosenTrack, ...remaining];
+
+      set({
+        currentTrack: chosenTrack,
+        queue: shuffledQueue,
+        originalQueue: original,
+        currentIndex: 0,
+        shuffle: true,
+        isPlaying: true,
+      });
+
+      ensureAudioGraph();
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume().catch(() => {});
+      }
+
+      audio.src = `/api/stream/${chosenTrack.id}`;
+      audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
+      updateMediaSession(chosenTrack);
     },
 
     togglePlay: () => {

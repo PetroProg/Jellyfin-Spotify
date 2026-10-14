@@ -44,7 +44,7 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
     containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const { playTrack, toggleShuffle, addToQueue, likedTrackIds } = usePlayerStore();
+  const { playTrack, shufflePlay, toggleShuffle, addToQueue, likedTrackIds } = usePlayerStore();
 
   const loadLikes = async () => {
     try {
@@ -155,8 +155,7 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
             <button
               onClick={() => {
                 if (tracks.length > 0) {
-                  playTrack(tracks[0], tracks, 0);
-                  toggleShuffle();
+                  shufflePlay(tracks);
                 }
               }}
               disabled={tracks.length === 0}

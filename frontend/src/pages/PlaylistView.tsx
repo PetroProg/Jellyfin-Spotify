@@ -45,7 +45,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
     containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const { playTrack, toggleShuffle, addToQueue } = usePlayerStore();
+  const { playTrack, shufflePlay, toggleShuffle, addToQueue } = usePlayerStore();
 
   const handleResume = async () => {
     if (resuming) return;
@@ -186,8 +186,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
         onPlayAll={() => sortedTracks.length > 0 && playTrack(sortedTracks[0], sortedTracks, 0)}
         onShuffleAll={() => {
           if (sortedTracks.length > 0) {
-            playTrack(sortedTracks[0], sortedTracks, 0);
-            toggleShuffle();
+            shufflePlay(sortedTracks);
           }
         }}
         onCoverChange={(newUrl) => setPlaylist(prev => prev ? { ...prev, cover_url: newUrl } : null)}
