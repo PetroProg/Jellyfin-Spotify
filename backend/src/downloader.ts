@@ -79,14 +79,15 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
 
         const expectedSec = expectedDurationMs ? expectedDurationMs / 1000 : 0;
         let isTruncated = false;
-        if (expectedSec > 30) {
-          const diff = Math.abs(durationSec - expectedSec);
-          if (durationSec < expectedSec * 0.75 || diff > 15) {
+        if (expectedSec > 60) {
+          if (durationSec < 55 || durationSec < expectedSec * 0.6) {
             isTruncated = true;
           }
+        } else if (expectedSec > 20 && durationSec < 15) {
+          isTruncated = true;
         }
 
-        const isLowBitrate = bitrateKbps < 250;
+        const isLowBitrate = bitrateKbps < 240;
 
         if (isTruncated || isLowBitrate) {
           const reasons: string[] = [];
@@ -353,25 +354,40 @@ export async function findBestStudioAudioSource(artist: string, title: string, d
 
         if (targetSec > 0) {
           if (diff <= 2) score += 50;
-          else if (diff <= 5) score += 30;
-          else if (diff <= 10) score += 10;
-          else score -= 35;
+          else if (diff <= 5) score += 35;
+          else if (diff <= 10) score += 20;
+          else if (diff <= 25) score += 5;
+          else score -= 40;
         }
 
         const tl = (item.title || '').toLowerCase();
         const cl = (item.channel || item.uploader || '').toLowerCase();
+        const artistLower = cleanArtist.toLowerCase();
 
-        if (cl.includes('topic')) score += 40;
-        if (tl.includes('official audio')) score += 35;
-        else if (tl.includes('audio')) score += 20;
+        // 1. Prioritize YouTube Music / Label Studio Master Topic channels
+        if (cl.includes('topic')) score += 70;
+        // 2. Prioritize Official Artist channel
+        if (cl.includes(artistLower)) score += 60;
+
+        if (tl.includes('official audio')) score += 45;
+        else if (tl.includes('official visualizer') || tl.includes('visualizer')) score += 40;
+        else if (tl.includes('audio')) score += 30;
         else if (tl.includes('lyrics')) score += 15;
 
+        // Severe penalties for music videos with sound effects / dialogue
         if (tl.includes('official video') || tl.includes('music video') || tl.includes('official music video') || tl.includes('clip')) {
           score -= 40;
         }
-        if (tl.includes('live') && !cleanTitle.toLowerCase().includes('live')) score -= 60;
-        if (tl.includes('cover') && !cleanTitle.toLowerCase().includes('cover')) score -= 70;
-        if (tl.includes('remix') && !cleanTitle.toLowerCase().includes('remix')) score -= 50;
+        if (tl.includes('live') && !cleanTitle.toLowerCase().includes('live')) score -= 70;
+        if (tl.includes('cover') && !cleanTitle.toLowerCase().includes('cover')) score -= 80;
+        if (tl.includes('remix') && !cleanTitle.toLowerCase().includes('remix')) score -= 60;
+
+        // Penalize fan / unofficial video rips from trailers, series, games
+        if (!cl.includes(artistLower) && !cl.includes('topic')) {
+          if (['trailer', 'teaser', 'gameplay', 'netflix', 'series', 'ost', 'soundtrack', 'movie', 'scene', 'edit'].some(w => tl.includes(w))) {
+            score -= 60;
+          }
+        }
 
         candidates.push({ id: item.id, score, dur, diff, title: item.title });
       } catch (_) {}
@@ -868,7 +884,10 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
           fs.mkdirSync(targetDir, { recursive: true });
         }
         const safeTitle = sanitizeFilename(tr.title);
-        const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
+        const tempPrefix = `${safeTitle}.upg.${Date.now()}`;
+        const tempOutputTemplate = path.join(targetDir, `${tempPrefix}.%(ext)s`);
+        const tempFinalFile = path.join(targetDir, `${tempPrefix}.mp3`);
+        const destinationFile = path.join(targetDir, `${safeTitle}.mp3`);
 
         const audioSourceUrl = await findBestStudioAudioSource(tr.artist, tr.title, tr.duration_ms);
 
@@ -887,6 +906,8 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
             'ionice', '-c', '3',
             'yt-dlp',
             '--no-playlist',
+            '--force-overwrites',
+            '--no-continue',
             '-f', 'bestaudio/best',
             '--extract-audio',
             '--audio-format', 'mp3',
@@ -894,38 +915,47 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
             '--postprocessor-args', 'ExtractAudio:-b:a 320k -ar 44100',
             '--embed-thumbnail',
             '--add-metadata',
-            '-o', outputTemplate,
+            '-o', tempOutputTemplate,
             audioSourceUrl
           ]);
 
           const timer = setTimeout(() => {
             try { proc.kill('SIGKILL'); } catch (_) {}
-            cleanupPartialFiles(targetDir, safeTitle);
+            cleanupPartialFiles(targetDir, tempPrefix);
             finish(false);
           }, 90000);
 
           proc.on('close', code => {
-            if (code === 0) finish(true);
+            if (code === 0 && fs.existsSync(tempFinalFile)) finish(true);
             else {
-              cleanupPartialFiles(targetDir, safeTitle);
+              cleanupPartialFiles(targetDir, tempPrefix);
               finish(false);
             }
           });
           proc.on('error', () => {
-            cleanupPartialFiles(targetDir, safeTitle);
+            cleanupPartialFiles(targetDir, tempPrefix);
             finish(false);
           });
         });
 
         if (ok) {
-          const finalFile = path.join(targetDir, `${safeTitle}.mp3`);
-          const newProbe = await probeAudioFile(finalFile, tr.duration_ms);
+          const newProbe = await probeAudioFile(tempFinalFile, tr.duration_ms);
 
-          if (tr.duration_ms > 30000 && newProbe.valid && !newProbe.isHighQuality && newProbe.reason?.includes('Обрезан')) {
-            console.warn(`[Upgrade Quality] Downloaded file for "${tr.artist} - ${tr.title}" was truncated (${newProbe.durationSec}s). Discarding.`);
-            try { fs.unlinkSync(finalFile); } catch (_) {}
+          if (tr.duration_ms > 45000 && newProbe.valid && !newProbe.isHighQuality && newProbe.reason?.includes('Обрезан')) {
+            console.warn(`[Upgrade Quality] Downloaded file for "${tr.artist} - ${tr.title}" was truncated (${newProbe.durationSec}s). Keeping existing file.`);
+            try { fs.unlinkSync(tempFinalFile); } catch (_) {}
             upgradeProgress.errorCount++;
           } else {
+            // Safely and atomically replace destination file!
+            try {
+              if (fs.existsSync(destinationFile)) {
+                fs.unlinkSync(destinationFile);
+              }
+              fs.renameSync(tempFinalFile, destinationFile);
+            } catch (renErr: any) {
+              console.warn('[Upgrade Quality Rename Error]', renErr.message);
+            }
+
             if (!tr.cover_url || tr.cover_url.includes('mosaic.scdn.co')) {
               try {
                 const dz = await resolveDeezerTrackInfo(tr.artist, tr.title);
@@ -934,7 +964,8 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
                 }
               } catch (_) {}
             }
-            db.prepare('UPDATE tracks SET file_path = ? WHERE id = ?').run(finalFile, tr.id);
+            const updatedDur = Math.round(newProbe.durationSec * 1000) || tr.duration_ms;
+            db.prepare('UPDATE tracks SET file_path = ?, duration_ms = ? WHERE id = ?').run(destinationFile, updatedDur, tr.id);
             upgradeProgress.upgradedCount++;
             upgradeProgress.successCount++;
           }
