@@ -22,6 +22,107 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[\\/:*?"<>|]/g, '_').trim();
 }
 
+export function cleanupPartialFiles(targetDir: string, safeTitle: string) {
+  try {
+    if (!fs.existsSync(targetDir)) return;
+    const files = fs.readdirSync(targetDir);
+    for (const f of files) {
+      if (f.startsWith(safeTitle) && (f.endsWith('.part') || f.endsWith('.ytdl') || f.endsWith('.temp') || f.endsWith('.mp3'))) {
+        try {
+          fs.unlinkSync(path.join(targetDir, f));
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+}
+
+export interface AudioProbeResult {
+  valid: boolean;
+  durationSec: number;
+  bitrateKbps: number;
+  isHighQuality: boolean;
+  reason?: string;
+}
+
+export async function probeAudioFile(filePath: string, expectedDurationMs?: number): Promise<AudioProbeResult> {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return { valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: 'FILE_NOT_FOUND' };
+  }
+  try {
+    const stat = fs.statSync(filePath);
+    if (stat.size < 100000) {
+      return { valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: 'FILE_TOO_SMALL' };
+    }
+  } catch (e: any) {
+    return { valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: e.message };
+  }
+
+  return new Promise<AudioProbeResult>((resolve) => {
+    const proc = spawn('ffprobe', [
+      '-v', 'error',
+      '-show_format',
+      '-of', 'json',
+      filePath
+    ]);
+
+    let stdout = '';
+    proc.stdout.on('data', d => stdout += d.toString());
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        return resolve({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: 'PROBE_FAILED' });
+      }
+      try {
+        const data = JSON.parse(stdout)?.format || {};
+        const durationSec = parseFloat(data.duration) || 0;
+        const bitrateBps = parseInt(data.bit_rate, 10) || 0;
+        const bitrateKbps = Math.round(bitrateBps / 1000);
+
+        const expectedSec = expectedDurationMs ? expectedDurationMs / 1000 : 0;
+        let isTruncated = false;
+        if (expectedSec > 30) {
+          const diff = Math.abs(durationSec - expectedSec);
+          if (durationSec < expectedSec * 0.75 || diff > 15) {
+            isTruncated = true;
+          }
+        }
+
+        const isLowBitrate = bitrateKbps < 250;
+
+        if (isTruncated || isLowBitrate) {
+          const reasons: string[] = [];
+          if (isTruncated) reasons.push(`Обрезан (${Math.round(durationSec)}с вместо ${Math.round(expectedSec)}с)`);
+          if (isLowBitrate) reasons.push(`Низкий битрейт (${bitrateKbps} kbps)`);
+          return resolve({
+            valid: true,
+            durationSec,
+            bitrateKbps,
+            isHighQuality: false,
+            reason: reasons.join(', ')
+          });
+        }
+
+        return resolve({
+          valid: true,
+          durationSec,
+          bitrateKbps,
+          isHighQuality: true
+        });
+      } catch (err: any) {
+        resolve({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: err.message });
+      }
+    });
+
+    proc.on('error', (err) => {
+      resolve({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: err.message });
+    });
+
+    setTimeout(() => {
+      try { proc.kill('SIGKILL'); } catch (_) {}
+      resolve({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: 'PROBE_TIMEOUT' });
+    }, 10000);
+  });
+}
+
 export function enqueuePlaylistDownload(
   jobId: string,
   userId: number,
@@ -409,18 +510,27 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
         try { ytDlpProcess.kill('SIGTERM'); } catch (_) {}
         setTimeout(() => {
           try { ytDlpProcess.kill('SIGKILL'); } catch (_) {}
+          cleanupPartialFiles(targetDir, safeTitle);
         }, 3000);
         safeResolve();
       }
     }, 100000);
 
-    ytDlpProcess.on('close', (code) => {
+    ytDlpProcess.on('close', async (code) => {
       if (isSettled) return;
 
       if (code === 0) {
         // Find saved file
         const finalFile = path.join(targetDir, `${safeTitle}.mp3`);
-        const durationSec = Math.round(track.duration_ms / 1000) || 180;
+
+        // Verify audio file validity & duration
+        const probe = await probeAudioFile(finalFile, track.duration_ms);
+        if (track.duration_ms > 30000 && probe.valid && !probe.isHighQuality && probe.reason?.includes('Обрезан')) {
+          console.warn(`[yt-dlp truncated audio detected] "${track.artist} - ${track.title}": probed ${probe.durationSec}s vs expected ${track.duration_ms / 1000}s. Discarding.`);
+          try { fs.unlinkSync(finalFile); } catch (_) {}
+          safeResolve();
+          return;
+        }
 
         try {
           const doubleCheck: any = db.prepare(`
@@ -470,6 +580,7 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
         safeResolve();
       } else {
         console.warn(`[yt-dlp] Process exited with code ${code} for "${track.artist} - ${track.title}"`);
+        cleanupPartialFiles(targetDir, safeTitle);
         safeResolve(); // Continue with next track even if one failed
       }
     });
@@ -477,6 +588,7 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
     ytDlpProcess.on('error', (err) => {
       if (isSettled) return;
       console.warn(`[yt-dlp spawn error]:`, err.message);
+      cleanupPartialFiles(targetDir, safeTitle);
       safeResolve();
     });
   });
@@ -620,14 +732,20 @@ async function downloadSingleSpotifyTrackDirectInternal(
 
       const timer = setTimeout(() => {
         try { ytDlpProcess.kill('SIGKILL'); } catch (_) {}
+        cleanupPartialFiles(targetDir, safeTitle);
         finish(false);
       }, 90000);
 
       ytDlpProcess.on('close', (code) => {
-        finish(code === 0);
+        if (code === 0) finish(true);
+        else {
+          cleanupPartialFiles(targetDir, safeTitle);
+          finish(false);
+        }
       });
 
       ytDlpProcess.on('error', () => {
+        cleanupPartialFiles(targetDir, safeTitle);
         finish(false);
       });
     });
@@ -637,6 +755,14 @@ async function downloadSingleSpotifyTrackDirectInternal(
     }
 
     const finalFile = path.join(targetDir, `${safeTitle}.mp3`);
+
+    // Verify audio file
+    const probe = await probeAudioFile(finalFile, track.duration_ms);
+    if (track.duration_ms > 30000 && probe.valid && !probe.isHighQuality && probe.reason?.includes('Обрезан')) {
+      console.warn(`[yt-dlp single direct] Truncated audio detected for "${track.artist} - ${track.title}". Discarding.`);
+      try { fs.unlinkSync(finalFile); } catch (_) {}
+      return { success: false, error: `Скачанный файл оказался неполным (${Math.round(probe.durationSec)}с)` };
+    }
 
     // Safety re-check before insert
     const doubleCheck: any = db.prepare(`
@@ -678,6 +804,8 @@ export interface UpgradeProgress {
   current: number;
   currentTrack: string;
   successCount: number;
+  upgradedCount: number;
+  skippedCount: number;
   errorCount: number;
 }
 
@@ -687,6 +815,8 @@ const upgradeProgress: UpgradeProgress = {
   current: 0,
   currentTrack: '',
   successCount: 0,
+  upgradedCount: 0,
+  skippedCount: 0,
   errorCount: 0
 };
 
@@ -699,23 +829,39 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
     return { started: false, message: 'Процесс обновления уже выполняется' };
   }
 
-  const allTracks = db.prepare('SELECT id, title, artist, album, duration_ms, file_path, spotify_id FROM tracks ORDER BY id ASC').all() as any[];
+  const allTracks = db.prepare('SELECT id, title, artist, album, duration_ms, file_path, cover_url, spotify_id FROM tracks ORDER BY id ASC').all() as any[];
 
   upgradeProgress.isRunning = true;
   upgradeProgress.total = allTracks.length;
   upgradeProgress.current = 0;
   upgradeProgress.successCount = 0;
+  upgradeProgress.upgradedCount = 0;
+  upgradeProgress.skippedCount = 0;
   upgradeProgress.errorCount = 0;
 
   // Background worker loop
   (async () => {
-    console.log(`[Upgrade Quality] Starting high-fidelity (320 kbps) upgrade of ${allTracks.length} tracks...`);
+    console.log(`[Upgrade Quality] Starting smart selective high-fidelity upgrade of ${allTracks.length} tracks...`);
     for (let i = 0; i < allTracks.length; i++) {
       const tr = allTracks[i];
       upgradeProgress.current = i + 1;
       upgradeProgress.currentTrack = `${tr.artist} - ${tr.title}`;
 
       try {
+        // Step 1: Probe existing file to see if already high quality (320 kbps & full duration)
+        const probe = await probeAudioFile(tr.file_path, tr.duration_ms);
+
+        if (probe.isHighQuality) {
+          // Already 320 kbps (or >= 250 kbps) and full duration!
+          upgradeProgress.skippedCount++;
+          upgradeProgress.successCount++;
+          console.log(`[Upgrade Quality] [${i + 1}/${allTracks.length}] Skipping "${tr.artist} - ${tr.title}" (already ${probe.bitrateKbps} kbps, full duration ${Math.round(probe.durationSec)}s)`);
+          await new Promise(r => setTimeout(r, 20));
+          continue;
+        }
+
+        console.log(`[Upgrade Quality] [${i + 1}/${allTracks.length}] Upgrading "${tr.artist} - ${tr.title}" (Reason: ${probe.reason || 'Missing or low bitrate'})...`);
+
         const artistFolder = sanitizeFilename(tr.artist || 'Unknown Artist');
         const targetDir = path.join(MUSIC_DIR, artistFolder);
         if (!fs.existsSync(targetDir)) {
@@ -754,25 +900,44 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
 
           const timer = setTimeout(() => {
             try { proc.kill('SIGKILL'); } catch (_) {}
+            cleanupPartialFiles(targetDir, safeTitle);
             finish(false);
           }, 90000);
 
-          proc.on('close', code => finish(code === 0));
-          proc.on('error', () => finish(false));
+          proc.on('close', code => {
+            if (code === 0) finish(true);
+            else {
+              cleanupPartialFiles(targetDir, safeTitle);
+              finish(false);
+            }
+          });
+          proc.on('error', () => {
+            cleanupPartialFiles(targetDir, safeTitle);
+            finish(false);
+          });
         });
 
         if (ok) {
           const finalFile = path.join(targetDir, `${safeTitle}.mp3`);
-          if (!tr.cover_url || tr.cover_url.includes('mosaic.scdn.co')) {
-            try {
-              const dz = await resolveDeezerTrackInfo(tr.artist, tr.title);
-              if (dz.cover_url) {
-                db.prepare('UPDATE tracks SET cover_url = ? WHERE id = ?').run(dz.cover_url, tr.id);
-              }
-            } catch (_) {}
+          const newProbe = await probeAudioFile(finalFile, tr.duration_ms);
+
+          if (tr.duration_ms > 30000 && newProbe.valid && !newProbe.isHighQuality && newProbe.reason?.includes('Обрезан')) {
+            console.warn(`[Upgrade Quality] Downloaded file for "${tr.artist} - ${tr.title}" was truncated (${newProbe.durationSec}s). Discarding.`);
+            try { fs.unlinkSync(finalFile); } catch (_) {}
+            upgradeProgress.errorCount++;
+          } else {
+            if (!tr.cover_url || tr.cover_url.includes('mosaic.scdn.co')) {
+              try {
+                const dz = await resolveDeezerTrackInfo(tr.artist, tr.title);
+                if (dz.cover_url) {
+                  db.prepare('UPDATE tracks SET cover_url = ? WHERE id = ?').run(dz.cover_url, tr.id);
+                }
+              } catch (_) {}
+            }
+            db.prepare('UPDATE tracks SET file_path = ? WHERE id = ?').run(finalFile, tr.id);
+            upgradeProgress.upgradedCount++;
+            upgradeProgress.successCount++;
           }
-          db.prepare('UPDATE tracks SET file_path = ? WHERE id = ?').run(finalFile, tr.id);
-          upgradeProgress.successCount++;
         } else {
           upgradeProgress.errorCount++;
         }
@@ -787,13 +952,13 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
 
     upgradeProgress.isRunning = false;
     upgradeProgress.currentTrack = '';
-    console.log(`[Upgrade Quality Completed] Success: ${upgradeProgress.successCount}, Errors: ${upgradeProgress.errorCount}`);
+    console.log(`[Upgrade Quality Completed] Upgraded: ${upgradeProgress.upgradedCount}, Already High Quality: ${upgradeProgress.skippedCount}, Errors: ${upgradeProgress.errorCount}`);
     await refreshJellyfinLibrary();
   })().catch(err => {
     upgradeProgress.isRunning = false;
     console.error('[Upgrade Quality Fatal]', err);
   });
 
-  return { started: true, message: `Запущено обновление ${allTracks.length} треков в студийное качество (320 kbps)` };
+  return { started: true, message: `Запущена выборочная проверка и перезагрузка треков низкого качества (320 kbps)` };
 }
 

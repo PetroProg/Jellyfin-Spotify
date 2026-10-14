@@ -70,6 +70,8 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     current: number;
     currentTrack: string;
     successCount: number;
+    upgradedCount?: number;
+    skippedCount?: number;
     errorCount: number;
   }>({
     isRunning: false,
@@ -77,6 +79,8 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     current: 0,
     currentTrack: '',
     successCount: 0,
+    upgradedCount: 0,
+    skippedCount: 0,
     errorCount: 0
   });
   const [startingUpgrade, setStartingUpgrade] = useState(false);
@@ -151,9 +155,9 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
 
   const handleStartUpgrade = async () => {
     const ok = await confirmDialog({
-      title: 'Обновить качество медиатеки',
-      message: 'Перезагрузить все песни медиатеки в максимальном качестве 320 kbps со студийными источниками? Процесс выполняется в фоне без нагрузки на процессор.',
-      confirmText: 'Запустить обновление',
+      title: 'Умное обновление качества медиатеки',
+      message: 'Система проверит битрейт и полную длительность каждого трека. Песни, уже скачанные в отличном качестве (320 kbps), будут пропущены. Будут перезагружены только обрезанные треки и треки низкого качества.',
+      confirmText: 'Запустить умное обновление',
       cancelText: 'Отмена'
     });
     if (!ok) return;
@@ -510,11 +514,11 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
             </div>
 
             {upgradeStatus.isRunning ? (
-              <div className="space-y-2 pt-2">
+              <div className="space-y-2.5 pt-2">
                 <div className="flex items-center justify-between text-xs font-semibold">
                   <span className="text-cat-mauve flex items-center gap-1.5">
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Перезагрузка треков в качестве 320 kbps...
+                    Проверка и выборочная перезагрузка (320 kbps)...
                   </span>
                   <span className="text-cat-subtext0 font-mono">
                     {upgradeStatus.current} / {upgradeStatus.total} ({upgradeStatus.total > 0 ? Math.round((upgradeStatus.current / upgradeStatus.total) * 100) : 0}%)
@@ -535,16 +539,26 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
                     Сейчас: <span className="text-cat-text">{upgradeStatus.currentTrack}</span>
                   </p>
                 )}
-                <div className="flex gap-4 text-[11px] text-cat-subtext0">
-                  <span className="text-cat-green">Успешно: {upgradeStatus.successCount}</span>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
+                  <span className="text-cat-green">Уже в 320k (пропущено): {upgradeStatus.skippedCount || 0}</span>
+                  <span className="text-cat-peach">Перезагружено: {upgradeStatus.upgradedCount || 0}</span>
                   {upgradeStatus.errorCount > 0 && <span className="text-cat-red">Ошибок: {upgradeStatus.errorCount}</span>}
                 </div>
               </div>
             ) : (
               upgradeStatus.total > 0 && upgradeStatus.current >= upgradeStatus.total && (
-                <div className="flex items-center gap-2 text-xs text-cat-green font-medium pt-1">
-                  <Check className="w-4 h-4" />
-                  <span>Все {upgradeStatus.total} треков успешно обновлены до качества 320 kbps!</span>
+                <div className="space-y-1 text-xs text-cat-green font-medium pt-1">
+                  <div className="flex items-center gap-2">
+                    <Check className="w-4 h-4" />
+                    <span>Все {upgradeStatus.total} треков проверены!</span>
+                  </div>
+                  <div className="text-[11px] text-cat-subtext0 pl-6 space-y-0.5">
+                    <p>• Уже были в высоком качестве (320 kbps): <span className="text-cat-green font-semibold">{upgradeStatus.skippedCount || 0}</span></p>
+                    <p>• Перезагружено в высоком качестве: <span className="text-cat-peach font-semibold">{upgradeStatus.upgradedCount || 0}</span></p>
+                    {upgradeStatus.errorCount > 0 && (
+                      <p>• Ошибок: <span className="text-cat-red font-semibold">{upgradeStatus.errorCount}</span></p>
+                    )}
+                  </div>
                 </div>
               )
             )}
@@ -558,12 +572,12 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
             {startingUpgrade || upgradeStatus.isRunning ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Обновление в процессе...</span>
+                <span>Проверка и обновление...</span>
               </>
             ) : (
               <>
                 <Sparkles className="w-4 h-4" />
-                <span>Перезагрузить все песни в максимальном качестве (320 kbps)</span>
+                <span>Перезагрузить треки низкого качества (320 kbps)</span>
               </>
             )}
           </button>
