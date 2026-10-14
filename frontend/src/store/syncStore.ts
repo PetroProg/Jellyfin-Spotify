@@ -3,6 +3,7 @@ import { Track } from '../types';
 import { useAuthStore } from './authStore';
 import { usePlayerStore } from './playerStore';
 import { toast } from './toastStore';
+import { getToken } from '../api/client';
 
 export interface ConnectedDevice {
   id: string;
@@ -106,7 +107,7 @@ export const useSyncStore = create<SyncState>((set, get) => {
     isDevicePickerOpen: false,
 
     initSync: () => {
-      const token = useAuthStore.getState().token;
+      const token = getToken();
       if (!token) return;
 
       if (wsInstance && (wsInstance.readyState === WebSocket.OPEN || wsInstance.readyState === WebSocket.CONNECTING)) {
