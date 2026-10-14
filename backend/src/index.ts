@@ -549,12 +549,22 @@ server.get('/api/spotify/callback', async (req: any, reply: any) => {
   const state = req.query.state;
   const error = req.query.error;
 
+  console.log('[Spotify Callback]', {
+    url: req.raw.url,
+    query: req.query,
+    hasCode: Boolean(code),
+    hasState: Boolean(state),
+    error: error || null
+  });
+
   if (error || !code || !state) {
+    console.warn('[Spotify Callback Missing Code/State]', { error, hasCode: Boolean(code), hasState: Boolean(state) });
     return reply.redirect('/settings?spotify_error=' + encodeURIComponent(error || 'Отсутствует код авторизации'));
   }
 
   try {
     const result = await handleSpotifyOAuthCallback(code, state);
+    console.log('[Spotify Callback Success]', { userId: (result as any)?.userId });
     return reply.redirect('/settings?spotify_connected=1');
   } catch (err: any) {
     console.error('[Spotify OAuth Callback Error]', err.message);
