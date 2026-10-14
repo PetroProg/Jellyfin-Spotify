@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { Track, RepeatMode } from '../types';
 import { apiRequest } from '../api/client';
 import { useSyncStore } from './syncStore';
+import { toast } from './toastStore';
 
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
@@ -36,7 +37,8 @@ interface PlayerState {
   isNormalizerEnabled: boolean;
 
   playTrack: (track: Track, newQueue?: Track[], index?: number) => void;
-  playTrackLocally: (track: Track, newQueue?: Track[], index?: number, startTime?: number) => void;
+  playTrackLocally: (track: Track, newQueue?: Track[], index?: number, startTime?: number, autoPlay?: boolean) => void;
+  stopLocalPlayback: () => void;
   shufflePlay: (tracks: Track[]) => void;
   togglePlay: () => void;
   pause: () => void;
@@ -172,6 +174,19 @@ function ensureAudioGraph() {
   }
 }
 
+// Proactive user-gesture unlock for Web Audio API and HTML5 Audio
+if (typeof window !== 'undefined') {
+  const unlockAudio = () => {
+    ensureAudioGraph();
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(() => {});
+    }
+  };
+  window.addEventListener('click', unlockAudio, { passive: true });
+  window.addEventListener('touchstart', unlockAudio, { passive: true });
+  window.addEventListener('keydown', unlockAudio, { passive: true });
+}
+
 export const usePlayerStore = create<PlayerState>((set, get) => {
   // Sync Audio Events
   let lastSyncTime = 0;
@@ -289,9 +304,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       useSyncStore.getState().sendPlaybackState();
     },
 
-    playTrackLocally: (track, newQueue, index, startTime) => {
-      let q = newQueue ? [...newQueue] : get().queue;
-      let idx = index !== undefined ? index : q.findIndex((t) => t.id === track.id);
+    playTrackLocally: (track, newQueue, index, startTime, autoPlay = true) => {
+      let q = newQueue && newQueue.length > 0 ? [...newQueue] : get().queue;
+      let idx = index !== undefined && index >= 0 ? index : q.findIndex((t) => t.id === track.id);
 
       if (idx === -1) {
         q = [track, ...q];
@@ -301,9 +316,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       set({
         currentTrack: track,
         queue: q,
-        originalQueue: newQueue ? [...newQueue] : get().originalQueue,
+        originalQueue: newQueue && newQueue.length > 0 ? [...newQueue] : get().originalQueue,
         currentIndex: idx,
-        isPlaying: true,
+        isPlaying: autoPlay,
         currentTime: startTime || 0,
       });
 
@@ -312,13 +327,54 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audioCtx.resume().catch(() => {});
       }
 
-      audio.src = `/api/stream/${track.id}`;
-      if (startTime && startTime > 0) {
-        audio.currentTime = startTime;
+      const streamUrl = `/api/stream/${track.id}`;
+      const needsSourceChange = !audio.src.endsWith(streamUrl);
+      if (needsSourceChange) {
+        audio.src = streamUrl;
       }
-      audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
+
+      const applySeek = () => {
+        if (startTime && startTime > 0) {
+          try {
+            audio.currentTime = startTime;
+          } catch (_) {}
+        }
+      };
+
+      if (!needsSourceChange && audio.readyState >= 1) {
+        applySeek();
+      } else {
+        audio.addEventListener('loadedmetadata', applySeek, { once: true });
+      }
+
+      if (autoPlay) {
+        audio.play().catch((err) => {
+          console.warn('[Audio play interrupted / autoplay policy]:', err);
+          if (err.name === 'NotAllowedError') {
+            toast.info('Нажмите в любом месте для включения звука на этом устройстве');
+            const unlock = () => {
+              audio.play().catch(() => {});
+              window.removeEventListener('click', unlock);
+              window.removeEventListener('keydown', unlock);
+              window.removeEventListener('touchstart', unlock);
+            };
+            window.addEventListener('click', unlock, { once: true });
+            window.addEventListener('keydown', unlock, { once: true });
+            window.addEventListener('touchstart', unlock, { once: true });
+          }
+        });
+      } else {
+        audio.pause();
+      }
+
       updateMediaSession(track);
       useSyncStore.getState().sendPlaybackState();
+    },
+
+    stopLocalPlayback: () => {
+      try {
+        audio.pause();
+      } catch (_) {}
     },
 
     shufflePlay: (tracks: Track[]) => {

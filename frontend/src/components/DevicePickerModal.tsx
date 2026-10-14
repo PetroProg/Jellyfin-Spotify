@@ -26,7 +26,7 @@ export const DevicePickerModal: React.FC = () => {
   if (!isDevicePickerOpen) return null;
 
   const handleDeviceClick = (targetId: string) => {
-    if (targetId === activeDeviceId) return;
+    if (targetId === activeDeviceId && isLocalActive) return;
     setSwitching(targetId);
     transferPlayback(targetId);
     setTimeout(() => {

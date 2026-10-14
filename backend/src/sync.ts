@@ -297,19 +297,38 @@ export function setupWebSocketSync(server: FastifyInstance) {
           }
 
           case 'TRANSFER_PLAYBACK': {
-            const { targetDeviceId } = data;
+            const { targetDeviceId, state: clientState } = data;
             if (!targetDeviceId) return;
 
             const clients = userClients.get(userId);
             if (!clients) return;
             const targetClient = clients.get(targetDeviceId);
-            if (!targetClient) return;
+            if (!targetClient) {
+              safeSend(ws, {
+                type: 'DEVICES_CHANGED',
+                activeDeviceId: playback.activeDeviceId,
+                activeDeviceName: playback.activeDeviceName,
+                devices: getDeviceList(userId),
+              });
+              return;
+            }
 
             const oldActiveId = playback.activeDeviceId;
             const oldClient = oldActiveId ? clients.get(oldActiveId) : null;
 
-            // Interpolate current playhead if it was playing
-            if (playback.isPlaying && playback.updatedAt) {
+            // Merge incoming state from client if provided
+            if (clientState) {
+              if (clientState.track) playback.track = clientState.track;
+              if (clientState.isPlaying !== undefined) playback.isPlaying = clientState.isPlaying;
+              if (clientState.currentTime !== undefined) playback.currentTime = clientState.currentTime;
+              if (clientState.duration !== undefined) playback.duration = clientState.duration;
+              if (clientState.queue) playback.queue = clientState.queue;
+              if (clientState.originalQueue) playback.originalQueue = clientState.originalQueue;
+              if (clientState.currentIndex !== undefined) playback.currentIndex = clientState.currentIndex;
+              if (clientState.shuffle !== undefined) playback.shuffle = clientState.shuffle;
+              if (clientState.repeat !== undefined) playback.repeat = clientState.repeat;
+            } else if (playback.isPlaying && playback.updatedAt) {
+              // Interpolate current playhead if client didn't supply state
               const elapsed = (Date.now() - playback.updatedAt) / 1000;
               if (elapsed > 0 && elapsed < 3600) {
                 playback.currentTime = Math.min(playback.duration || 99999, playback.currentTime + elapsed);

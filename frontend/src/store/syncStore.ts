@@ -158,11 +158,11 @@ export const useSyncStore = create<SyncState>((set, get) => {
                   devices: devices || [],
                 });
 
-                // If remote device has active playback, mirror state into local playerStore without playing audio
-                if (!isLocal && playback && playback.track) {
+                // Mirror active playback state into local playerStore
+                if (playback && playback.track) {
                   usePlayerStore.setState({
                     currentTrack: playback.track,
-                    isPlaying: playback.isPlaying,
+                    isPlaying: isLocal ? false : Boolean(playback.isPlaying),
                     currentTime: playback.currentTime || 0,
                     duration: playback.duration || 0,
                     queue: playback.queue || [playback.track],
@@ -188,6 +188,7 @@ export const useSyncStore = create<SyncState>((set, get) => {
 
               case 'PLAYBACK_UPDATE': {
                 const { activeDeviceId, activeDeviceName, state } = data;
+                const wasLocal = get().isLocalActive;
                 const isLocal = activeDeviceId === deviceId;
 
                 set({
@@ -195,6 +196,11 @@ export const useSyncStore = create<SyncState>((set, get) => {
                   activeDeviceName,
                   isLocalActive: isLocal,
                 });
+
+                if (wasLocal && !isLocal) {
+                  // We were active, but another device took over! Stop our local audio.
+                  usePlayerStore.getState().stopLocalPlayback();
+                }
 
                 if (!isLocal && state) {
                   // Mirror playback onto passive UI without playing local sound
@@ -215,7 +221,7 @@ export const useSyncStore = create<SyncState>((set, get) => {
 
               case 'STOP_LOCAL_PLAYBACK': {
                 set({ isLocalActive: false });
-                usePlayerStore.getState().pause();
+                usePlayerStore.getState().stopLocalPlayback();
                 break;
               }
 
@@ -224,10 +230,14 @@ export const useSyncStore = create<SyncState>((set, get) => {
                 set({ isLocalActive: true, activeDeviceId: deviceId, activeDeviceName: get().deviceName });
 
                 if (state && state.track) {
-                  usePlayerStore.getState().playTrackLocally(state.track, state.queue, state.currentIndex, state.currentTime);
-                  if (!state.isPlaying) {
-                    usePlayerStore.getState().pause();
-                  }
+                  const shouldPlay = state.isPlaying !== false;
+                  usePlayerStore.getState().playTrackLocally(
+                    state.track,
+                    state.queue,
+                    state.currentIndex,
+                    state.currentTime,
+                    shouldPlay
+                  );
                   toast.success(`Звук переключен на «${get().deviceName}»`);
                 }
                 break;
@@ -267,6 +277,17 @@ export const useSyncStore = create<SyncState>((set, get) => {
                   case 'shufflePlay':
                     if (value && Array.isArray(value.tracks)) {
                       player.shufflePlay(value.tracks);
+                    }
+                    break;
+                  case 'toggleShuffle':
+                    player.toggleShuffle();
+                    break;
+                  case 'repeat':
+                    if (value) {
+                      usePlayerStore.setState({ repeat: value });
+                      useSyncStore.getState().sendPlaybackState({ repeat: value });
+                    } else {
+                      player.toggleRepeat();
                     }
                     break;
                 }
@@ -395,16 +416,33 @@ export const useSyncStore = create<SyncState>((set, get) => {
       const { isConnected, deviceId } = get();
       if (!isConnected || !wsInstance || wsInstance.readyState !== WebSocket.OPEN) return;
 
+      const player = usePlayerStore.getState();
+      const currentState = {
+        track: player.currentTrack,
+        isPlaying: player.isPlaying,
+        currentTime: player.currentTime,
+        duration: player.duration,
+        queue: player.queue,
+        originalQueue: player.originalQueue,
+        currentIndex: player.currentIndex,
+        shuffle: player.shuffle,
+        repeat: player.repeat,
+      };
+
+      if (targetDeviceId !== deviceId) {
+        set({ isLocalActive: false, activeDeviceId: targetDeviceId });
+        usePlayerStore.getState().stopLocalPlayback();
+      } else {
+        set({ isLocalActive: true, activeDeviceId: deviceId, activeDeviceName: get().deviceName });
+      }
+
       wsInstance.send(
         JSON.stringify({
           type: 'TRANSFER_PLAYBACK',
           targetDeviceId,
+          state: currentState,
         })
       );
-
-      if (targetDeviceId === deviceId) {
-        set({ isLocalActive: true, activeDeviceId: deviceId, activeDeviceName: get().deviceName });
-      }
     },
 
     setDevicePickerOpen: (open: boolean) => {
