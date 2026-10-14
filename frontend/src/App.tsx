@@ -26,7 +26,16 @@ export const App: React.FC = () => {
   const { isAuthenticated, isLoading, fetchMe } = useAuthStore();
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   
-  const [currentTab, setCurrentTab] = useState('home');
+  const getInitialTab = (): string => {
+    const path = window.location.pathname.toLowerCase();
+    const search = window.location.search.toLowerCase();
+    if (path.startsWith('/settings') || search.includes('spotify_')) return 'settings';
+    if (path.startsWith('/liked')) return 'liked';
+    if (path.startsWith('/search')) return 'search';
+    return 'home';
+  };
+
+  const [currentTab, setCurrentTab] = useState(getInitialTab);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<number | null>(null);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [isQueueOpen, setIsQueueOpen] = useState(false);
@@ -51,8 +60,9 @@ export const App: React.FC = () => {
 
     fetchMe();
     useOfflineStore.getState().loadDownloaded();
+    const initTab = getInitialTab();
     if (!window.history.state) {
-      window.history.replaceState({ tab: 'home', playlistId: null, isFullPlayer: false }, '', window.location.pathname);
+      window.history.replaceState({ tab: initTab, playlistId: null, isFullPlayer: false }, '', window.location.pathname + window.location.search);
     }
   }, []);
 
