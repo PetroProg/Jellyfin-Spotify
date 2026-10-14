@@ -108,15 +108,30 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
     return sortAsc ? comp : -comp;
   });
 
+  useEffect(() => {
+    const handleBlacklisted = (e: any) => {
+      const { trackId, title, artist } = e.detail || {};
+      setTracks((prev) =>
+        prev.filter(
+          (t) =>
+            t.id !== trackId &&
+            !(
+              t.title.toLowerCase() === (title || '').toLowerCase() &&
+              t.artist.toLowerCase() === (artist || '').toLowerCase()
+            )
+        )
+      );
+    };
+    window.addEventListener('jellyfy:track_blacklisted', handleBlacklisted);
+    return () => window.removeEventListener('jellyfy:track_blacklisted', handleBlacklisted);
+  }, []);
+
   const handleBlacklist = async (track: Track) => {
     try {
-      await apiRequest('/blacklist', {
-        method: 'POST',
-        body: JSON.stringify({ title: track.title, artist: track.artist })
-      });
-      setTracks(prev => prev.filter(t => t.id !== track.id));
-    } catch (e) {
-      console.warn(e);
+      await usePlayerStore.getState().blacklistTrack(track);
+      toast.info(`«${track.title}» добавлена в «Никогда не включать» и удалена из плейлистов`);
+    } catch (e: any) {
+      toast.error(e.message || 'Ошибка добавления в черный список');
     }
   };
 

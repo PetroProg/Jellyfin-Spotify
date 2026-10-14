@@ -168,6 +168,12 @@ export const App: React.FC = () => {
       loadPlaylists();
       usePlayerStore.getState().loadLikes();
     }
+
+    const handleBlacklisted = () => {
+      loadPlaylists();
+    };
+    window.addEventListener('jellyfy:track_blacklisted', handleBlacklisted);
+    return () => window.removeEventListener('jellyfy:track_blacklisted', handleBlacklisted);
   }, [isAuthenticated]);
 
   const handleCreatePlaylist = async (e: React.FormEvent) => {

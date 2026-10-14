@@ -14,6 +14,7 @@ export interface Track {
   cover_url?: string;
   added_at?: string;
   position?: number;
+  spotify_id?: string;
 }
 
 export interface Playlist {

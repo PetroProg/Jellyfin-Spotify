@@ -51,6 +51,7 @@ interface PlayerState {
   likedTrackIds: number[];
   loadLikes: () => Promise<void>;
   toggleLikeTrack: (trackId: number) => Promise<boolean>;
+  blacklistTrack: (track: Track) => Promise<void>;
 
   setEqGain: (bandIndex: number, gain: number) => void;
   setEqPreset: (presetId: string) => void;
@@ -442,6 +443,80 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         set({ likedTrackIds });
         throw err;
       }
+    },
+
+    blacklistTrack: async (track: Track) => {
+      await apiRequest('/blacklist', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: track.title,
+          artist: track.artist,
+          track_id: track.id,
+          spotify_id: track.spotify_id,
+        }),
+      });
+
+      // 1. Remove from liked tracks state
+      set((state) => ({
+        likedTrackIds: state.likedTrackIds.filter((id) => id !== track.id),
+      }));
+
+      // 2. Filter current queue
+      const { currentTrack, queue, originalQueue, currentIndex, playTrack } = get();
+      const isCurrent =
+        currentTrack &&
+        (currentTrack.id === track.id ||
+          (currentTrack.title.toLowerCase() === track.title.toLowerCase() &&
+            currentTrack.artist.toLowerCase() === track.artist.toLowerCase()));
+
+      const filteredQueue = queue.filter(
+        (t) =>
+          t.id !== track.id &&
+          !(t.title.toLowerCase() === track.title.toLowerCase() &&
+            t.artist.toLowerCase() === track.artist.toLowerCase())
+      );
+      const filteredOriginal = originalQueue.filter(
+        (t) =>
+          t.id !== track.id &&
+          !(t.title.toLowerCase() === track.title.toLowerCase() &&
+            t.artist.toLowerCase() === track.artist.toLowerCase())
+      );
+
+      if (isCurrent) {
+        if (filteredQueue.length > 0) {
+          const nextIdx = currentIndex < filteredQueue.length ? currentIndex : 0;
+          const nextT = filteredQueue[nextIdx];
+          set({ queue: filteredQueue, originalQueue: filteredOriginal, currentIndex: nextIdx });
+          playTrack(nextT, filteredQueue, nextIdx);
+        } else {
+          audio.pause();
+          audio.src = '';
+          set({
+            currentTrack: null,
+            queue: [],
+            originalQueue: [],
+            isPlaying: false,
+            currentTime: 0,
+            duration: 0,
+          });
+        }
+      } else {
+        const newCurrentIdx = currentTrack
+          ? filteredQueue.findIndex((t) => t.id === currentTrack.id)
+          : 0;
+        set({
+          queue: filteredQueue,
+          originalQueue: filteredOriginal,
+          currentIndex: Math.max(0, newCurrentIdx),
+        });
+      }
+
+      // 3. Dispatch global event for other components
+      window.dispatchEvent(
+        new CustomEvent('jellyfy:track_blacklisted', {
+          detail: { trackId: track.id, title: track.title, artist: track.artist },
+        })
+      );
     },
 
     // Equalizer & Normalizer Actions

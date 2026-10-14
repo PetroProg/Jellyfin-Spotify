@@ -847,15 +847,45 @@ server.get('/api/blacklist', { preHandler: [(server as any).authenticate] }, asy
 
 server.post('/api/blacklist', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const body = req.body || {};
-  const { title, artist, spotify_id } = body;
+  const { title, artist, spotify_id, track_id } = body;
   if (!title || !artist) return reply.status(400).send({ error: 'Название и артист обязательны' });
 
-  db.prepare(`
-    INSERT INTO blacklist (user_id, title, artist, spotify_id)
-    VALUES (?, ?, ?, ?)
-  `).run(req.user.id, title, artist, spotify_id || '');
+  // 1. Add to blacklist if not already added
+  const existing = db.prepare(
+    'SELECT id FROM blacklist WHERE user_id = ? AND LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?)'
+  ).get(req.user.id, title, artist);
+  if (!existing) {
+    db.prepare(`
+      INSERT INTO blacklist (user_id, title, artist, spotify_id)
+      VALUES (?, ?, ?, ?)
+    `).run(req.user.id, title, artist, spotify_id || '');
+  }
 
-  return { success: true };
+  // 2. Remove this track from ALL playlists owned by this user
+  const targetTrackIds: number[] = [];
+  if (track_id) {
+    targetTrackIds.push(Number(track_id));
+  }
+  const matchingTracks: any[] = db.prepare(
+    'SELECT id FROM tracks WHERE LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?)'
+  ).all(title, artist);
+  for (const mt of matchingTracks) {
+    if (!targetTrackIds.includes(mt.id)) {
+      targetTrackIds.push(mt.id);
+    }
+  }
+
+  for (const tid of targetTrackIds) {
+    db.prepare(`
+      DELETE FROM playlist_tracks 
+      WHERE track_id = ? 
+        AND playlist_id IN (SELECT id FROM playlists WHERE user_id = ?)
+    `).run(tid, req.user.id);
+
+    db.prepare('DELETE FROM liked_tracks WHERE user_id = ? AND track_id = ?').run(req.user.id, tid);
+  }
+
+  return { success: true, removedCount: targetTrackIds.length };
 });
 
 server.delete('/api/blacklist/:id', { preHandler: [(server as any).authenticate] }, async (req: any) => {

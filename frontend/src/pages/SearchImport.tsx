@@ -255,13 +255,11 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
 
   const handleBlacklist = async (track: Track) => {
     try {
-      await apiRequest('/blacklist', {
-        method: 'POST',
-        body: JSON.stringify({ title: track.title, artist: track.artist })
-      });
+      await usePlayerStore.getState().blacklistTrack(track);
       setLocalResults((prev) => prev.filter((t) => t.id !== track.id));
-    } catch (e) {
-      console.warn(e);
+      toast.info(`«${track.title}» добавлена в «Никогда не включать» и удалена из плейлистов`);
+    } catch (e: any) {
+      toast.error(e.message || 'Ошибка добавления в черный список');
     }
   };
 

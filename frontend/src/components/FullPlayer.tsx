@@ -2,12 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { 
   ChevronDown, Heart, Shuffle, SkipBack, Play, Pause, 
   SkipForward, Repeat, Repeat1, Music2, Sparkles, FolderPlus,
-  SlidersHorizontal 
+  SlidersHorizontal, Ban
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { apiRequest } from '../api/client';
 import { AddToPlaylistModal } from './AddToPlaylistModal';
 import { EqualizerModal } from './EqualizerModal';
+import { toast } from '../store/toastStore';
 
 export const FullPlayer: React.FC = () => {
   const {
@@ -31,9 +32,11 @@ export const FullPlayer: React.FC = () => {
     toggleLikeTrack,
     loadLikes,
     setEqualizerOpen,
+    blacklistTrack,
   } = usePlayerStore();
 
   const [isAddToPlaylistOpen, setIsAddToPlaylistOpen] = useState(false);
+  const [blacklisting, setBlacklisting] = useState(false);
 
   const isLiked = currentTrack ? likedTrackIds.includes(currentTrack.id) : false;
 
@@ -47,6 +50,20 @@ export const FullPlayer: React.FC = () => {
       await toggleLikeTrack(currentTrack.id);
     } catch (e) {
       console.warn(e);
+    }
+  };
+
+  const handleBlacklistCurrent = async () => {
+    if (!currentTrack || blacklisting) return;
+    setBlacklisting(true);
+    try {
+      const trackToBlacklist = currentTrack;
+      await blacklistTrack(trackToBlacklist);
+      toast.info(`«${trackToBlacklist.title}» добавлена в «Никогда не включать» и удалена из плейлистов`);
+    } catch (e: any) {
+      toast.error(e.message || 'Ошибка добавления в черный список');
+    } finally {
+      setBlacklisting(false);
     }
   };
 
@@ -141,6 +158,14 @@ export const FullPlayer: React.FC = () => {
             }`}
           >
             <Heart className={`w-7 h-7 ${isLiked ? 'fill-current' : ''}`} />
+          </button>
+          <button
+            onClick={handleBlacklistCurrent}
+            disabled={blacklisting}
+            title="Никогда не включать"
+            className="p-2 rounded-full text-cat-subtext0 hover:text-cat-red transition-transform active:scale-125 disabled:opacity-40"
+          >
+            <Ban className="w-7 h-7" />
           </button>
         </div>
       </div>
