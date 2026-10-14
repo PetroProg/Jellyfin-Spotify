@@ -715,9 +715,9 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
                   </a>
 
                   {spotifyAuthInfo.redirectUri && (
-                    <div className="p-3 rounded-2xl bg-cat-surface0/60 border border-cat-surface1/30 space-y-1.5 text-xs">
+                    <div className="p-3.5 rounded-2xl bg-cat-surface0/60 border border-cat-surface1/30 space-y-2 text-xs">
                       <div className="flex items-center justify-between text-cat-subtext0">
-                        <span>Redirect URI для Spotify Developer Dashboard:</span>
+                        <span className="font-semibold text-cat-text">Redirect URI для Spotify Dashboard:</span>
                         <button
                           type="button"
                           onClick={handleCopyRedirect}
@@ -730,6 +730,26 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
                       <code className="block bg-cat-mantle px-2.5 py-1.5 rounded-xl font-mono text-[11px] text-cat-text break-all select-all">
                         {spotifyAuthInfo.redirectUri}
                       </code>
+                      <div className="pt-2 border-t border-cat-surface1/30 text-[11px] text-cat-subtext0 space-y-1">
+                        <p className="text-cat-peach font-bold">⚠️ Если вы видите ошибку «redirect_uri: Not matching configuration»:</p>
+                        <ol className="list-decimal list-inside space-y-0.5 text-[11px] text-cat-subtext0">
+                          <li>
+                            Перейдите в{' '}
+                            <a
+                              href="https://developer.spotify.com/dashboard"
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-cat-mauve underline font-semibold"
+                            >
+                              Spotify Developer Dashboard
+                            </a>{' '}
+                            и откройте ваше созданное приложение.
+                          </li>
+                          <li>Нажмите кнопку <b>Settings</b> (вверху справа).</li>
+                          <li>В блоке <b>Redirect URIs</b> нажмите <b>Add</b> и вставьте скопированную ссылку выше.</li>
+                          <li>Прокрутите страницу в самый низ и нажмите зеленую кнопку <b>Save</b>!</li>
+                        </ol>
+                      </div>
                     </div>
                   )}
                 </div>
