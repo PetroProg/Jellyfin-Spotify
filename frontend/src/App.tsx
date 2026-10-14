@@ -29,7 +29,7 @@ export const App: React.FC = () => {
   const getInitialTab = (): string => {
     const path = window.location.pathname.toLowerCase();
     const search = window.location.search.toLowerCase();
-    if (path.startsWith('/settings') || search.includes('spotify_')) return 'settings';
+    if (path.startsWith('/settings') || search.includes('spotify_') || (search.includes('code=') && search.includes('state='))) return 'settings';
     if (path.startsWith('/liked')) return 'liked';
     if (path.startsWith('/search')) return 'search';
     return 'home';
@@ -53,6 +53,33 @@ export const App: React.FC = () => {
   }, [showCreateModal, isQueueOpen]);
 
   useEffect(() => {
+    // Intercept OAuth callback if intercepted by Service Worker
+    const searchParams = new URLSearchParams(window.location.search);
+    const code = searchParams.get('code');
+    const state = searchParams.get('state');
+
+    if (code && state) {
+      (async () => {
+        try {
+          const res = await fetch(`/api/spotify/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`, {
+            headers: { 'Accept': 'application/json' }
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && data.success) {
+            toast.success('Аккаунт Spotify успешно подключен! Лимит на 100 треков снят.', 'Spotify подключен');
+            setCurrentTab('settings');
+            window.history.replaceState({ tab: 'settings', playlistId: null, isFullPlayer: false }, '', '/settings');
+          } else {
+            toast.error(data.error || 'Ошибка авторизации Spotify', 'Ошибка Spotify');
+            setCurrentTab('settings');
+            window.history.replaceState({ tab: 'settings', playlistId: null, isFullPlayer: false }, '', '/settings');
+          }
+        } catch (err: any) {
+          toast.error(err.message || 'Ошибка обработки авторизации', 'Ошибка Spotify');
+        }
+      })();
+    }
+
     // Gracefully override native window.alert with custom Catppuccin toast
     window.alert = (msg?: any) => {
       toast.info(String(msg ?? ''));

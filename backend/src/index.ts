@@ -548,26 +548,36 @@ server.get('/api/spotify/callback', async (req: any, reply: any) => {
   const code = req.query.code;
   const state = req.query.state;
   const error = req.query.error;
+  const acceptsJson = Boolean(req.headers.accept?.includes('application/json'));
 
   console.log('[Spotify Callback]', {
     url: req.raw.url,
-    query: req.query,
     hasCode: Boolean(code),
     hasState: Boolean(state),
-    error: error || null
+    error: error || null,
+    acceptsJson
   });
 
   if (error || !code || !state) {
     console.warn('[Spotify Callback Missing Code/State]', { error, hasCode: Boolean(code), hasState: Boolean(state) });
+    if (acceptsJson) {
+      return reply.status(400).send({ error: error || 'Отсутствует код авторизации' });
+    }
     return reply.redirect('/settings?spotify_error=' + encodeURIComponent(error || 'Отсутствует код авторизации'));
   }
 
   try {
     const result = await handleSpotifyOAuthCallback(code, state);
     console.log('[Spotify Callback Success]', { userId: (result as any)?.userId });
+    if (acceptsJson) {
+      return { success: true };
+    }
     return reply.redirect('/settings?spotify_connected=1');
   } catch (err: any) {
     console.error('[Spotify OAuth Callback Error]', err.message);
+    if (acceptsJson) {
+      return reply.status(500).send({ error: err.message });
+    }
     return reply.redirect('/settings?spotify_error=' + encodeURIComponent(err.message));
   }
 });
