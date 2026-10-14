@@ -27,11 +27,8 @@ export const App: React.FC = () => {
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   
   const getInitialTab = (): string => {
-    const path = window.location.pathname.toLowerCase();
     const search = window.location.search.toLowerCase();
-    if (path.startsWith('/settings') || search.includes('spotify_') || (search.includes('code=') && search.includes('state='))) return 'settings';
-    if (path.startsWith('/liked')) return 'liked';
-    if (path.startsWith('/search')) return 'search';
+    if (search.includes('spotify_') || (search.includes('code=') && search.includes('state='))) return 'settings';
     return 'home';
   };
 
@@ -68,11 +65,11 @@ export const App: React.FC = () => {
           if (res.ok && data.success) {
             toast.success('Аккаунт Spotify успешно подключен! Лимит на 100 треков снят.', 'Spotify подключен');
             setCurrentTab('settings');
-            window.history.replaceState({ tab: 'settings', playlistId: null, isFullPlayer: false }, '', '/settings');
+            window.history.replaceState({ tab: 'settings', playlistId: null, isFullPlayer: false }, '', '/');
           } else {
             toast.error(data.error || 'Ошибка авторизации Spotify', 'Ошибка Spotify');
             setCurrentTab('settings');
-            window.history.replaceState({ tab: 'settings', playlistId: null, isFullPlayer: false }, '', '/settings');
+            window.history.replaceState({ tab: 'settings', playlistId: null, isFullPlayer: false }, '', '/');
           }
         } catch (err: any) {
           toast.error(err.message || 'Ошибка обработки авторизации', 'Ошибка Spotify');
@@ -89,7 +86,7 @@ export const App: React.FC = () => {
     useOfflineStore.getState().loadDownloaded();
     const initTab = getInitialTab();
     if (!window.history.state) {
-      window.history.replaceState({ tab: initTab, playlistId: null, isFullPlayer: false }, '', window.location.pathname + window.location.search);
+      window.history.replaceState({ tab: initTab, playlistId: null, isFullPlayer: false }, '', '/');
     }
   }, []);
 
@@ -100,7 +97,7 @@ export const App: React.FC = () => {
         window.history.pushState(
           { tab: currentTab, playlistId: selectedPlaylistId, isFullPlayer: true },
           '',
-          window.location.pathname
+          '/'
         );
       }
     }
@@ -152,7 +149,7 @@ export const App: React.FC = () => {
       window.history.pushState(
         { tab, playlistId, isFullPlayer: false },
         '',
-        window.location.pathname
+        '/'
       );
     }
   };
@@ -279,6 +276,9 @@ export const App: React.FC = () => {
             <PlaylistView
               playlistId={selectedPlaylistId}
               onBack={handleBack}
+              onRenamed={() => {
+                loadPlaylists();
+              }}
               onDeleted={() => {
                 loadPlaylists();
                 navigateTo('home', null, true);

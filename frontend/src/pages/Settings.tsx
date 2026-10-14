@@ -93,11 +93,11 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('spotify_connected')) {
       toast.success('Аккаунт Spotify успешно подключен! Лимит на 100 треков снят.', 'Spotify подключен');
-      window.history.replaceState({}, document.title, window.location.pathname);
+      window.history.replaceState({}, document.title, '/');
     }
     if (params.get('spotify_error')) {
       toast.error('Ошибка подключения Spotify: ' + params.get('spotify_error'), 'Ошибка Spotify');
-      window.history.replaceState({}, document.title, window.location.pathname);
+      window.history.replaceState({}, document.title, '/');
     }
   }, []);
 

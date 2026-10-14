@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Shuffle, Download, Check, Music2, Loader2, Camera, Trash2 } from 'lucide-react';
+import { Play, Shuffle, Download, Check, Music2, Loader2, Camera, Trash2, Pencil } from 'lucide-react';
 import { Playlist, Track } from '../types';
 import { useOfflineStore } from '../store/offlineStore';
 import { apiRequest } from '../api/client';
@@ -12,6 +12,7 @@ interface PlaylistHeaderProps {
   onPlayAll: () => void;
   onShuffleAll: () => void;
   onCoverChange?: (newUrl: string) => void;
+  onRename?: (newName: string, newDesc?: string) => void;
   onDelete?: () => void;
 }
 
@@ -22,6 +23,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   onPlayAll,
   onShuffleAll,
   onCoverChange,
+  onRename,
   onDelete,
 }) => {
   const isDownloaded = useOfflineStore((s) => s.downloadedIds.includes(playlist.id));
@@ -33,6 +35,58 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   const progressText = offlineProgress ? `${offlineProgress.done}/${offlineProgress.total}` : '';
   const [uploadingCover, setUploadingCover] = useState(false);
   const [deletingPlaylist, setDeletingPlaylist] = useState(false);
+
+  // Rename Playlist State
+  const [showRenameModal, setShowRenameModal] = useState(false);
+  const [renameName, setRenameName] = useState(playlist.name);
+  const [renameDesc, setRenameDesc] = useState(playlist.description || '');
+  const [savingRename, setSavingRename] = useState(false);
+
+  const isLikedPlaylist =
+    playlist.name.toLowerCase() === 'любимые треки' ||
+    playlist.name.toLowerCase() === 'liked songs';
+
+  useEffect(() => {
+    setRenameName(playlist.name);
+    setRenameDesc(playlist.description || '');
+  }, [playlist.id, playlist.name, playlist.description]);
+
+  const handleRenameSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (savingRename) return;
+
+    const trimmedName = renameName.trim();
+    if (!trimmedName) {
+      toast.error('Название плейлиста не может быть пустым');
+      return;
+    }
+
+    if (trimmedName.toLowerCase() === 'любимые треки' || trimmedName.toLowerCase() === 'liked songs') {
+      toast.error('Имя «Любимые треки» зарезервировано для системного раздела');
+      return;
+    }
+
+    setSavingRename(true);
+    try {
+      await apiRequest<{ success: boolean; playlist: Playlist }>(`/playlists/${playlist.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          name: trimmedName,
+          description: renameDesc.trim()
+        })
+      });
+
+      playlist.name = trimmedName;
+      playlist.description = renameDesc.trim();
+      onRename?.(trimmedName, renameDesc.trim());
+      setShowRenameModal(false);
+      toast.success('Плейлист переименован');
+    } catch (err: any) {
+      toast.error(err.message || 'Ошибка переименования плейлиста');
+    } finally {
+      setSavingRename(false);
+    }
+  };
 
   const handleDeletePlaylist = async () => {
     if (deletingPlaylist) return;
@@ -226,6 +280,21 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
             )}
           </button>
 
+          {/* Rename Playlist Button */}
+          {!isLikedPlaylist && (
+            <button
+              onClick={() => {
+                setRenameName(playlist.name);
+                setRenameDesc(playlist.description || '');
+                setShowRenameModal(true);
+              }}
+              title="Переименовать плейлист"
+              className="p-3 rounded-full bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-mauve active:scale-95 transition-all cursor-pointer shrink-0"
+            >
+              <Pencil className="w-5 h-5" />
+            </button>
+          )}
+
           {/* Delete Playlist Button */}
           {onDelete && (
             <button
@@ -243,6 +312,63 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
           )}
         </div>
       </div>
+
+      {/* Rename Playlist Modal */}
+      {showRenameModal && (
+        <div className="fixed inset-0 z-50 bg-cat-crust/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-cat-mantle border border-cat-surface0/80 rounded-3xl p-6 max-w-sm w-full shadow-2xl animate-in zoom-in-95 duration-200">
+            <h3 className="font-bold text-lg text-cat-text mb-4">Переименовать плейлист</h3>
+            <form onSubmit={handleRenameSubmit} className="space-y-4">
+              <div>
+                <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1">
+                  Название
+                </label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  placeholder="Новое название плейлиста"
+                  value={renameName}
+                  onChange={(e) => setRenameName(e.target.value)}
+                  className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1">
+                  Описание (необязательно)
+                </label>
+                <textarea
+                  rows={2}
+                  placeholder="Описание плейлиста..."
+                  value={renameDesc}
+                  onChange={(e) => setRenameDesc(e.target.value)}
+                  className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve resize-none"
+                />
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowRenameModal(false)}
+                  disabled={savingRename}
+                  className="flex-1 py-2.5 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-sm font-semibold text-cat-subtext0 hover:text-cat-text transition-colors"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingRename || !renameName.trim()}
+                  className="flex-1 py-2.5 rounded-2xl bg-cat-mauve hover:opacity-90 active:scale-95 text-sm font-bold text-cat-base transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {savingRename && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>Сохранить</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

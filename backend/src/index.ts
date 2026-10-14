@@ -278,6 +278,35 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
   return { playlist, tracks, activeJob: activeJob || null };
 });
 
+server.put('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const playlistId = Number(req.params.id);
+  const playlist: any = db.prepare('SELECT id, name, description FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
+  if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
+
+  const body = req.body || {};
+  const name = body.name ? String(body.name).trim() : null;
+  const description = body.description !== undefined ? String(body.description).trim() : undefined;
+
+  if (!name) {
+    return reply.status(400).send({ error: 'Название плейлиста не может быть пустым' });
+  }
+
+  if (name.toLowerCase() === 'любимые треки' || name.toLowerCase() === 'liked songs') {
+    return reply.status(400).send({ error: 'Имя «Любимые треки» зарезервировано для системного раздела' });
+  }
+
+  if (description !== undefined) {
+    db.prepare('UPDATE playlists SET name = ?, description = ? WHERE id = ?').run(name, description, playlistId);
+  } else {
+    db.prepare('UPDATE playlists SET name = ? WHERE id = ?').run(name, playlistId);
+  }
+
+  db.prepare('UPDATE download_jobs SET playlist_name = ? WHERE playlist_id = ?').run(name, playlistId);
+
+  const updated: any = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId);
+  return { success: true, playlist: updated };
+});
+
 server.put('/api/playlists/:id/cover', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
   const playlist = db.prepare('SELECT id FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
@@ -563,7 +592,7 @@ server.get('/api/spotify/callback', async (req: any, reply: any) => {
     if (acceptsJson) {
       return reply.status(400).send({ error: error || 'Отсутствует код авторизации' });
     }
-    return reply.redirect('/settings?spotify_error=' + encodeURIComponent(error || 'Отсутствует код авторизации'));
+    return reply.redirect('/?spotify_error=' + encodeURIComponent(error || 'Отсутствует код авторизации'));
   }
 
   try {
@@ -572,13 +601,13 @@ server.get('/api/spotify/callback', async (req: any, reply: any) => {
     if (acceptsJson) {
       return { success: true };
     }
-    return reply.redirect('/settings?spotify_connected=1');
+    return reply.redirect('/?spotify_connected=1');
   } catch (err: any) {
     console.error('[Spotify OAuth Callback Error]', err.message);
     if (acceptsJson) {
       return reply.status(500).send({ error: err.message });
     }
-    return reply.redirect('/settings?spotify_error=' + encodeURIComponent(err.message));
+    return reply.redirect('/?spotify_error=' + encodeURIComponent(err.message));
   }
 });
 

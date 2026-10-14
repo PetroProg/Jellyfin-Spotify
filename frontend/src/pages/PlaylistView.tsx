@@ -13,11 +13,12 @@ interface PlaylistViewProps {
   playlistId: number;
   onBack?: () => void;
   onDeleted?: () => void;
+  onRenamed?: () => void;
 }
 
 type SortField = 'position' | 'title' | 'artist' | 'album' | 'date' | 'duration';
 
-export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, onDeleted }) => {
+export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, onDeleted, onRenamed }) => {
   const [playlist, setPlaylist] = useState<Playlist | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [activeJob, setActiveJob] = useState<any>(null);
@@ -190,6 +191,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
           }
         }}
         onCoverChange={(newUrl) => setPlaylist(prev => prev ? { ...prev, cover_url: newUrl } : null)}
+        onRename={(newName, newDesc) => {
+          setPlaylist(prev => prev ? { ...prev, name: newName, description: newDesc !== undefined ? newDesc : prev.description } : null);
+          onRenamed?.();
+        }}
         onDelete={onDeleted || onBack}
       />
 
