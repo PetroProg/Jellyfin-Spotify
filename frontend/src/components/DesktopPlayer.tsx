@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { 
   Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Repeat1, 
   Volume2, VolumeX, Heart, Music2, Sparkles, ListMusic, FolderPlus,
-  SlidersHorizontal, Ban
+  SlidersHorizontal, Ban, Radio
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
+import { useSyncStore } from '../store/syncStore';
 import { apiRequest } from '../api/client';
 import { AddToPlaylistModal } from './AddToPlaylistModal';
 import { EqualizerModal } from './EqualizerModal';
@@ -38,6 +39,8 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
     setEqualizerOpen,
     blacklistTrack,
   } = usePlayerStore();
+
+  const { isLocalActive, activeDeviceName, setDevicePickerOpen } = useSyncStore();
 
   const [prevVolume, setPrevVolume] = useState(1);
   const [isAddToPlaylistOpen, setIsAddToPlaylistOpen] = useState(false);
@@ -190,6 +193,18 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
           />
           <span>{formatTime(duration)}</span>
         </div>
+
+        {/* Remote Playback Device Indicator */}
+        {!isLocalActive && activeDeviceName && (
+          <button
+            onClick={() => setDevicePickerOpen(true)}
+            className="mt-1 flex items-center gap-1.5 text-[11px] font-semibold text-cat-green hover:underline cursor-pointer"
+            title="Нажмите для смены устройства"
+          >
+            <Radio className="w-3.5 h-3.5 animate-pulse" />
+            <span>Играет на: {activeDeviceName}</span>
+          </button>
+        )}
       </div>
 
       {/* Right: Extra Controls */}
@@ -210,6 +225,17 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
           className="p-1.5 rounded-lg hover:text-cat-mauve text-cat-subtext0 transition-colors cursor-pointer active:scale-95"
         >
           <SlidersHorizontal className="w-4 h-4" />
+        </button>
+
+        {/* Device Picker Button */}
+        <button
+          onClick={() => setDevicePickerOpen(true)}
+          title={!isLocalActive ? `Играет на: ${activeDeviceName}` : 'Подключенные устройства'}
+          className={`p-1.5 rounded-lg transition-colors cursor-pointer active:scale-95 ${
+            !isLocalActive ? 'text-cat-green bg-cat-green/15' : 'hover:text-cat-mauve text-cat-subtext0'
+          }`}
+        >
+          <Radio className="w-4 h-4" />
         </button>
 
         {onToggleQueue && (

@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { 
   ChevronDown, Heart, Shuffle, SkipBack, Play, Pause, 
   SkipForward, Repeat, Repeat1, Music2, Sparkles, FolderPlus,
-  SlidersHorizontal, Ban
+  SlidersHorizontal, Ban, Radio
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
+import { useSyncStore } from '../store/syncStore';
 import { apiRequest } from '../api/client';
 import { AddToPlaylistModal } from './AddToPlaylistModal';
 import { EqualizerModal } from './EqualizerModal';
@@ -34,6 +35,8 @@ export const FullPlayer: React.FC = () => {
     setEqualizerOpen,
     blacklistTrack,
   } = usePlayerStore();
+
+  const { isLocalActive, activeDeviceName, setDevicePickerOpen } = useSyncStore();
 
   const [isAddToPlaylistOpen, setIsAddToPlaylistOpen] = useState(false);
   const [blacklisting, setBlacklisting] = useState(false);
@@ -229,6 +232,28 @@ export const FullPlayer: React.FC = () => {
           }`}
         >
           {repeat === 'one' ? <Repeat1 className="w-6 h-6" /> : <Repeat className="w-6 h-6" />}
+        </button>
+      </div>
+
+      {/* Device Picker Bar / Spotify Connect Indicator */}
+      <div className="flex items-center justify-between px-3.5 py-2.5 rounded-2xl bg-cat-surface0/50 border border-cat-surface1/30 mb-6 select-none">
+        <button
+          onClick={() => setDevicePickerOpen(true)}
+          className={`flex items-center gap-2 text-xs font-semibold transition-colors cursor-pointer ${
+            !isLocalActive ? 'text-cat-green' : 'text-cat-subtext0 hover:text-cat-text'
+          }`}
+        >
+          <Radio className={`w-4 h-4 ${!isLocalActive ? 'animate-pulse text-cat-green' : 'text-cat-subtext0'}`} />
+          <span className="truncate max-w-[200px]">
+            {isLocalActive ? 'Слушать на этом устройстве' : `Играет на: ${activeDeviceName}`}
+          </span>
+        </button>
+
+        <button
+          onClick={() => setDevicePickerOpen(true)}
+          className="text-xs text-cat-mauve font-bold hover:underline shrink-0"
+        >
+          Устройства
         </button>
       </div>
 

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { Track, RepeatMode } from '../types';
 import { apiRequest } from '../api/client';
+import { useSyncStore } from './syncStore';
 
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
@@ -35,6 +36,7 @@ interface PlayerState {
   isNormalizerEnabled: boolean;
 
   playTrack: (track: Track, newQueue?: Track[], index?: number) => void;
+  playTrackLocally: (track: Track, newQueue?: Track[], index?: number, startTime?: number) => void;
   shufflePlay: (tracks: Track[]) => void;
   togglePlay: () => void;
   pause: () => void;
@@ -172,12 +174,25 @@ function ensureAudioGraph() {
 
 export const usePlayerStore = create<PlayerState>((set, get) => {
   // Sync Audio Events
+  let lastSyncTime = 0;
   audio.ontimeupdate = () => {
-    set({ currentTime: audio.currentTime });
+    const cur = audio.currentTime;
+    set({ currentTime: cur });
+    const now = Date.now();
+    if (now - lastSyncTime > 3000) {
+      lastSyncTime = now;
+      if (useSyncStore.getState().isLocalActive) {
+        useSyncStore.getState().sendPlaybackState({ currentTime: cur });
+      }
+    }
   };
 
   audio.onloadedmetadata = () => {
-    set({ duration: audio.duration || 0 });
+    const dur = audio.duration || 0;
+    set({ duration: dur });
+    if (useSyncStore.getState().isLocalActive) {
+      useSyncStore.getState().sendPlaybackState({ duration: dur });
+    }
   };
 
   audio.onended = () => {
@@ -185,6 +200,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     if (repeat === 'one') {
       audio.currentTime = 0;
       audio.play().catch(() => {});
+      if (useSyncStore.getState().isLocalActive) {
+        useSyncStore.getState().sendPlaybackState({ currentTime: 0, isPlaying: true });
+      }
     } else {
       nextTrack();
     }
@@ -232,6 +250,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     isNormalizerEnabled: loadSavedNormalizer(),
 
     playTrack: (track, newQueue, index) => {
+      const isLocal = useSyncStore.getState().isLocalActive;
+      if (!isLocal) {
+        useSyncStore.getState().sendRemoteCommand('playTrack', { track, queue: newQueue, index });
+        set({
+          currentTrack: track,
+          queue: newQueue ? [...newQueue] : get().queue,
+          currentIndex: index !== undefined ? index : 0,
+          isPlaying: true,
+        });
+        return;
+      }
+
       let q = newQueue ? [...newQueue] : get().queue;
       let idx = index !== undefined ? index : q.findIndex((t) => t.id === track.id);
 
@@ -256,10 +286,49 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       audio.src = `/api/stream/${track.id}`;
       audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
       updateMediaSession(track);
+      useSyncStore.getState().sendPlaybackState();
+    },
+
+    playTrackLocally: (track, newQueue, index, startTime) => {
+      let q = newQueue ? [...newQueue] : get().queue;
+      let idx = index !== undefined ? index : q.findIndex((t) => t.id === track.id);
+
+      if (idx === -1) {
+        q = [track, ...q];
+        idx = 0;
+      }
+
+      set({
+        currentTrack: track,
+        queue: q,
+        originalQueue: newQueue ? [...newQueue] : get().originalQueue,
+        currentIndex: idx,
+        isPlaying: true,
+        currentTime: startTime || 0,
+      });
+
+      ensureAudioGraph();
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume().catch(() => {});
+      }
+
+      audio.src = `/api/stream/${track.id}`;
+      if (startTime && startTime > 0) {
+        audio.currentTime = startTime;
+      }
+      audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
+      updateMediaSession(track);
+      useSyncStore.getState().sendPlaybackState();
     },
 
     shufflePlay: (tracks: Track[]) => {
       if (!tracks || tracks.length === 0) return;
+
+      const isLocal = useSyncStore.getState().isLocalActive;
+      if (!isLocal) {
+        useSyncStore.getState().sendRemoteCommand('shufflePlay', { tracks });
+        return;
+      }
 
       const original = [...tracks];
       const randomIndex = Math.floor(Math.random() * tracks.length);
@@ -290,15 +359,24 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       audio.src = `/api/stream/${chosenTrack.id}`;
       audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
       updateMediaSession(chosenTrack);
+      useSyncStore.getState().sendPlaybackState();
     },
 
     togglePlay: () => {
       const { isPlaying, currentTrack } = get();
       if (!currentTrack) return;
 
+      const isLocal = useSyncStore.getState().isLocalActive;
+      if (!isLocal) {
+        useSyncStore.getState().sendRemoteCommand('togglePlay');
+        set({ isPlaying: !isPlaying });
+        return;
+      }
+
       if (isPlaying) {
         audio.pause();
         set({ isPlaying: false });
+        useSyncStore.getState().sendPlaybackState({ isPlaying: false });
       } else {
         ensureAudioGraph();
         if (audioCtx && audioCtx.state === 'suspended') {
@@ -306,26 +384,45 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         }
         audio.play().catch(() => {});
         set({ isPlaying: true });
+        useSyncStore.getState().sendPlaybackState({ isPlaying: true });
       }
     },
 
     pause: () => {
-      audio.pause();
+      const isLocal = useSyncStore.getState().isLocalActive;
+      if (!isLocal) {
+        useSyncStore.getState().sendRemoteCommand('pause');
+      } else {
+        audio.pause();
+      }
       set({ isPlaying: false });
+      useSyncStore.getState().sendPlaybackState({ isPlaying: false });
     },
 
     resume: () => {
       if (get().currentTrack) {
-        ensureAudioGraph();
-        if (audioCtx && audioCtx.state === 'suspended') {
-          audioCtx.resume().catch(() => {});
+        const isLocal = useSyncStore.getState().isLocalActive;
+        if (!isLocal) {
+          useSyncStore.getState().sendRemoteCommand('play');
+        } else {
+          ensureAudioGraph();
+          if (audioCtx && audioCtx.state === 'suspended') {
+            audioCtx.resume().catch(() => {});
+          }
+          audio.play().catch(() => {});
         }
-        audio.play().catch(() => {});
         set({ isPlaying: true });
+        useSyncStore.getState().sendPlaybackState({ isPlaying: true });
       }
     },
 
     nextTrack: async () => {
+      const isLocal = useSyncStore.getState().isLocalActive;
+      if (!isLocal) {
+        useSyncStore.getState().sendRemoteCommand('next');
+        return;
+      }
+
       const { queue, currentIndex, repeat, smartShuffle, playTrack } = get();
       if (queue.length === 0) return;
 
@@ -361,6 +458,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           nextIndex = 0;
         } else {
           set({ isPlaying: false });
+          useSyncStore.getState().sendPlaybackState({ isPlaying: false });
           return;
         }
       }
@@ -369,11 +467,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     prevTrack: () => {
+      const isLocal = useSyncStore.getState().isLocalActive;
+      if (!isLocal) {
+        useSyncStore.getState().sendRemoteCommand('prev');
+        return;
+      }
+
       const { queue, currentIndex, playTrack } = get();
       if (queue.length === 0) return;
 
       if (audio.currentTime > 3) {
         audio.currentTime = 0;
+        set({ currentTime: 0 });
+        useSyncStore.getState().sendPlaybackState({ currentTime: 0 });
         return;
       }
 
@@ -385,8 +491,14 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     seek: (seconds: number) => {
-      audio.currentTime = seconds;
+      const isLocal = useSyncStore.getState().isLocalActive;
+      if (!isLocal) {
+        useSyncStore.getState().sendRemoteCommand('seek', seconds);
+      } else {
+        audio.currentTime = seconds;
+      }
       set({ currentTime: seconds });
+      useSyncStore.getState().sendPlaybackState({ currentTime: seconds });
     },
 
     setVolume: (val: number) => {
@@ -413,6 +525,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         const newIdx = currentTrack ? orig.findIndex((t) => t.id === currentTrack.id) : 0;
         set({ shuffle: false, queue: orig, currentIndex: newIdx !== -1 ? newIdx : 0 });
       }
+
+      if (useSyncStore.getState().isLocalActive) {
+        useSyncStore.getState().sendPlaybackState();
+      } else {
+        useSyncStore.getState().sendRemoteCommand('toggleShuffle');
+      }
     },
 
     toggleSmartShuffle: () => {
@@ -423,7 +541,14 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const current = get().repeat;
       const modes: RepeatMode[] = ['off', 'all', 'one'];
       const nextIdx = (modes.indexOf(current) + 1) % modes.length;
-      set({ repeat: modes[nextIdx] });
+      const nextMode = modes[nextIdx];
+      set({ repeat: nextMode });
+
+      if (useSyncStore.getState().isLocalActive) {
+        useSyncStore.getState().sendPlaybackState({ repeat: nextMode });
+      } else {
+        useSyncStore.getState().sendRemoteCommand('repeat', nextMode);
+      }
     },
 
     setFullPlayerOpen: (open: boolean) => {

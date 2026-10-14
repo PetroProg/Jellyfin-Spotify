@@ -1,9 +1,11 @@
 import React from 'react';
-import { Play, Pause, SkipForward, Music2 } from 'lucide-react';
+import { Play, Pause, SkipForward, Music2, Radio } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
+import { useSyncStore } from '../store/syncStore';
 
 export const MiniPlayer: React.FC = () => {
   const { currentTrack, isPlaying, togglePlay, nextTrack, currentTime, duration, setFullPlayerOpen } = usePlayerStore();
+  const { isLocalActive, activeDeviceName } = useSyncStore();
 
   if (!currentTrack) return null;
 
@@ -36,9 +38,16 @@ export const MiniPlayer: React.FC = () => {
             <h4 className="text-sm font-semibold text-cat-text truncate leading-tight">
               {currentTrack.title}
             </h4>
-            <p className="text-xs text-cat-subtext0 truncate leading-tight mt-0.5">
-              {currentTrack.artist}
-            </p>
+            {!isLocalActive && activeDeviceName ? (
+              <p className="text-xs text-cat-green flex items-center gap-1 truncate leading-tight mt-0.5">
+                <Radio className="w-3 h-3 animate-pulse" />
+                <span>Играет на: {activeDeviceName}</span>
+              </p>
+            ) : (
+              <p className="text-xs text-cat-subtext0 truncate leading-tight mt-0.5">
+                {currentTrack.artist}
+              </p>
+            )}
           </div>
         </div>
 

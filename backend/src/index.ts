@@ -30,6 +30,7 @@ import {
 } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
+import { setupWebSocketSync } from './sync';
 
 dotenv.config();
 
@@ -988,6 +989,9 @@ server.setNotFoundHandler((req, reply) => {
     reply.status(404).send('Not Found');
   }
 });
+
+// Initialize Real-time Multi-device WebSocket Synchronization
+setupWebSocketSync(server);
 
 // Start Server
 server.listen({ port: PORT, host: '0.0.0.0' }, async (err, address) => {

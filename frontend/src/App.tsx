@@ -20,7 +20,9 @@ import { usePlayerStore } from './store/playerStore';
 import { useOfflineStore } from './store/offlineStore';
 import { ToastContainer } from './components/ToastContainer';
 import { ConfirmModal } from './components/ConfirmModal';
+import { DevicePickerModal } from './components/DevicePickerModal';
 import { toast } from './store/toastStore';
+import { useSyncStore } from './store/syncStore';
 
 export const App: React.FC = () => {
   const { isAuthenticated, isLoading, fetchMe } = useAuthStore();
@@ -89,6 +91,15 @@ export const App: React.FC = () => {
       window.history.replaceState({ tab: initTab, playlistId: null, isFullPlayer: false }, '', '/');
     }
   }, []);
+
+  // Sync WebSocket lifecycle with user authentication
+  useEffect(() => {
+    if (isAuthenticated) {
+      useSyncStore.getState().initSync();
+    } else {
+      useSyncStore.getState().disconnectSync();
+    }
+  }, [isAuthenticated]);
 
   // Sync mobile fullPlayer opening with history
   useEffect(() => {
@@ -388,6 +399,9 @@ export const App: React.FC = () => {
 
       {/* Modern Confirmation Modal */}
       <ConfirmModal />
+
+      {/* Real-time Device Synchronization Picker Modal */}
+      <DevicePickerModal />
     </div>
   );
 };
