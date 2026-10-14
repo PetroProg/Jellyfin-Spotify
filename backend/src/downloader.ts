@@ -10,9 +10,10 @@ const MUSIC_DIR = process.env.MUSIC_DIR || path.join(process.cwd(), 'music');
 interface QueueItem {
   jobId: string;
   userId: number;
-  playlistId: number;
+  playlistId: number | null;
   track: SpotifyTrack;
   position: number;
+  isLikedOnly?: boolean;
 }
 
 const queue: QueueItem[] = [];
@@ -127,14 +128,17 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
 export function enqueuePlaylistDownload(
   jobId: string,
   userId: number,
-  playlistId: number,
+  playlistId: number | null,
   tracks: SpotifyTrack[],
-  startPosition?: number
+  startPosition?: number,
+  isLikedOnly: boolean = false
 ) {
   let pos = startPosition;
-  if (pos === undefined) {
+  if (pos === undefined && playlistId) {
     const maxRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
     pos = (maxRow?.maxPos !== null && maxRow?.maxPos !== undefined) ? maxRow.maxPos + 1 : 0;
+  } else if (pos === undefined) {
+    pos = 0;
   }
 
   for (let i = 0; i < tracks.length; i++) {
@@ -143,7 +147,8 @@ export function enqueuePlaylistDownload(
       userId,
       playlistId,
       track: tracks[i],
-      position: pos + i
+      position: pos + i,
+      isLikedOnly
     });
   }
 
@@ -303,12 +308,19 @@ async function runWorkerLoop() {
     // Check if remaining tracks for this job
     const remainingForJob = queue.filter(q => q.jobId === item.jobId).length;
     if (remainingForJob === 0) {
-      const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(item.playlistId);
+      let count = 0;
+      if (item.playlistId) {
+        const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(item.playlistId);
+        count = countRow?.cnt || 0;
+      } else {
+        const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(item.userId);
+        count = countRow?.cnt || 0;
+      }
       db.prepare(`
         UPDATE download_jobs
         SET status = 'completed', downloaded_tracks = ?, current_track = NULL
         WHERE id = ?
-      `).run(countRow?.cnt || 0, item.jobId);
+      `).run(count, item.jobId);
 
       // Trigger Jellyfin library refresh
       await refreshJellyfinLibrary();
@@ -452,23 +464,25 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       db.prepare('UPDATE tracks SET cover_url = ? WHERE id = ?').run(details.cover_url, existing.id);
     }
 
-    // Already downloaded, just link to playlist
-    db.prepare(`
-      INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
-      VALUES (?, ?, ?)
-    `).run(playlistId, existing.id, position);
-
-    const playlistRow: any = db.prepare('SELECT name FROM playlists WHERE id = ?').get(playlistId);
-    if (playlistRow && (playlistRow.name === 'Любимые треки' || playlistRow.name.toLowerCase() === 'liked songs')) {
+    // Already downloaded: link to playlist or liked_tracks
+    if (item.isLikedOnly || !playlistId) {
       db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, existing.id);
+    } else {
+      db.prepare(`
+        INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
+        VALUES (?, ?, ?)
+      `).run(playlistId, existing.id, position);
     }
 
-    const doneRow: any = db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
+    const doneCount = playlistId
+      ? (db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId) as any)?.cnt || 0
+      : (db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(item.userId) as any)?.cnt || 0;
+
     db.prepare(`
       UPDATE download_jobs
       SET downloaded_tracks = ?, current_track = ?
       WHERE id = ?
-    `).run(doneRow?.cnt || 0, `${track.artist} - ${track.title}`, jobId);
+    `).run(doneCount, `${track.artist} - ${track.title}`, jobId);
     return;
   }
 
@@ -508,6 +522,8 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       'ionice', '-c', '3',
       'yt-dlp',
       '--no-playlist',
+      '--extractor-args', 'youtube:player_client=android',
+      '--force-overwrites',
       '-f', 'bestaudio/best',
       '--extract-audio',
       '--audio-format', 'mp3',
@@ -573,22 +589,24 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
             trackId = info.lastInsertRowid;
           }
 
-          db.prepare(`
-            INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
-            VALUES (?, ?, ?)
-          `).run(playlistId, trackId, position);
-
-          const playlistRow: any = db.prepare('SELECT name FROM playlists WHERE id = ?').get(playlistId);
-          if (playlistRow && (playlistRow.name === 'Любимые треки' || playlistRow.name.toLowerCase() === 'liked songs')) {
+          if (item.isLikedOnly || !playlistId) {
             db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, trackId);
+          } else {
+            db.prepare(`
+              INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
+              VALUES (?, ?, ?)
+            `).run(playlistId, trackId, position);
           }
 
-          const doneRow: any = db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
+          const doneCount = playlistId
+            ? (db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId) as any)?.cnt || 0
+            : (db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(item.userId) as any)?.cnt || 0;
+
           db.prepare(`
             UPDATE download_jobs
             SET downloaded_tracks = ?
             WHERE id = ?
-          `).run(doneRow?.cnt || 0, jobId);
+          `).run(doneCount, jobId);
         } catch (dbErr: any) {
           console.error('[DB Insert Error after download]', dbErr.message);
         }
@@ -735,6 +753,8 @@ async function downloadSingleSpotifyTrackDirectInternal(
         'ionice', '-c', '3',
         'yt-dlp',
         '--no-playlist',
+        '--extractor-args', 'youtube:player_client=android',
+        '--force-overwrites',
         '-f', 'bestaudio/best',
         '--extract-audio',
         '--audio-format', 'mp3',
@@ -906,6 +926,7 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
             'ionice', '-c', '3',
             'yt-dlp',
             '--no-playlist',
+            '--extractor-args', 'youtube:player_client=android',
             '--force-overwrites',
             '--no-continue',
             '-f', 'bestaudio/best',

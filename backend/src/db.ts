@@ -55,6 +55,7 @@ db.exec(`
     track_id INTEGER NOT NULL,
     position INTEGER DEFAULT 0,
     added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(playlist_id, track_id),
     FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
     FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
   );
@@ -154,5 +155,21 @@ try {
 } catch (e: any) {
   console.warn('[DB Deduplication routine]:', e.message);
 }
+
+// Deduplicate playlist_tracks and create unique index
+try {
+  db.exec(`
+    DELETE FROM playlist_tracks
+    WHERE id NOT IN (
+      SELECT MIN(id)
+      FROM playlist_tracks
+      GROUP BY playlist_id, track_id
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_playlist_tracks_unique ON playlist_tracks(playlist_id, track_id);
+  `);
+} catch (e: any) {
+  console.warn('[DB Migration Warning]:', e.message);
+}
+
 
 

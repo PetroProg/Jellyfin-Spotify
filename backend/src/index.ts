@@ -594,68 +594,78 @@ server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenti
       return reply.status(400).send({ error: 'В вашем разделе «Любимые треки» Spotify нет песен' });
     }
 
-    // Find or create 'Любимые треки' playlist
-    let existingPlaylist: any = db.prepare(`
-      SELECT * FROM playlists WHERE user_id = ? AND (name = 'Любимые треки' OR LOWER(name) = 'liked songs')
-      LIMIT 1
-    `).get(req.user.id);
-
-    let playlistId: number;
-    if (!existingPlaylist) {
-      const pInfo = db.prepare(`
-        INSERT INTO playlists (user_id, name, description, cover_url)
-        VALUES (?, 'Любимые треки', 'Синхронизировано из Spotify Liked Songs', ?)
-      `).run(req.user.id, playlistData.cover_url || '');
-      playlistId = Number(pInfo.lastInsertRowid);
-    } else {
-      playlistId = existingPlaylist.id;
-    }
-
-    // Existing tracks
-    const existingRows: any[] = db.prepare(`
+    // 1. Get tracks already in user's liked_tracks
+    const existingLiked: any[] = db.prepare(`
       SELECT t.id, t.spotify_id, LOWER(t.title) as title, LOWER(t.artist) as artist
-      FROM playlist_tracks pt
-      JOIN tracks t ON pt.track_id = t.id
-      WHERE pt.playlist_id = ?
-    `).all(playlistId);
+      FROM liked_tracks lt
+      JOIN tracks t ON lt.track_id = t.id
+      WHERE lt.user_id = ?
+    `).all(req.user.id);
 
-    const missingTracks = playlistData.tracks.filter((st) => {
-      return !existingRows.some((er) => {
+    // 2. Identify missing tracks that need to be added to liked_tracks
+    const missingFromLiked = playlistData.tracks.filter((st) => {
+      return !existingLiked.some((er) => {
         if (st.id && er.spotify_id && er.spotify_id === st.id) return true;
         return er.title === st.title.toLowerCase().trim() && er.artist === st.artist.toLowerCase().trim();
       });
     });
 
-    if (missingTracks.length === 0) {
+    // 3. For any missing tracks that already exist in tracks table (on disk), link them immediately
+    let immediatelyLinked = 0;
+    const needDownload: typeof playlistData.tracks = [];
+
+    for (const st of missingFromLiked) {
+      const onDisk: any = db.prepare(`
+        SELECT id FROM tracks 
+        WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+           OR (LOWER(title) = ? AND LOWER(artist) = ?)
+        LIMIT 1
+      `).get(st.id, st.title.toLowerCase().trim(), st.artist.toLowerCase().trim());
+
+      if (onDisk) {
+        db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(req.user.id, onDisk.id);
+        immediatelyLinked++;
+      } else {
+        needDownload.push(st);
+      }
+    }
+
+    // Ensure any leftover duplicate playlist named 'Любимые треки' is removed from playlists list
+    db.prepare(`
+      DELETE FROM playlists 
+      WHERE user_id = ? AND (name = 'Любимые треки' OR LOWER(name) = 'liked songs')
+    `).run(req.user.id);
+
+    const totalCountRow: any = db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(req.user.id);
+
+    if (needDownload.length === 0) {
       return {
         success: true,
-        playlistId,
-        playlistName: 'Любимые треки',
         alreadyUpToDate: true,
-        totalTracks: existingRows.length,
-        newTracks: 0,
-        message: 'Все любимые треки уже синхронизированы!'
+        totalTracks: totalCountRow?.cnt || 0,
+        newTracks: immediatelyLinked,
+        message: immediatelyLinked > 0
+          ? `Синхронизировано новых любимых треков: ${immediatelyLinked}. Все треки в разделе «Любимые треки»!`
+          : 'Все ваши любимые треки уже синхронизированы в раздел «Любимые треки»!'
       };
     }
 
     const jobId = Math.random().toString(36).substring(2, 10);
-    const totalCount = existingRows.length + missingTracks.length;
+    const totalCount = (totalCountRow?.cnt || 0) + needDownload.length;
 
     db.prepare(`
       INSERT INTO download_jobs (id, user_id, playlist_id, playlist_name, total_tracks, downloaded_tracks, status)
-      VALUES (?, ?, ?, 'Любимые треки', ?, ?, 'downloading')
-    `).run(jobId, req.user.id, playlistId, totalCount, existingRows.length);
+      VALUES (?, ?, NULL, 'Любимые треки', ?, ?, 'downloading')
+    `).run(jobId, req.user.id, totalCount, totalCountRow?.cnt || 0);
 
-    enqueuePlaylistDownload(jobId, req.user.id, playlistId, missingTracks);
+    enqueuePlaylistDownload(jobId, req.user.id, null, needDownload, 0, true);
 
     return {
       success: true,
       jobId,
-      playlistId,
-      playlistName: 'Любимые треки',
-      newTracks: missingTracks.length,
+      newTracks: needDownload.length,
       totalTracks: totalCount,
-      message: `Найдено новых любимых треков: ${missingTracks.length}. Загрузка начата.`
+      message: `Найдено новых любимых треков: ${needDownload.length}. Загрузка начата.`
     };
   } catch (err: any) {
     return reply.status(500).send({ error: err.message || 'Ошибка импорта любимых треков' });
@@ -835,24 +845,11 @@ server.post('/api/likes/:trackId', { preHandler: [(server as any).authenticate] 
   const trackId = Number(req.params.trackId);
   const exists = db.prepare('SELECT 1 FROM liked_tracks WHERE user_id = ? AND track_id = ?').get(req.user.id, trackId);
 
-  // Check if user has an imported playlist named 'Любимые треки'
-  const favPlaylist: any = db.prepare(`
-    SELECT id FROM playlists WHERE user_id = ? AND (name = 'Любимые треки' OR LOWER(name) = 'liked songs')
-  `).get(req.user.id);
-
   if (exists) {
     db.prepare('DELETE FROM liked_tracks WHERE user_id = ? AND track_id = ?').run(req.user.id, trackId);
-    if (favPlaylist) {
-      db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').run(favPlaylist.id, trackId);
-    }
     return { liked: false };
   } else {
     db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(req.user.id, trackId);
-    if (favPlaylist) {
-      const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(favPlaylist.id);
-      const nextPos = (maxPosRow?.maxPos !== null && maxPosRow?.maxPos !== undefined) ? maxPosRow.maxPos + 1 : 0;
-      db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)').run(favPlaylist.id, trackId, nextPos);
-    }
     return { liked: true };
   }
 });
