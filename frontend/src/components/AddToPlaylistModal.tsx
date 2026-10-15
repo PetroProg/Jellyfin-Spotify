@@ -3,6 +3,7 @@ import { Search, Plus, CheckCircle2, Circle, Loader2, Music2, X } from 'lucide-r
 import { Track, SpotifySearchResult } from '../types';
 import { apiRequest } from '../api/client';
 import { toast } from '../store/toastStore';
+import { useOfflineStore } from '../store/offlineStore';
 
 interface PlaylistWithStatus {
   id: number;
@@ -94,6 +95,12 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
             method: 'POST',
             body: JSON.stringify({ trackId: activeTrack.id }),
           });
+
+          // Auto-cache track if this playlist is downloaded on this device!
+          if (useOfflineStore.getState().isDownloaded(playlist.id)) {
+            useOfflineStore.getState().cacheTrack(activeTrack);
+            toast.success(`Трек добавлен в «${playlist.name}» и сохранен оффлайн`);
+          }
         }
         onUpdated?.();
       } catch (err: any) {
@@ -132,7 +139,14 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
           );
           onSpotifyTrackDownloaded?.(spotifyTrack, res.track);
           onUpdated?.();
-          toast.success(`Трек добавлен в «${playlist.name}»`);
+
+          // Auto-cache track if this playlist is downloaded on this device!
+          if (useOfflineStore.getState().isDownloaded(playlist.id)) {
+            useOfflineStore.getState().cacheTrack(res.track);
+            toast.success(`Трек добавлен в «${playlist.name}» и сохранен оффлайн`);
+          } else {
+            toast.success(`Трек добавлен в «${playlist.name}»`);
+          }
         }
       } catch (err: any) {
         toast.error(err.message || 'Ошибка скачивания и добавления в плейлист');

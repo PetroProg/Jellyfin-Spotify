@@ -8,6 +8,7 @@ import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { usePlayerStore } from '../store/playerStore';
 import { toast } from '../store/toastStore';
+import { useOfflineStore } from '../store/offlineStore';
 
 interface PlaylistViewProps {
   playlistId: number;
@@ -68,6 +69,9 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
       setPlaylist(data.playlist);
       setTracks(data.tracks || []);
       setActiveJob(data.activeJob || null);
+      if (useOfflineStore.getState().isDownloaded(Number(playlistId))) {
+        useOfflineStore.getState().syncPlaylist(Number(playlistId), data.tracks || []);
+      }
     } catch (e: any) {
       console.warn(e);
     } finally {

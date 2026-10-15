@@ -3,8 +3,11 @@ import { Track } from '../types';
 import {
   getOfflinePlaylistIds,
   downloadPlaylistOffline,
-  removePlaylistOffline
+  removePlaylistOffline,
+  cacheTrackOffline,
+  syncDownloadedPlaylist,
 } from '../utils/offline';
+import { apiRequest } from '../api/client';
 
 export interface OfflineJobProgress {
   inProgress: boolean;
@@ -21,6 +24,9 @@ interface OfflineStoreState {
   getProgress: (playlistId: number) => OfflineJobProgress | null;
   startDownload: (playlistId: number, tracks: Track[]) => Promise<void>;
   removeDownload: (playlistId: number, tracks: Track[]) => Promise<void>;
+  cacheTrack: (track: Track) => Promise<boolean>;
+  syncPlaylist: (playlistId: number, tracks: Track[]) => Promise<void>;
+  syncAllDownloadedPlaylists: () => Promise<void>;
 }
 
 export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
@@ -41,14 +47,13 @@ export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
 
   startDownload: async (playlistId: number, tracks: Track[]) => {
     if (!tracks || tracks.length === 0) return;
-    // If already downloading this playlist, do not start duplicate
     if (get().progress[playlistId]?.inProgress) return;
 
     set((state) => ({
       progress: {
         ...state.progress,
-        [playlistId]: { inProgress: true, done: 0, total: tracks.length }
-      }
+        [playlistId]: { inProgress: true, done: 0, total: tracks.length },
+      },
     }));
 
     try {
@@ -56,18 +61,17 @@ export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
         set((state) => ({
           progress: {
             ...state.progress,
-            [playlistId]: { inProgress: true, done, total }
-          }
+            [playlistId]: { inProgress: true, done, total },
+          },
         }));
       });
 
-      // Download successfully completed
       set((state) => {
         const nextProgress = { ...state.progress };
         delete nextProgress[playlistId];
         return {
           downloadedIds: getOfflinePlaylistIds(),
-          progress: nextProgress
+          progress: nextProgress,
         };
       });
     } catch (err: any) {
@@ -77,7 +81,7 @@ export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
         delete nextProgress[playlistId];
         return {
           downloadedIds: getOfflinePlaylistIds(),
-          progress: nextProgress
+          progress: nextProgress,
         };
       });
       throw err;
@@ -91,8 +95,62 @@ export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
       delete nextProgress[playlistId];
       return {
         downloadedIds: getOfflinePlaylistIds(),
-        progress: nextProgress
+        progress: nextProgress,
       };
     });
-  }
+  },
+
+  cacheTrack: async (track: Track) => {
+    if (!track || !track.id) return false;
+    return await cacheTrackOffline(track);
+  },
+
+  syncPlaylist: async (playlistId: number, tracks: Track[]) => {
+    if (!get().isDownloaded(playlistId) || !tracks || tracks.length === 0) return;
+    if (get().progress[playlistId]?.inProgress) return;
+
+    try {
+      await syncDownloadedPlaylist(playlistId, tracks, (done, total) => {
+        set((state) => ({
+          progress: {
+            ...state.progress,
+            [playlistId]: { inProgress: true, done, total },
+          },
+        }));
+      });
+    } catch (err) {
+      console.warn(`[OfflineStore] syncPlaylist error:`, err);
+    } finally {
+      set((state) => {
+        const nextProgress = { ...state.progress };
+        delete nextProgress[playlistId];
+        return { progress: nextProgress };
+      });
+    }
+  },
+
+  syncAllDownloadedPlaylists: async () => {
+    const downloadedIds = get().downloadedIds;
+    if (!downloadedIds || downloadedIds.length === 0) return;
+
+    for (const pId of downloadedIds) {
+      try {
+        if (pId === -1) {
+          // Liked songs
+          const data = await apiRequest<{ tracks: Track[] }>('/likes');
+          if (data.tracks && data.tracks.length > 0) {
+            await get().syncPlaylist(-1, data.tracks);
+          }
+        } else {
+          // Custom playlist
+          const data = await apiRequest<{ tracks: Track[] }>(`/playlists/${pId}`);
+          if (data.tracks && data.tracks.length > 0) {
+            await get().syncPlaylist(pId, data.tracks);
+          }
+        }
+      } catch (err) {
+        console.warn(`[OfflineStore] Failed to auto-sync playlist ${pId}:`, err);
+      }
+    }
+  },
 }));

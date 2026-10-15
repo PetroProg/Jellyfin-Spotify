@@ -3,6 +3,8 @@ import { Track, RepeatMode } from '../types';
 import { apiRequest } from '../api/client';
 import { useSyncStore } from './syncStore';
 import { toast } from './toastStore';
+import { useOfflineStore } from './offlineStore';
+import { getCachedTrackUrl, isTrackCached, cacheTrackOffline } from '../utils/offline';
 
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
@@ -245,6 +247,24 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
   };
 
+  let prefetchTimeout: any = null;
+  const scheduleNextTrackPrefetch = () => {
+    if (prefetchTimeout) clearTimeout(prefetchTimeout);
+    prefetchTimeout = setTimeout(async () => {
+      try {
+        const { queue, currentIndex } = get();
+        if (!queue || currentIndex < 0 || currentIndex + 1 >= queue.length) return;
+        const nextTrack = queue[currentIndex + 1];
+        if (nextTrack) {
+          const cached = await isTrackCached(nextTrack.id);
+          if (!cached) {
+            cacheTrackOffline(nextTrack).catch(() => {});
+          }
+        }
+      } catch (_) {}
+    }, 2500);
+  };
+
   return {
     currentTrack: null,
     isPlaying: false,
@@ -298,10 +318,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audioCtx.resume().catch(() => {});
       }
 
-      audio.src = `/api/stream/${track.id}`;
-      audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
-      updateMediaSession(track);
-      useSyncStore.getState().sendPlaybackState();
+      // Check if track is cached offline for instant 0ms start
+      getCachedTrackUrl(track.id).then((cachedUrl) => {
+        const streamUrl = `/api/stream/${track.id}`;
+        const targetSrc = cachedUrl || streamUrl;
+        if (!audio.src.endsWith(targetSrc) && audio.src !== targetSrc) {
+          audio.src = targetSrc;
+        }
+        audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
+        updateMediaSession(track);
+        useSyncStore.getState().sendPlaybackState();
+        scheduleNextTrackPrefetch();
+      });
     },
 
     playTrackLocally: (track, newQueue, index, startTime, autoPlay = true) => {
@@ -327,48 +355,52 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audioCtx.resume().catch(() => {});
       }
 
-      const streamUrl = `/api/stream/${track.id}`;
-      const needsSourceChange = !audio.src.endsWith(streamUrl);
-      if (needsSourceChange) {
-        audio.src = streamUrl;
-      }
-
-      const applySeek = () => {
-        if (startTime && startTime > 0) {
-          try {
-            audio.currentTime = startTime;
-          } catch (_) {}
+      getCachedTrackUrl(track.id).then((cachedUrl) => {
+        const streamUrl = `/api/stream/${track.id}`;
+        const targetSrc = cachedUrl || streamUrl;
+        const needsSourceChange = !audio.src.endsWith(targetSrc) && audio.src !== targetSrc;
+        if (needsSourceChange) {
+          audio.src = targetSrc;
         }
-      };
 
-      if (!needsSourceChange && audio.readyState >= 1) {
-        applySeek();
-      } else {
-        audio.addEventListener('loadedmetadata', applySeek, { once: true });
-      }
-
-      if (autoPlay) {
-        audio.play().catch((err) => {
-          console.warn('[Audio play interrupted / autoplay policy]:', err);
-          if (err.name === 'NotAllowedError') {
-            toast.info('Нажмите в любом месте для включения звука на этом устройстве');
-            const unlock = () => {
-              audio.play().catch(() => {});
-              window.removeEventListener('click', unlock);
-              window.removeEventListener('keydown', unlock);
-              window.removeEventListener('touchstart', unlock);
-            };
-            window.addEventListener('click', unlock, { once: true });
-            window.addEventListener('keydown', unlock, { once: true });
-            window.addEventListener('touchstart', unlock, { once: true });
+        const applySeek = () => {
+          if (startTime && startTime > 0) {
+            try {
+              audio.currentTime = startTime;
+            } catch (_) {}
           }
-        });
-      } else {
-        audio.pause();
-      }
+        };
 
-      updateMediaSession(track);
-      useSyncStore.getState().sendPlaybackState();
+        if (!needsSourceChange && audio.readyState >= 1) {
+          applySeek();
+        } else {
+          audio.addEventListener('loadedmetadata', applySeek, { once: true });
+        }
+
+        if (autoPlay) {
+          audio.play().catch((err) => {
+            console.warn('[Audio play interrupted / autoplay policy]:', err);
+            if (err.name === 'NotAllowedError') {
+              toast.info('Нажмите в любом месте для включения звука на этом устройстве');
+              const unlock = () => {
+                audio.play().catch(() => {});
+                window.removeEventListener('click', unlock);
+                window.removeEventListener('keydown', unlock);
+                window.removeEventListener('touchstart', unlock);
+              };
+              window.addEventListener('click', unlock, { once: true });
+              window.addEventListener('keydown', unlock, { once: true });
+              window.addEventListener('touchstart', unlock, { once: true });
+            }
+          });
+        } else {
+          audio.pause();
+        }
+
+        updateMediaSession(track);
+        useSyncStore.getState().sendPlaybackState();
+        scheduleNextTrackPrefetch();
+      });
     },
 
     stopLocalPlayback: () => {
@@ -412,10 +444,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audioCtx.resume().catch(() => {});
       }
 
-      audio.src = `/api/stream/${chosenTrack.id}`;
-      audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
-      updateMediaSession(chosenTrack);
-      useSyncStore.getState().sendPlaybackState();
+      getCachedTrackUrl(chosenTrack.id).then((cachedUrl) => {
+        const streamUrl = `/api/stream/${chosenTrack.id}`;
+        const targetSrc = cachedUrl || streamUrl;
+        if (!audio.src.endsWith(targetSrc) && audio.src !== targetSrc) {
+          audio.src = targetSrc;
+        }
+        audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
+        updateMediaSession(chosenTrack);
+        useSyncStore.getState().sendPlaybackState();
+        scheduleNextTrackPrefetch();
+      });
     },
 
     togglePlay: () => {
@@ -654,6 +693,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           ? Array.from(new Set([...get().likedTrackIds, trackId]))
           : get().likedTrackIds.filter((id) => id !== trackId);
         set({ likedTrackIds: updated });
+
+        // Auto-cache track if Liked Songs is downloaded offline
+        if (res.liked && useOfflineStore.getState().isDownloaded(-1)) {
+          const currentT = get().currentTrack?.id === trackId ? get().currentTrack : get().queue.find((t) => t.id === trackId);
+          if (currentT) {
+            useOfflineStore.getState().cacheTrack(currentT);
+          }
+        }
+
         return res.liked;
       } catch (err) {
         set({ likedTrackIds });

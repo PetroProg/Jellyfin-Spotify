@@ -50,11 +50,11 @@ export default defineConfig({
             options: {
               cacheName: 'jellyfin-spotify-audio-cache',
               expiration: {
-                maxEntries: 200,
-                maxAgeSeconds: 30 * 24 * 60 * 60 // 30 days
+                maxEntries: 2500,
+                maxAgeSeconds: 60 * 24 * 60 * 60 // 60 days
               },
               cacheableResponse: {
-                statuses: [0, 200, 206]
+                statuses: [0, 200]
               }
             }
           }

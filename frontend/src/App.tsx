@@ -92,10 +92,14 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // Sync WebSocket lifecycle with user authentication
+  // Sync WebSocket lifecycle with user authentication and auto-sync offline playlists
   useEffect(() => {
     if (isAuthenticated) {
       useSyncStore.getState().initSync();
+      // Auto-sync any tracks added to downloaded playlists in background
+      setTimeout(() => {
+        useOfflineStore.getState().syncAllDownloadedPlaylists();
+      }, 3000);
     } else {
       useSyncStore.getState().disconnectSync();
     }

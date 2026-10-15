@@ -178,7 +178,7 @@ server.delete('/api/auth/account', { preHandler: [(server as any).authenticate] 
   return { success: true, message: 'Аккаунт успешно удален' };
 });
 
-// ----------------- AUDIO STREAMING (Range requests, Direct Stream) -----------------
+// ----------------- AUDIO STREAMING (High-Performance WAN Stream & Caching) -----------------
 server.get('/api/stream/:trackId', async (req: any, reply: any) => {
   const trackId = req.params.trackId;
   const track: any = db.prepare('SELECT file_path FROM tracks WHERE id = ?').get(trackId);
@@ -197,31 +197,70 @@ server.get('/api/stream/:trackId', async (req: any, reply: any) => {
   else if (ext === '.ogg' || ext === '.opus') contentType = 'audio/ogg';
   else if (ext === '.flac') contentType = 'audio/flac';
 
+  const etag = `W/"track-${trackId}-${stat.mtimeMs}-${total}"`;
+  const lastModified = stat.mtime.toUTCString();
+
+  // ETag conditional check (instant 304 response)
+  if (req.headers['if-none-match'] === etag) {
+    return reply.status(304).send();
+  }
+
+  const baseHeaders = {
+    'Content-Type': contentType,
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'public, max-age=31536000, immutable',
+    'ETag': etag,
+    'Last-Modified': lastModified,
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Range, Content-Range, Accept-Ranges, Cache-Control',
+    'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges, ETag, Cache-Control',
+  };
+
+  const HIGH_WATER_MARK = 256 * 1024; // 256 KB buffer for high-throughput streaming over WAN
+
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');
     const partialstart = parts[0];
     const partialend = parts[1];
-    const start = parseInt(partialstart, 10);
-    const end = partialend ? parseInt(partialend, 10) : total - 1;
-    const chunksize = (end - start) + 1;
-    const fileStream = fs.createReadStream(filePath, { start, end });
+    let start = parseInt(partialstart, 10);
+    if (isNaN(start) || start < 0) start = 0;
 
-    reply.raw.writeHead(206, {
+    let end = partialend ? parseInt(partialend, 10) : total - 1;
+    if (isNaN(end) || end >= total) end = total - 1;
+    if (start > end) {
+      reply.status(416);
+      reply.headers({ 'Content-Range': `bytes */${total}` });
+      return reply.send();
+    }
+
+    const chunksize = (end - start) + 1;
+    const fileStream = fs.createReadStream(filePath, { start, end, highWaterMark: HIGH_WATER_MARK });
+
+    // Cleanly destroy stream on client disconnect to avoid orphan read streams
+    req.raw.on('close', () => {
+      fileStream.destroy();
+    });
+
+    reply.status(206);
+    reply.headers({
+      ...baseHeaders,
       'Content-Range': `bytes ${start}-${end}/${total}`,
-      'Accept-Ranges': 'bytes',
       'Content-Length': chunksize,
-      'Content-Type': contentType,
-      'Access-Control-Allow-Origin': '*'
     });
     return reply.send(fileStream);
   } else {
-    reply.raw.writeHead(200, {
-      'Content-Length': total,
-      'Content-Type': contentType,
-      'Accept-Ranges': 'bytes',
-      'Access-Control-Allow-Origin': '*'
+    const fileStream = fs.createReadStream(filePath, { highWaterMark: HIGH_WATER_MARK });
+
+    req.raw.on('close', () => {
+      fileStream.destroy();
     });
-    return reply.send(fs.createReadStream(filePath));
+
+    reply.status(200);
+    reply.headers({
+      ...baseHeaders,
+      'Content-Length': total,
+    });
+    return reply.send(fileStream);
   }
 });
 

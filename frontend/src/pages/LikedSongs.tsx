@@ -50,6 +50,9 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
     try {
       const data = await apiRequest<{ tracks: Track[] }>('/likes');
       setTracks(data.tracks || []);
+      if (useOfflineStore.getState().isDownloaded(LIKED_PLAYLIST_ID)) {
+        useOfflineStore.getState().syncPlaylist(LIKED_PLAYLIST_ID, data.tracks || []);
+      }
     } catch (e) {
       console.warn(e);
     } finally {
