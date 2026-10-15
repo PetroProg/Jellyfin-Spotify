@@ -71,6 +71,16 @@ const STORAGE_KEY_VOLUME = 'jellyfy_player_volume';
 const STORAGE_KEY_EQ_BANDS = 'jellyfy_eq_bands';
 const STORAGE_KEY_EQ_PRESET = 'jellyfy_eq_preset';
 const STORAGE_KEY_NORMALIZER = 'jellyfy_normalizer_enabled';
+const STORAGE_KEY_LIKED_IDS = 'jellyfy_cached_liked_ids';
+
+const loadSavedLikedIds = (): number[] => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_LIKED_IDS);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+};
 
 const loadSavedVolume = (): number => {
   try {
@@ -667,14 +677,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       set({ queue: updated, currentIndex: newIdx });
     },
 
-    likedTrackIds: [],
+    likedTrackIds: loadSavedLikedIds(),
 
     loadLikes: async () => {
       try {
         const data = await apiRequest<{ tracks: Track[] }>('/likes');
-        set({ likedTrackIds: (data.tracks || []).map((t) => t.id) });
+        const ids = (data.tracks || []).map((t) => t.id);
+        set({ likedTrackIds: ids });
+        localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(ids));
       } catch (e) {
-        // Ignored if not yet authenticated
+        const saved = loadSavedLikedIds();
+        if (saved && saved.length > 0) {
+          set({ likedTrackIds: saved });
+        }
       }
     },
 
@@ -693,6 +708,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           ? Array.from(new Set([...get().likedTrackIds, trackId]))
           : get().likedTrackIds.filter((id) => id !== trackId);
         set({ likedTrackIds: updated });
+        localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(updated));
 
         // Auto-cache track if Liked Songs is downloaded offline
         if (res.liked && useOfflineStore.getState().isDownloaded(-1)) {

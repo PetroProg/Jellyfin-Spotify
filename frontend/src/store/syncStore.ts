@@ -316,8 +316,11 @@ export const useSyncStore = create<SyncState>((set, get) => {
         ws.onclose = () => {
           set({ isConnected: false });
           if (pingInterval) clearInterval(pingInterval);
-          // Auto-reconnect after 3 seconds if user still logged in
+          // Auto-reconnect after 3 seconds if user still logged in and online
           setTimeout(() => {
+            if (typeof navigator !== 'undefined' && !navigator.onLine) {
+              return;
+            }
             if (useAuthStore.getState().isAuthenticated) {
               get().initSync();
             }

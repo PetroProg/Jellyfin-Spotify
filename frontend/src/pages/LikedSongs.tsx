@@ -3,6 +3,7 @@ import { Heart, Play, Shuffle, ChevronUp, ArrowLeft, Download, Check, Loader2 } 
 import { Track } from '../types';
 import { apiRequest } from '../api/client';
 import { useOfflineStore } from '../store/offlineStore';
+import { getOfflinePlaylistData } from '../utils/offline';
 import { TrackRow } from '../components/TrackRow';
 import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
@@ -49,12 +50,24 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
   const loadLikes = async () => {
     try {
       const data = await apiRequest<{ tracks: Track[] }>('/likes');
-      setTracks(data.tracks || []);
+      const loadedTracks = data.tracks || [];
+      setTracks(loadedTracks);
       if (useOfflineStore.getState().isDownloaded(LIKED_PLAYLIST_ID)) {
-        useOfflineStore.getState().syncPlaylist(LIKED_PLAYLIST_ID, data.tracks || []);
+        const likedPl = {
+          id: LIKED_PLAYLIST_ID,
+          name: 'Любимые треки',
+          description: 'Ваша медиатека сохраненных композиций',
+          created_at: new Date().toISOString(),
+          track_count: loadedTracks.length,
+        };
+        useOfflineStore.getState().syncPlaylist(LIKED_PLAYLIST_ID, loadedTracks, likedPl);
       }
     } catch (e) {
-      console.warn(e);
+      console.warn('[LikedSongs] Network error, fallback to offline tracks:', e);
+      const offline = getOfflinePlaylistData(LIKED_PLAYLIST_ID);
+      if (offline && offline.tracks) {
+        setTracks(offline.tracks);
+      }
     } finally {
       setLoading(false);
     }
@@ -112,7 +125,14 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       }
     } else {
       try {
-        await startDownload(LIKED_PLAYLIST_ID, tracks);
+        const likedPl = {
+          id: LIKED_PLAYLIST_ID,
+          name: 'Любимые треки',
+          description: 'Ваша медиатека сохраненных композиций',
+          created_at: new Date().toISOString(),
+          track_count: tracks.length,
+        };
+        await startDownload(LIKED_PLAYLIST_ID, tracks, likedPl);
         toast.success('Скачивание любимых треков начато');
       } catch (e: any) {
         toast.error(e.message || 'Ошибка сохранения оффлайн');

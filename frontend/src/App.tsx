@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { WifiOff } from 'lucide-react';
 import { useAuthStore } from './store/authStore';
 import { apiRequest } from './api/client';
 import { Playlist } from './types';
@@ -23,6 +24,7 @@ import { ConfirmModal } from './components/ConfirmModal';
 import { DevicePickerModal } from './components/DevicePickerModal';
 import { toast } from './store/toastStore';
 import { useSyncStore } from './store/syncStore';
+import { getAllOfflinePlaylists, getAllPlaylistsCache, saveAllPlaylistsCache } from './utils/offline';
 
 export const App: React.FC = () => {
   const { isAuthenticated, isLoading, fetchMe } = useAuthStore();
@@ -36,7 +38,11 @@ export const App: React.FC = () => {
 
   const [currentTab, setCurrentTab] = useState(getInitialTab);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<number | null>(null);
-  const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const [playlists, setPlaylists] = useState<Playlist[]>(() => {
+    const cached = getAllPlaylistsCache();
+    return cached.length > 0 ? cached : getAllOfflinePlaylists();
+  });
+  const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [isQueueOpen, setIsQueueOpen] = useState(false);
   
   // Create Playlist Modal
@@ -202,13 +208,42 @@ export const App: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      fetchMe();
+      loadPlaylists();
+      usePlayerStore.getState().loadLikes();
+      useOfflineStore.getState().syncAllDownloadedPlaylists();
+      useSyncStore.getState().initSync();
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
   const loadPlaylists = async () => {
     if (!isAuthenticated) return;
     try {
       const data = await apiRequest<{ playlists: Playlist[] }>('/playlists');
-      setPlaylists(data.playlists || []);
+      const list = data.playlists || [];
+      setPlaylists(list);
+      saveAllPlaylistsCache(list);
     } catch (e) {
-      console.warn(e);
+      console.warn('[App] Failed to load playlists from network, loading offline cache:', e);
+      const cached = getAllPlaylistsCache();
+      if (cached && cached.length > 0) {
+        setPlaylists(cached);
+      } else {
+        setPlaylists(getAllOfflinePlaylists());
+      }
     }
   };
 
@@ -264,6 +299,12 @@ export const App: React.FC = () => {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-cat-base text-cat-text flex-col">
+      {!isOnline && (
+        <div className="bg-cat-crust/95 border-b border-cat-yellow/30 px-3 py-1.5 text-xs text-cat-yellow flex items-center justify-center gap-2 select-none z-50">
+          <WifiOff className="w-3.5 h-3.5" />
+          <span>Офлайн-режим • Доступны скачанные плейлисты и треки</span>
+        </div>
+      )}
       <div className="flex flex-1 overflow-hidden">
         {/* Left Desktop Sidebar */}
         <Sidebar

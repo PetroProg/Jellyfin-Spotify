@@ -61,6 +61,23 @@ if (fs.existsSync(publicDir)) {
   server.register(fastifyStatic, {
     root: publicDir,
     prefix: '/',
+    setHeaders: (res: any, pathName: string) => {
+      // Never cache HTML, Service Worker, or manifest files
+      // Ensures clients immediately pick up new updates on restart/launch
+      if (
+        pathName.endsWith('.html') ||
+        pathName.endsWith('sw.js') ||
+        pathName.endsWith('registerSW.js') ||
+        pathName.endsWith('.webmanifest')
+      ) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+      } else if (pathName.includes('/assets/')) {
+        // Vite hashed bundle assets can be safely cached
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+    },
   });
 }
 
@@ -1023,7 +1040,12 @@ server.setNotFoundHandler((req, reply) => {
   }
   const indexPath = path.join(publicDir, 'index.html');
   if (fs.existsSync(indexPath)) {
-    reply.type('text/html').send(fs.readFileSync(indexPath));
+    reply
+      .header('Cache-Control', 'no-cache, no-store, must-revalidate')
+      .header('Pragma', 'no-cache')
+      .header('Expires', '0')
+      .type('text/html')
+      .send(fs.readFileSync(indexPath));
   } else {
     reply.status(404).send('Not Found');
   }

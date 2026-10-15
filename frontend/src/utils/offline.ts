@@ -1,7 +1,9 @@
-import { Track } from '../types';
+import { Playlist, Track } from '../types';
 
 export const CACHE_NAME = 'jellyfin-spotify-audio-cache';
 const OFFLINE_PLAYLISTS_KEY = 'offline_playlists_ids';
+const OFFLINE_PLAYLIST_PREFIX = 'jellyfy_offline_playlist_';
+const ALL_PLAYLISTS_CACHE_KEY = 'jellyfy_all_playlists_cache';
 
 // In-memory registry of active Blob URLs for zero-latency instant playback
 const activeBlobUrls = new Map<number, string>();
@@ -17,6 +19,79 @@ export function getOfflinePlaylistIds(): number[] {
 
 export function isPlaylistDownloaded(playlistId: number): boolean {
   return getOfflinePlaylistIds().includes(playlistId);
+}
+
+export function saveAllPlaylistsCache(playlists: Playlist[]): void {
+  try {
+    localStorage.setItem(ALL_PLAYLISTS_CACHE_KEY, JSON.stringify(playlists));
+  } catch (err) {
+    console.warn('[Offline] Failed to save all playlists cache:', err);
+  }
+}
+
+export function getAllPlaylistsCache(): Playlist[] {
+  try {
+    const raw = localStorage.getItem(ALL_PLAYLISTS_CACHE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveOfflinePlaylistData(playlist: Playlist, tracks: Track[]): void {
+  try {
+    const key = `${OFFLINE_PLAYLIST_PREFIX}${playlist.id}`;
+    const payload = {
+      playlist,
+      tracks,
+      updatedAt: Date.now(),
+    };
+    localStorage.setItem(key, JSON.stringify(payload));
+
+    const ids = getOfflinePlaylistIds();
+    if (!ids.includes(playlist.id)) {
+      ids.push(playlist.id);
+      localStorage.setItem(OFFLINE_PLAYLISTS_KEY, JSON.stringify(ids));
+    }
+  } catch (err) {
+    console.warn(`[Offline] Failed to save offline playlist data for ${playlist.id}:`, err);
+  }
+}
+
+export function getOfflinePlaylistData(playlistId: number): { playlist: Playlist; tracks: Track[] } | null {
+  try {
+    const raw = localStorage.getItem(`${OFFLINE_PLAYLIST_PREFIX}${playlistId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getAllOfflinePlaylists(): Playlist[] {
+  const ids = getOfflinePlaylistIds();
+  const list: Playlist[] = [];
+  for (const id of ids) {
+    if (id === -1) {
+      const data = getOfflinePlaylistData(-1);
+      if (data && data.playlist) {
+        list.push(data.playlist);
+      } else {
+        list.push({
+          id: -1,
+          name: 'Любимые треки',
+          description: 'Ваша медиатека сохраненных композиций',
+          created_at: new Date().toISOString(),
+          track_count: data?.tracks?.length || 0,
+        });
+      }
+    } else {
+      const data = getOfflinePlaylistData(id);
+      if (data && data.playlist) {
+        list.push(data.playlist);
+      }
+    }
+  }
+  return list;
 }
 
 /**
@@ -110,15 +185,21 @@ export async function cacheTrackOffline(track: Track): Promise<boolean> {
 }
 
 /**
- * Downloads all tracks in a playlist.
+ * Downloads all tracks in a playlist and persists its metadata locally for offline access.
  */
 export async function downloadPlaylistOffline(
   playlistId: number,
   tracks: Track[],
+  playlist?: Playlist,
   onProgress?: (done: number, total: number) => void
 ): Promise<void> {
   if (!('caches' in window)) {
     throw new Error('Кеширование не поддерживается вашим браузером');
+  }
+
+  // Pre-save metadata so offline views are immediately populated
+  if (playlist) {
+    saveOfflinePlaylistData(playlist, tracks);
   }
 
   let done = 0;
@@ -135,6 +216,9 @@ export async function downloadPlaylistOffline(
     ids.push(playlistId);
     localStorage.setItem(OFFLINE_PLAYLISTS_KEY, JSON.stringify(ids));
   }
+  if (playlist) {
+    saveOfflinePlaylistData(playlist, tracks);
+  }
 }
 
 /**
@@ -143,10 +227,15 @@ export async function downloadPlaylistOffline(
 export async function syncDownloadedPlaylist(
   playlistId: number,
   tracks: Track[],
+  playlist?: Playlist,
   onProgress?: (done: number, total: number) => void
 ): Promise<number> {
   if (!isPlaylistDownloaded(playlistId) || !tracks || tracks.length === 0) return 0;
   if (!('caches' in window)) return 0;
+
+  if (playlist) {
+    saveOfflinePlaylistData(playlist, tracks);
+  }
 
   const missingTracks: Track[] = [];
   for (const t of tracks) {
@@ -189,6 +278,9 @@ export async function removePlaylistOffline(playlistId: number, tracks: Track[])
 
   const ids = getOfflinePlaylistIds().filter((id) => id !== playlistId);
   localStorage.setItem(OFFLINE_PLAYLISTS_KEY, JSON.stringify(ids));
+  try {
+    localStorage.removeItem(`${OFFLINE_PLAYLIST_PREFIX}${playlistId}`);
+  } catch (_) {}
 }
 
 export async function getOfflineStorageUsage(): Promise<string> {
@@ -208,5 +300,13 @@ export async function clearAllOfflineCache(): Promise<void> {
     URL.revokeObjectURL(url);
   }
   activeBlobUrls.clear();
+
+  const ids = getOfflinePlaylistIds();
+  for (const id of ids) {
+    try {
+      localStorage.removeItem(`${OFFLINE_PLAYLIST_PREFIX}${id}`);
+    } catch (_) {}
+  }
   localStorage.removeItem(OFFLINE_PLAYLISTS_KEY);
+  localStorage.removeItem(ALL_PLAYLISTS_CACHE_KEY);
 }

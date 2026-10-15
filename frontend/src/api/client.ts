@@ -26,20 +26,32 @@ export async function apiRequest<T = any>(endpoint: string, options: RequestInit
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const res = await fetch(`${API_BASE}${endpoint}`, {
-    ...options,
-    headers,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${endpoint}`, {
+      ...options,
+      headers,
+    });
+  } catch (netErr: any) {
+    const offlineErr: any = new Error(netErr.message || 'Ошибка сети');
+    offlineErr.isNetworkError = true;
+    offlineErr.isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+    throw offlineErr;
+  }
 
   if (res.status === 401) {
     setToken(null);
     window.location.href = '/login';
-    throw new Error('Сессия истекла, авторизуйтесь снова');
+    const err: any = new Error('Сессия истекла, авторизуйтесь снова');
+    err.status = 401;
+    throw err;
   }
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || `Ошибка сервера (${res.status})`);
+    const error: any = new Error(data.error || `Ошибка сервера (${res.status})`);
+    error.status = res.status;
+    throw error;
   }
 
   return data;

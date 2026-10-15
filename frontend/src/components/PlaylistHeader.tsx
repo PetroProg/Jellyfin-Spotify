@@ -169,7 +169,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
       }
     } else {
       try {
-        await startDownload(playlist.id, tracks);
+        await startDownload(playlist.id, tracks, playlist);
         toast.success(`Скачивание треков плейлиста «${playlist.name}» начато`);
       } catch (e: any) {
         toast.error(e.message || 'Ошибка сохранения оффлайн');

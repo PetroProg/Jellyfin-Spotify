@@ -9,6 +9,7 @@ import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { usePlayerStore } from '../store/playerStore';
 import { toast } from '../store/toastStore';
 import { useOfflineStore } from '../store/offlineStore';
+import { getOfflinePlaylistData, saveOfflinePlaylistData } from '../utils/offline';
 
 interface PlaylistViewProps {
   playlistId: number;
@@ -70,10 +71,16 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
       setTracks(data.tracks || []);
       setActiveJob(data.activeJob || null);
       if (useOfflineStore.getState().isDownloaded(Number(playlistId))) {
-        useOfflineStore.getState().syncPlaylist(Number(playlistId), data.tracks || []);
+        saveOfflinePlaylistData(data.playlist, data.tracks || []);
+        useOfflineStore.getState().syncPlaylist(Number(playlistId), data.tracks || [], data.playlist);
       }
     } catch (e: any) {
-      console.warn(e);
+      console.warn('[PlaylistView] Network error or offline, fallback to offline cache:', e);
+      const offline = getOfflinePlaylistData(Number(playlistId));
+      if (offline && offline.playlist) {
+        setPlaylist(offline.playlist);
+        setTracks(offline.tracks || []);
+      }
     } finally {
       setLoading(false);
     }
