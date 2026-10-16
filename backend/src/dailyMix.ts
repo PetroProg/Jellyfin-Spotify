@@ -35,22 +35,35 @@ export const CATEGORY_DEFINITIONS: Record<string, CategoryConfig> = {
       'tech house', 'deep house', 'big room', 'электроника', 'рейв', 'хаус', 'техно'
     ]
   },
+  rock: {
+    key: 'rock',
+    title: 'Рок и Альтернатива',
+    badge: 'ROCK & ALTERNATIVE',
+    accentColor: 'red',
+    keywords: [
+      'rock', 'metal', 'alternative rock', 'alt-rock', 'alternative', 'punk', 'post-punk', 'grunge',
+      'post-grunge', 'indie rock', 'hard rock', 'heavy metal', 'nu metal', 'metalcore',
+      'deathcore', 'pop punk', 'emo', 'shoegaze', 'classic rock', 'garage rock',
+      'psychedelic rock', 'progressive rock', 'post-hardcore', 'russian rock',
+      'рок', 'панк', 'метал', 'пост-панк', 'альтернатива'
+    ]
+  },
   hiphop_ru: {
     key: 'hiphop_ru',
-    title: 'Русский Хип-Хоп и Рэп',
-    badge: 'RU HIP-HOP & RAP',
-    accentColor: 'mauve',
+    title: 'Русский Рэп и Хип-Хоп',
+    badge: 'RU RAP & HIP-HOP',
+    accentColor: 'peach',
     keywords: [
       'russian hip hop', 'russian rap', 'russian trap', 'russian drill',
-      'russian plugg', 'russian drain', 'ukrainian hip hop', 'kazakh hip hop',
-      'русский рэп', 'русский хип-хоп'
+      'russian plugg', 'ukrainian hip hop', 'kazakh hip hop',
+      'русский рэп', 'русский хип-хоп', 'русский трэп', 'каспийский'
     ]
   },
   hiphop_intl: {
     key: 'hiphop_intl',
-    title: 'Хип-Хоп и Трэп',
+    title: 'Зарубежный Хип-Хоп',
     badge: 'HIP-HOP & TRAP',
-    accentColor: 'peach',
+    accentColor: 'mauve',
     keywords: [
       'hip hop', 'hip-hop', 'rap', 'trap', 'drill', 'grime', 'boom bap',
       'cloud rap', 'rage', 'melodic rap', 'atl hip hop', 'chicago rap',
@@ -58,42 +71,27 @@ export const CATEGORY_DEFINITIONS: Record<string, CategoryConfig> = {
       'underground hip hop', 'dirty south', 'рэп', 'хип-хоп', 'трэп'
     ]
   },
-  rock: {
-    key: 'rock',
-    title: 'Рок и Альтернатива',
-    badge: 'ROCK & ALTERNATIVE',
-    accentColor: 'red',
-    keywords: [
-      'rock', 'metal', 'alternative', 'punk', 'post-punk', 'grunge',
-      'indie rock', 'hard rock', 'heavy metal', 'nu metal', 'metalcore',
-      'deathcore', 'pop punk', 'emo', 'shoegaze', 'new wave', 'britpop',
-      'classic rock', 'garage rock', 'psychedelic rock', 'progressive rock',
-      'post-hardcore', 'gothic', 'russian rock', 'russian post-punk',
-      'рок', 'панк', 'метал', 'пост-панк', 'альтернатива'
-    ]
-  },
   pop: {
     key: 'pop',
-    title: 'Поп и R&B',
-    badge: 'POP & R&B',
+    title: 'Поп и Ретро',
+    badge: 'POP & RETRO',
     accentColor: 'pink',
     keywords: [
-      'pop', 'dance pop', 'synth-pop', 'electropop', 'teen pop', 'k-pop',
+      'pop', 'dance pop', 'synth-pop', 'synthpop', 'electropop', 'teen pop', 'k-pop',
       'j-pop', 'europop', 'estrada', 'r&b', 'rnb', 'soul', 'neo soul',
       'funk', 'disco', 'contemporary r&b', 'art pop', 'latin pop',
-      'russian pop', 'поп', 'соул'
+      'new wave', 'new romantic', '80s', 'russian pop', 'поп', 'соул'
     ]
   },
   chill: {
     key: 'chill',
-    title: 'Инди и Атмосфера',
+    title: 'Инди и Lo-Fi',
     badge: 'INDIE & CHILL',
     accentColor: 'teal',
     keywords: [
-      'indie', 'lo-fi', 'lofi', 'chill', 'ambient', 'acoustic', 'folk',
-      'singer-songwriter', 'soundtrack', 'score', 'classical', 'jazz',
-      'blues', 'instrumental', 'downtempo', 'trip hop', 'dream pop',
-      'bedroom pop', 'anime', 'neoclassical', 'piano', 'инди', 'чилл'
+      'lo-fi', 'lofi', 'chill', 'ambient', 'acoustic', 'folk',
+      'singer-songwriter', 'downtempo', 'trip hop', 'dream pop',
+      'bedroom pop', 'neoclassical', 'piano', 'инди', 'чилл'
     ]
   }
 };
@@ -110,8 +108,17 @@ interface ArtistMetadataRecord {
 
 const generationInProgress = new Map<number, Promise<any[]>>();
 
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 function hasCyrillic(text: string): boolean {
   return /[а-яёіїєґ]/i.test(text || '');
+}
+
+export function isNameMatch(candidateName: string, targetName: string): boolean {
+  const normCand = (candidateName || '').toLowerCase().replace(/[^a-zа-яё0-9]/gi, '');
+  const normTarget = (targetName || '').toLowerCase().replace(/[^a-zа-яё0-9]/gi, '');
+  if (!normCand || !normTarget) return false;
+  return normCand === normTarget || normCand.startsWith(normTarget) || normTarget.startsWith(normCand);
 }
 
 export function extractPrimaryArtist(artistStr: string): string {
@@ -131,7 +138,7 @@ function normalizeTrackKey(artist: string, title: string): string {
   return `${cleanArtist}:::${cleanTitle}`;
 }
 
-async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 4500): Promise<Response> {
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 5000): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -171,11 +178,34 @@ async function getSpotifyAppToken(): Promise<string | null> {
 }
 
 /**
+ * Checks if an artist is Russian / CIS music based on Cyrillic text, genres, or related artists.
+ */
+function isCisArtist(
+  artistName: string,
+  sampleTitle?: string,
+  genres: string[] = [],
+  relatedNames: string[] = []
+): boolean {
+  if (hasCyrillic(artistName)) return true;
+  if (sampleTitle && hasCyrillic(sampleTitle)) return true;
+  if (genres.some(g => /russian|ukrainian|kazakh|belarusian/i.test(g))) return true;
+  if (relatedNames.some(name => hasCyrillic(name))) return true;
+  return false;
+}
+
+/**
  * Classifies a list of genre strings + artist/track context into a strict category key.
  */
-export function classifyGenresToCategory(genres: string[], artistName: string, sampleTitle?: string): string | null {
-  const joined = genres.map(g => g.toLowerCase().trim()).join(' | ');
-  const isRu =
+export function classifyGenresToCategory(
+  genres: string[],
+  artistName: string,
+  sampleTitle?: string,
+  isRuHint = false
+): string | null {
+  const gList = genres.map(g => g.toLowerCase().trim()).filter(Boolean);
+  const joined = gList.join(' | ');
+
+  const isRu = isRuHint ||
     hasCyrillic(artistName) ||
     hasCyrillic(sampleTitle || '') ||
     joined.includes('russian') ||
@@ -183,44 +213,53 @@ export function classifyGenresToCategory(genres: string[], artistName: string, s
     joined.includes('kazakh') ||
     joined.includes('belarusian');
 
-  // 1. Check Phonk first (since phonk is sometimes tagged along with hip-hop or electronic)
-  for (const kw of CATEGORY_DEFINITIONS.phonk.keywords) {
-    if (joined.includes(kw)) return 'phonk';
+  // 1. Phonk first (distinct subgenre)
+  if (CATEGORY_DEFINITIONS.phonk.keywords.some(kw => joined.includes(kw))) {
+    return 'phonk';
   }
 
-  // 2. Check Hip-Hop / Rap / Trap
-  const isHipHop =
-    CATEGORY_DEFINITIONS.hiphop_ru.keywords.some(kw => joined.includes(kw)) ||
-    CATEGORY_DEFINITIONS.hiphop_intl.keywords.some(kw => joined.includes(kw)) ||
-    joined.includes('hip-hop/rap') ||
-    joined.includes('hip hop/rap') ||
-    joined.includes('rap');
+  // 2. Rock / Metal / Alternative / Post-Grunge / Punk
+  // Checked BEFORE hip-hop so rock bands with rap features or alternative tags are classified as rock
+  const hasRockGenre = CATEGORY_DEFINITIONS.rock.keywords.some(kw =>
+    gList.some(g => g === kw || g.includes(kw))
+  );
 
-  if (isHipHop) {
+  // 3. Hip-Hop / Rap / Trap
+  const hiphopKws = [
+    'hip hop', 'hip-hop', 'rap', 'trap', 'drill', 'grime', 'boom bap',
+    'cloud rap', 'rage', 'melodic rap', 'gangsta rap', 'рэп', 'хип-хоп', 'трэп'
+  ];
+  const hasHipHopGenre = gList.some(g =>
+    hiphopKws.some(kw => g === kw || g.startsWith(kw + ' ') || g.endsWith(' ' + kw) || g.includes(' ' + kw + ' '))
+  );
+
+  if (hasRockGenre && hasHipHopGenre) {
+    // Artist has both rock and hip-hop (e.g. My Darkest Days feat Ludacris, Linkin Park) -> classify as rock
+    return 'rock';
+  }
+  if (hasRockGenre) {
+    return 'rock';
+  }
+  if (hasHipHopGenre) {
     return isRu ? 'hiphop_ru' : 'hiphop_intl';
   }
 
-  // 3. Check Rock / Metal / Alternative / Punk
-  if (CATEGORY_DEFINITIONS.rock.keywords.some(kw => joined.includes(kw))) {
-    return 'rock';
-  }
-
-  // 4. Check Electronic / Dance / EDM
-  if (CATEGORY_DEFINITIONS.electronic.keywords.some(kw => joined.includes(kw))) {
+  // 4. Electronic / Dance / EDM
+  if (CATEGORY_DEFINITIONS.electronic.keywords.some(kw => gList.some(g => g === kw || g.includes(kw)))) {
     return 'electronic';
   }
 
-  // 5. Check Chill / Indie / Acoustic / Lo-Fi / Classical / Jazz
-  if (CATEGORY_DEFINITIONS.chill.keywords.some(kw => joined.includes(kw))) {
-    return 'chill';
-  }
-
-  // 6. Check Pop / R&B
-  if (CATEGORY_DEFINITIONS.pop.keywords.some(kw => joined.includes(kw))) {
+  // 5. Pop / Retro / R&B / Disco / 80s
+  if (CATEGORY_DEFINITIONS.pop.keywords.some(kw => gList.some(g => g === kw || g.includes(kw)))) {
     return 'pop';
   }
 
-  return null;
+  // 6. Chill / Lo-Fi / Acoustic (only if truly chill, NOT just any movie soundtrack)
+  if (CATEGORY_DEFINITIONS.chill.keywords.some(kw => gList.some(g => g === kw || g.includes(kw)))) {
+    return 'chill';
+  }
+
+  return isRu ? 'hiphop_ru' : 'pop';
 }
 
 /**
@@ -232,16 +271,19 @@ export async function resolveArtistMetadata(artistName: string, sampleTrackTitle
 
   try {
     const cached: any = db.prepare('SELECT * FROM artist_metadata WHERE artist_name = ?').get(key);
-    if (cached && cached.category) {
-      return {
-        artist_name: key,
-        spotify_id: cached.spotify_id,
-        deezer_id: cached.deezer_id,
-        genres: JSON.parse(cached.genres || '[]'),
-        category: cached.category,
-        related_artists: JSON.parse(cached.related_artists || '[]'),
-        cover_url: cached.cover_url
-      };
+    if (cached && cached.category && cached.deezer_id) {
+      const rels = JSON.parse(cached.related_artists || '[]');
+      if (rels.length > 0) {
+        return {
+          artist_name: key,
+          spotify_id: cached.spotify_id,
+          deezer_id: cached.deezer_id,
+          genres: JSON.parse(cached.genres || '[]'),
+          category: cached.category,
+          related_artists: rels,
+          cover_url: cached.cover_url
+        };
+      }
     }
   } catch (_) {}
 
@@ -251,85 +293,119 @@ export async function resolveArtistMetadata(artistName: string, sampleTrackTitle
   let coverUrl: string | null = null;
   const relatedArtists: { name: string; deezer_id?: number; cover_url?: string }[] = [];
 
-  // Run lookups in parallel: iTunes (genre), Deezer (artist ID + related), Spotify (detailed genres)
-  await Promise.all([
-    // 1. iTunes Search API for reliable primaryGenreName
-    (async () => {
-      try {
-        const q = encodeURIComponent(`${primary} ${sampleTrackTitle || ''}`.trim());
-        const res = await fetchWithTimeout(`https://itunes.apple.com/search?term=${q}&entity=song&limit=5`);
-        if (res.ok) {
-          const data: any = await res.json();
-          for (const item of data.results || []) {
-            if (item.primaryGenreName) {
+  // Slight throttle to protect against Deezer API rate-limits
+  await delay(60);
+
+  // 1. iTunes search: search for musicArtist entity first, song fallback second
+  try {
+    const itArtistRes = await fetchWithTimeout(
+      `https://itunes.apple.com/search?term=${encodeURIComponent(primary)}&entity=musicArtist&limit=3`
+    );
+    if (itArtistRes.ok) {
+      const data: any = await itArtistRes.json();
+      for (const item of data.results || []) {
+        const itemArtist = extractPrimaryArtist(item.artistName || '').toLowerCase();
+        if (itemArtist === key || itemArtist.includes(key) || key.includes(itemArtist)) {
+          if (item.primaryGenreName && item.primaryGenreName !== 'Music') {
+            const g = String(item.primaryGenreName).toLowerCase();
+            if (!genres.includes(g)) genres.push(g);
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  if (genres.length === 0) {
+    try {
+      const itSongRes = await fetchWithTimeout(
+        `https://itunes.apple.com/search?term=${encodeURIComponent(primary)}&entity=song&limit=5`
+      );
+      if (itSongRes.ok) {
+        const data: any = await itSongRes.json();
+        for (const item of data.results || []) {
+          const itemArtist = extractPrimaryArtist(item.artistName || '').toLowerCase();
+          // STRICT check: do NOT take genres of songs by other artists (e.g. Jelly Roll - Save Me)
+          if (itemArtist === key || itemArtist.includes(key) || key.includes(itemArtist)) {
+            if (item.primaryGenreName && item.primaryGenreName !== 'Music') {
               const g = String(item.primaryGenreName).toLowerCase();
-              if (g !== 'music' && !genres.includes(g)) {
-                genres.push(g);
-              }
+              if (!genres.includes(g)) genres.push(g);
             }
           }
         }
-      } catch (_) {}
-    })(),
+      }
+    } catch (_) {}
+  }
 
-    // 2. Deezer Artist Search + Related Artists
-    (async () => {
-      try {
-        const res = await fetchWithTimeout(`https://api.deezer.com/search/artist?q=${encodeURIComponent(primary)}&limit=3`);
-        if (res.ok) {
-          const data: any = await res.json();
-          const best = (data.data || [])[0];
-          if (best && best.id) {
-            deezerId = Number(best.id);
-            coverUrl = best.picture_xl || best.picture_big || best.picture_medium || null;
+  // 2. Deezer search: sort by nb_fan desc to pick the verified main artist
+  try {
+    const dzRes = await fetchWithTimeout(
+      `https://api.deezer.com/search/artist?q=${encodeURIComponent(primary)}&limit=5`
+    );
+    if (dzRes.ok) {
+      const dzData: any = await dzRes.json();
+      const matching = (dzData.data || []).filter((a: any) => isNameMatch(a.name, primary));
+      const candidates = matching.sort(
+        (a: any, b: any) => (b.nb_fan || 0) - (a.nb_fan || 0)
+      );
+      const best = candidates[0];
+      if (best && best.id) {
+        deezerId = Number(best.id);
+        coverUrl = best.picture_xl || best.picture_big || best.picture_medium || null;
 
-            const relRes = await fetchWithTimeout(`https://api.deezer.com/artist/${deezerId}/related?limit=15`);
-            if (relRes.ok) {
-              const relData: any = await relRes.json();
-              for (const r of relData.data || []) {
-                if (r.name) {
-                  relatedArtists.push({
-                    name: r.name,
-                    deezer_id: r.id,
-                    cover_url: r.picture_xl || r.picture_big || r.picture_medium
-                  });
-                }
-              }
-            }
-          }
-        }
-      } catch (_) {}
-    })(),
-
-    // 3. Spotify Artist Search (if configured)
-    (async () => {
-      try {
-        const token = await getSpotifyAppToken();
-        if (!token) return;
-        const res = await fetchWithTimeout(
-          `https://api.spotify.com/v1/search?type=artist&limit=2&q=${encodeURIComponent(primary)}`,
-          { headers: { Authorization: `Bearer ${token}` } }
+        await delay(50);
+        const relRes = await fetchWithTimeout(
+          `https://api.deezer.com/artist/${deezerId}/related?limit=20`
         );
-        if (res.ok) {
-          const data: any = await res.json();
-          const spArtist = data.artists?.items?.[0];
-          if (spArtist) {
-            spotifyId = spArtist.id || null;
-            if (!coverUrl && spArtist.images?.[0]?.url) {
-              coverUrl = spArtist.images[0].url;
-            }
-            for (const g of spArtist.genres || []) {
-              if (!genres.includes(g.toLowerCase())) {
-                genres.push(g.toLowerCase());
-              }
+        if (relRes.ok) {
+          const relData: any = await relRes.json();
+          for (const r of relData.data || []) {
+            if (r.name) {
+              relatedArtists.push({
+                name: r.name,
+                deezer_id: r.id,
+                cover_url: r.picture_xl || r.picture_big || r.picture_medium
+              });
             }
           }
         }
-      } catch (_) {}
-    })()
-  ]);
+      }
+    }
+  } catch (_) {}
 
-  const category = classifyGenresToCategory(genres, primary, sampleTrackTitle);
+  // 3. Spotify search (for additional genre precision)
+  try {
+    const token = await getSpotifyAppToken();
+    if (token) {
+      const spRes = await fetchWithTimeout(
+        `https://api.spotify.com/v1/search?type=artist&limit=2&q=${encodeURIComponent(primary)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (spRes.ok) {
+        const spData: any = await spRes.json();
+        const spArtist = spData.artists?.items?.[0];
+        if (spArtist) {
+          spotifyId = spArtist.id || null;
+          if (!coverUrl && spArtist.images?.[0]?.url) {
+            coverUrl = spArtist.images[0].url;
+          }
+          for (const g of spArtist.genres || []) {
+            const cleanG = g.toLowerCase();
+            if (!genres.includes(cleanG)) genres.push(cleanG);
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  // Check if artist is Russian / CIS music
+  const isRu = isCisArtist(
+    primary,
+    sampleTrackTitle,
+    genres,
+    relatedArtists.map(r => r.name)
+  );
+
+  const category = classifyGenresToCategory(genres, primary, sampleTrackTitle, isRu);
 
   const record: ArtistMetadataRecord = {
     artist_name: key,
@@ -379,15 +455,23 @@ async function fetchArtistCandidateTracks(
   try {
     let resolvedDzId = deezerId;
     if (!resolvedDzId) {
-      const sRes = await fetchWithTimeout(`https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}&limit=1`);
+      const sRes = await fetchWithTimeout(
+        `https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}&limit=5`
+      );
       if (sRes.ok) {
         const sData: any = await sRes.json();
-        resolvedDzId = sData.data?.[0]?.id;
+        const matching = (sData.data || []).filter((a: any) => isNameMatch(a.name, artistName));
+        const best = matching.sort(
+          (a: any, b: any) => (b.nb_fan || 0) - (a.nb_fan || 0)
+        )[0];
+        resolvedDzId = best?.id;
       }
     }
 
     if (resolvedDzId) {
-      const topRes = await fetchWithTimeout(`https://api.deezer.com/artist/${resolvedDzId}/top?limit=15`);
+      const topRes = await fetchWithTimeout(
+        `https://api.deezer.com/artist/${resolvedDzId}/top?limit=25`
+      );
       if (topRes.ok) {
         const topData: any = await topRes.json();
         for (const item of topData.data || []) {
@@ -409,13 +493,15 @@ async function fetchArtistCandidateTracks(
   if (results.length < 5) {
     try {
       const res = await fetchWithTimeout(
-        `https://itunes.apple.com/search?term=${encodeURIComponent(artistName)}&entity=song&limit=12`
+        `https://itunes.apple.com/search?term=${encodeURIComponent(artistName)}&entity=song&limit=15`
       );
       if (res.ok) {
         const data: any = await res.json();
         for (const item of data.results || []) {
           if (!item.trackName || !item.artistName) continue;
-          if (extractPrimaryArtist(item.artistName).toLowerCase() !== extractPrimaryArtist(artistName).toLowerCase()) {
+          const itA = extractPrimaryArtist(item.artistName).toLowerCase();
+          const target = extractPrimaryArtist(artistName).toLowerCase();
+          if (itA !== target && !itA.includes(target) && !target.includes(itA)) {
             continue;
           }
           results.push({
@@ -431,6 +517,50 @@ async function fetchArtistCandidateTracks(
     } catch (_) {}
   }
 
+  return results;
+}
+
+/**
+ * Fallback to Deezer charts or curated genre searches to ensure exactly 25 tracks per mix.
+ */
+async function fetchGenreFallbackTracks(categoryKey: string): Promise<SpotifyTrack[]> {
+  const results: SpotifyTrack[] = [];
+  try {
+    let url = '';
+    if (categoryKey === 'pop') {
+      url = 'https://api.deezer.com/chart/132/tracks?limit=40';
+    } else if (categoryKey === 'rock') {
+      url = 'https://api.deezer.com/chart/152/tracks?limit=40';
+    } else if (categoryKey === 'electronic') {
+      url = 'https://api.deezer.com/chart/113/tracks?limit=40';
+    } else if (categoryKey === 'hiphop_intl') {
+      url = 'https://api.deezer.com/chart/116/tracks?limit=40';
+    } else if (categoryKey === 'hiphop_ru') {
+      url = `https://api.deezer.com/search?q=${encodeURIComponent('рэп русский')}&limit=40`;
+    } else if (categoryKey === 'phonk') {
+      url = `https://api.deezer.com/search?q=${encodeURIComponent('phonk drift')}&limit=40`;
+    } else if (categoryKey === 'chill') {
+      url = `https://api.deezer.com/search?q=${encodeURIComponent('lofi chill')}&limit=40`;
+    }
+
+    if (url) {
+      const res = await fetchWithTimeout(url);
+      if (res.ok) {
+        const data: any = await res.json();
+        for (const item of data.data || []) {
+          if (!item.title || !item.artist?.name) continue;
+          results.push({
+            id: `dz_${item.id}`,
+            title: item.title_short || item.title,
+            artist: item.artist.name,
+            album: item.album?.title || '',
+            duration_ms: (item.duration || 180) * 1000,
+            cover_url: item.album?.cover_xl || item.album?.cover_big || item.album?.cover_medium || ''
+          });
+        }
+      }
+    }
+  } catch (_) {}
   return results;
 }
 
@@ -567,7 +697,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     );
   };
 
-  // Build set of all tracks already owned by user (so we know what is familiar vs brand new)
+  // Build set of all tracks already owned by user
   const ownedTrackKeys = new Set<string>();
   const ownedSpotifyIds = new Set<string>();
   for (const ut of userTracks) {
@@ -575,7 +705,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     if (ut.spotify_id) ownedSpotifyIds.add(ut.spotify_id);
   }
 
-  // 3. Extract unique primary artists and count their frequency
+  // 3. Extract unique primary artists and count frequency
   const artistMap = new Map<string, {
     displayName: string;
     count: number;
@@ -599,7 +729,6 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     }
     const entry = artistMap.get(key)!;
     entry.count++;
-    // Deduplicate track IDs inside artist entry
     if (!entry.tracks.some(t => t.id === ut.id)) {
       entry.tracks.push(ut);
     }
@@ -608,14 +737,14 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     }
   }
 
-  // Sort artists by track count descending, take top 45 artists to classify fast
+  // Sort artists by track count descending, take top 50
   const sortedArtists = Array.from(artistMap.entries())
     .sort((a, b) => b[1].count - a[1].count)
-    .slice(0, 45);
+    .slice(0, 50);
 
-  // Resolve artist metadata in batches of 6 to avoid overwhelming external APIs
+  // Resolve artist metadata in batches of 4 with pauses to prevent Deezer 429
   const metadataByArtist = new Map<string, ArtistMetadataRecord>();
-  const batchSize = 6;
+  const batchSize = 4;
   for (let i = 0; i < sortedArtists.length; i += batchSize) {
     const batch = sortedArtists.slice(i, i + batchSize);
     const resolved = await Promise.all(
@@ -624,17 +753,8 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     for (const meta of resolved) {
       metadataByArtist.set(meta.artist_name, meta);
     }
-  }
-
-  // Fallback co-occurrence: if an artist has no category yet, infer from the dominant category of their playlist
-  const playlistDominantCat = new Map<number, Map<string, number>>();
-  for (const [artistKey, info] of sortedArtists) {
-    const cat = metadataByArtist.get(artistKey)?.category;
-    if (!cat) continue;
-    for (const pid of info.playlistIds) {
-      if (!playlistDominantCat.has(pid)) playlistDominantCat.set(pid, new Map());
-      const counts = playlistDominantCat.get(pid)!;
-      counts.set(cat, (counts.get(cat) || 0) + info.count);
+    if (i + batchSize < sortedArtists.length) {
+      await delay(100);
     }
   }
 
@@ -656,18 +776,8 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     let cat = meta?.category || null;
 
     if (!cat) {
-      // Try playlist co-occurrence
-      for (const pid of info.playlistIds) {
-        const counts = playlistDominantCat.get(pid);
-        if (counts && counts.size > 0) {
-          cat = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0][0];
-          break;
-        }
-      }
-    }
-
-    if (!cat) {
-      cat = hasCyrillic(info.displayName) ? 'hiphop_ru' : 'pop';
+      const isRu = isCisArtist(info.displayName, info.sampleTitle);
+      cat = isRu ? 'hiphop_ru' : 'pop';
     }
 
     const cluster = ensureCluster(cat);
@@ -693,7 +803,8 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     }
   }
 
-  // Smart consolidation of closely-related sub-categories if one sub-branch has too few tracks (< 3)
+  // Only merge closely-related sub-branches if one has < 2 tracks (e.g. phonk into electronic)
+  // NEVER merge rock with hip-hop, or Russian hip-hop with foreign genres!
   const mergeClusterInto = (fromKey: string, intoKey: string) => {
     const fromC = rawClusters.get(fromKey);
     if (!fromC) return;
@@ -705,19 +816,11 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     rawClusters.delete(fromKey);
   };
 
-  if (rawClusters.has('phonk') && rawClusters.get('phonk')!.userTracks.length < 3 && rawClusters.has('electronic')) {
+  if (rawClusters.has('phonk') && rawClusters.get('phonk')!.userTracks.length < 2 && rawClusters.has('electronic')) {
     mergeClusterInto('phonk', 'electronic');
-  } else if (rawClusters.has('electronic') && rawClusters.get('electronic')!.userTracks.length < 3 && rawClusters.has('phonk')) {
-    mergeClusterInto('electronic', 'phonk');
   }
 
-  if (rawClusters.has('hiphop_ru') && rawClusters.get('hiphop_ru')!.userTracks.length < 3 && rawClusters.has('hiphop_intl')) {
-    mergeClusterInto('hiphop_ru', 'hiphop_intl');
-  } else if (rawClusters.has('hiphop_intl') && rawClusters.get('hiphop_intl')!.userTracks.length < 3 && rawClusters.has('hiphop_ru')) {
-    mergeClusterInto('hiphop_intl', 'hiphop_ru');
-  }
-
-  // Filter clusters that have enough material (at least 2 tracks or the largest cluster if library is tiny)
+  // Keep clusters that have at least 2 tracks from user's library
   let validClusters = Array.from(rawClusters.entries())
     .filter(([_, c]) => c.userTracks.length >= 2)
     .sort((a, b) => b[1].userTracks.length - a[1].userTracks.length)
@@ -742,9 +845,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
   }
 
   const createdMixes: any[] = [];
-  const TARGET_MIX_SIZE = 25;
-  const TARGET_FAMILIAR_COUNT = 5; // 20% familiar tracks from user's playlists in this category
-  const TARGET_NEW_COUNT = TARGET_MIX_SIZE - TARGET_FAMILIAR_COUNT; // 80% brand new tracks
+  const TARGET_MIX_SIZE = 25; // EXACTLY 25 tracks in every Daily Mix
 
   for (let idx = 0; idx < validClusters.length; idx++) {
     const [catKey, cluster] = validClusters[idx];
@@ -757,28 +858,29 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       keywords: []
     };
 
-    // 1. Pick 15-20% (up to 5) familiar tracks from user's library in this category
+    // 1. Pick 15-20% familiar tracks (up to 5) from user's library in this cluster
     const shuffledUserTracks = [...cluster.userTracks].sort(() => Math.random() - 0.5);
     const familiarTracks: any[] = [];
     const familiarArtistsUsed = new Set<string>();
 
     for (const ut of shuffledUserTracks) {
-      if (familiarTracks.length >= TARGET_FAMILIAR_COUNT) break;
+      if (familiarTracks.length >= 5) break;
       const pArtist = extractPrimaryArtist(ut.artist).toLowerCase();
       if (!familiarArtistsUsed.has(pArtist)) {
         familiarTracks.push(ut);
         familiarArtistsUsed.add(pArtist);
       }
     }
-    // If fewer unique artists than TARGET_FAMILIAR_COUNT, fill up to min(TARGET_FAMILIAR_COUNT, 20% of mix)
     for (const ut of shuffledUserTracks) {
-      if (familiarTracks.length >= Math.min(TARGET_FAMILIAR_COUNT, Math.ceil(cluster.userTracks.length * 0.5))) break;
+      if (familiarTracks.length >= Math.min(5, cluster.userTracks.length)) break;
       if (!familiarTracks.some(f => f.id === ut.id)) {
         familiarTracks.push(ut);
       }
     }
 
-    // 2. Discover 80-85% NEW tracks strictly in this category
+    const TARGET_NEW_COUNT = TARGET_MIX_SIZE - familiarTracks.length;
+
+    // 2. Discover brand new tracks strictly in this category to reach TARGET_NEW_COUNT
     const newCandidates: SpotifyTrack[] = [];
     const usedTrackKeys = new Set<string>(ownedTrackKeys);
     const artistCountInMix = new Map<string, number>();
@@ -788,6 +890,8 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       artistCountInMix.set(pa, (artistCountInMix.get(pa) || 0) + 1);
     }
 
+    let maxTracksPerArtist = 2;
+
     const canAddCandidate = (cand: SpotifyTrack): boolean => {
       if (!cand.title || !cand.artist) return false;
       const tKey = normalizeTrackKey(cand.artist, cand.title);
@@ -795,7 +899,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       if (cand.id && ownedSpotifyIds.has(cand.id)) return false;
       if (isBlacklisted(cand.artist, cand.title, cand.id)) return false;
       const pa = extractPrimaryArtist(cand.artist).toLowerCase();
-      if ((artistCountInMix.get(pa) || 0) >= 2) return false;
+      if ((artistCountInMix.get(pa) || 0) >= maxTracksPerArtist) return false;
       return true;
     };
 
@@ -807,10 +911,10 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       newCandidates.push(cand);
     };
 
-    // Part A: Unheard tracks from user's seed artists in this category
+    // Stage A: Unheard tracks from seed artists in this category
     const seedArtistsPool = [...cluster.artists]
       .sort((a, b) => (b.count + Math.random() * 2) - (a.count + Math.random() * 2))
-      .slice(0, 8);
+      .slice(0, 10);
 
     const seedTrackLists = await Promise.all(
       seedArtistsPool.map(sa => fetchArtistCandidateTracks(sa.displayName, sa.meta.deezer_id))
@@ -820,7 +924,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       let addedForThisSeed = 0;
       for (const cand of trackList) {
         if (newCandidates.length >= Math.ceil(TARGET_NEW_COUNT * 0.45)) break;
-        if (addedForThisSeed >= 2) break;
+        if (addedForThisSeed >= maxTracksPerArtist) break;
         if (canAddCandidate(cand)) {
           addCandidate(cand);
           addedForThisSeed++;
@@ -828,7 +932,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       }
     }
 
-    // Part B: Tracks from Related / Similar Artists strictly matching this category
+    // Stage B: Tracks from Related Artists strictly verified for the same category
     const relatedPool: { name: string; deezer_id?: number; cover_url?: string }[] = [];
     const seenRelated = new Set<string>(cluster.artists.map(a => a.key));
 
@@ -842,7 +946,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       }
     }
 
-    const shuffledRelated = relatedPool.sort(() => Math.random() - 0.5).slice(0, 18);
+    const shuffledRelated = relatedPool.sort(() => Math.random() - 0.5).slice(0, 25);
 
     for (let rIdx = 0; rIdx < shuffledRelated.length; rIdx += 5) {
       if (newCandidates.length >= TARGET_NEW_COUNT) break;
@@ -851,14 +955,10 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       const batchResults = await Promise.all(
         rBatch.map(async (rel) => {
           const relMeta = await resolveArtistMetadata(rel.name);
-          const relCat = relMeta.category;
-          // Strict category compatibility check so unrelated genres never mix
-          const isSameCategory =
-            relCat === catKey ||
-            (!relCat && (catKey !== 'hiphop_ru' || hasCyrillic(rel.name))) ||
-            (catKey === 'hiphop_ru' && relCat === 'hiphop_intl' && hasCyrillic(rel.name));
-
-          if (!isSameCategory) return [];
+          // STRICT CHECK: Reject any artist whose category does not match this mix's category!
+          if (relMeta.category !== catKey) {
+            return [];
+          }
           return await fetchArtistCandidateTracks(rel.name, rel.deezer_id || relMeta.deezer_id);
         })
       );
@@ -867,7 +967,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
         let addedForRel = 0;
         for (const cand of trackList) {
           if (newCandidates.length >= TARGET_NEW_COUNT) break;
-          if (addedForRel >= 2) break;
+          if (addedForRel >= maxTracksPerArtist) break;
           if (canAddCandidate(cand)) {
             addCandidate(cand);
             addedForRel++;
@@ -876,8 +976,9 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       }
     }
 
-    // If still below TARGET_NEW_COUNT, allow more unheard tracks from seed artists
+    // Stage C: If still below TARGET_NEW_COUNT, expand artist cap to 3 tracks and pull more from seed artists
     if (newCandidates.length < TARGET_NEW_COUNT) {
+      maxTracksPerArtist = 3;
       for (const trackList of seedTrackLists) {
         for (const cand of trackList) {
           if (newCandidates.length >= TARGET_NEW_COUNT) break;
@@ -888,22 +989,40 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       }
     }
 
-    // 3. Interleave Familiar Tracks (15-20%) and New Tracks (80-85%)
-    // Place familiar tracks at positions 0, 5, 10, 15, 20 so playback starts instantly
+    // Stage D: If STILL below TARGET_NEW_COUNT, fetch genre fallback tracks from Deezer charts / search
+    if (newCandidates.length < TARGET_NEW_COUNT) {
+      maxTracksPerArtist = 4;
+      const fallbackTracks = await fetchGenreFallbackTracks(catKey);
+      for (const cand of fallbackTracks) {
+        if (newCandidates.length >= TARGET_NEW_COUNT) break;
+        if (canAddCandidate(cand)) {
+          addCandidate(cand);
+        }
+      }
+    }
+
+    // Ensure candidates exactly equal TARGET_NEW_COUNT
+    const finalNewTracks = newCandidates.slice(0, TARGET_NEW_COUNT);
+
+    // 3. Interleave Familiar (15-20%) and New (80-85%) tracks to form EXACTLY 25 tracks
+    // Position 0 is ALWAYS familiar for instant 0ms playback!
     const finalMixItems: { type: 'familiar' | 'new'; track: any; position: number }[] = [];
     let famIdx = 0;
     let newIdx = 0;
-    const totalCount = familiarTracks.length + newCandidates.length;
 
-    for (let pos = 0; pos < totalCount; pos++) {
+    for (let pos = 0; pos < TARGET_MIX_SIZE; pos++) {
       const shouldPlaceFamiliar =
-        (pos % 5 === 0 && famIdx < familiarTracks.length) ||
-        newIdx >= newCandidates.length;
+        (pos === 0 || (pos % 5 === 0 && famIdx < familiarTracks.length)) &&
+        famIdx < familiarTracks.length;
 
-      if (shouldPlaceFamiliar && famIdx < familiarTracks.length) {
-        finalMixItems.push({ type: 'familiar', track: familiarTracks[famIdx++], position: pos });
-      } else if (newIdx < newCandidates.length) {
-        finalMixItems.push({ type: 'new', track: newCandidates[newIdx++], position: pos });
+      if (shouldPlaceFamiliar || newIdx >= finalNewTracks.length) {
+        if (famIdx < familiarTracks.length) {
+          finalMixItems.push({ type: 'familiar', track: familiarTracks[famIdx++], position: pos });
+        } else if (newIdx < finalNewTracks.length) {
+          finalMixItems.push({ type: 'new', track: finalNewTracks[newIdx++], position: pos });
+        }
+      } else {
+        finalMixItems.push({ type: 'new', track: finalNewTracks[newIdx++], position: pos });
       }
     }
 
@@ -913,7 +1032,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     const mixCover =
       seedArtistsPool.find(a => a.meta.cover_url)?.meta.cover_url ||
       familiarTracks.find(t => t.cover_url)?.cover_url ||
-      newCandidates.find(t => t.cover_url)?.cover_url ||
+      finalNewTracks.find(t => t.cover_url)?.cover_url ||
       '';
 
     const tracksToDownload: SpotifyTrack[] = finalMixItems
@@ -945,7 +1064,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
 
     const mixPlaylistId = Number(insertRes.lastInsertRowid);
 
-    // Immediately insert the 15-20% familiar tracks into playlist_tracks
+    // Immediately insert the familiar tracks into playlist_tracks
     const insertPt = db.prepare(`
       INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
       VALUES (?, ?, ?)
