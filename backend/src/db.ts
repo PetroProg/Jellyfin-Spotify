@@ -96,6 +96,17 @@ db.exec(`
     key TEXT PRIMARY KEY,
     value TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS artist_metadata (
+    artist_name TEXT PRIMARY KEY,
+    spotify_id TEXT,
+    deezer_id INTEGER,
+    genres TEXT,
+    category TEXT,
+    related_artists TEXT,
+    cover_url TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // Safe migrations
@@ -116,6 +127,24 @@ try {
 } catch (_) {}
 try {
   db.exec('ALTER TABLE users ADD COLUMN spotify_display_name TEXT;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE playlists ADD COLUMN is_daily_mix INTEGER DEFAULT 0;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE playlists ADD COLUMN daily_mix_category TEXT;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE playlists ADD COLUMN daily_mix_number INTEGER;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE playlists ADD COLUMN daily_mix_date TEXT;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE playlists ADD COLUMN daily_mix_seed_artists TEXT;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE playlists ADD COLUMN daily_mix_tracks_json TEXT;');
 } catch (_) {}
 
 // Automatic deduplication of tracks: merge any duplicate (title + artist) tracks in playlist_tracks and liked_tracks

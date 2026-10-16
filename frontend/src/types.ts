@@ -24,6 +24,15 @@ export interface Playlist {
   cover_url?: string;
   track_count?: number;
   created_at: string;
+  is_daily_mix?: number;
+  daily_mix_category?: string;
+  daily_mix_number?: number;
+  daily_mix_date?: string;
+  category_title?: string;
+  category_badge?: string;
+  accent_color?: string;
+  seed_artists?: string[];
+  activeJob?: DownloadJob | null;
 }
 
 export interface DownloadJob {

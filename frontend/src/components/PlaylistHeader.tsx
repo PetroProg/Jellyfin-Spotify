@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Shuffle, Download, Check, Music2, Loader2, Camera, Trash2, Pencil } from 'lucide-react';
+import { Play, Shuffle, Download, Check, Music2, Loader2, Camera, Trash2, Pencil, BookmarkPlus } from 'lucide-react';
 import { Playlist, Track } from '../types';
 import { useOfflineStore } from '../store/offlineStore';
 import { apiRequest } from '../api/client';
@@ -35,6 +35,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   const progressText = offlineProgress ? `${offlineProgress.done}/${offlineProgress.total}` : '';
   const [uploadingCover, setUploadingCover] = useState(false);
   const [deletingPlaylist, setDeletingPlaylist] = useState(false);
+  const [savingMix, setSavingMix] = useState(false);
 
   // Rename Playlist State
   const [showRenameModal, setShowRenameModal] = useState(false);
@@ -42,6 +43,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   const [renameDesc, setRenameDesc] = useState(playlist.description || '');
   const [savingRename, setSavingRename] = useState(false);
 
+  const isDailyMix = Boolean(playlist.is_daily_mix);
   const isLikedPlaylist =
     playlist.name.toLowerCase() === 'любимые треки' ||
     playlist.name.toLowerCase() === 'liked songs';
@@ -217,7 +219,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
       {/* Info & Action Buttons */}
       <div className="flex-1 text-center md:text-left min-w-0">
         <span className="text-xs uppercase tracking-wider text-cat-subtext0 font-semibold">
-          Плейлист
+          {isDailyMix ? 'Персональный Плейлист дня' : 'Плейлист'}
         </span>
         <h1 className="text-2xl md:text-4xl font-extrabold text-cat-text mt-1 truncate">
           {playlist.name}
@@ -280,8 +282,38 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
             )}
           </button>
 
+          {isDailyMix && (
+            <button
+              onClick={async () => {
+                if (savingMix) return;
+                setSavingMix(true);
+                try {
+                  const res = await apiRequest<{ id: number; name: string }>(`/daily-mixes/${playlist.id}/save`, {
+                    method: 'POST',
+                  });
+                  toast.success(`Сохранено в медиатеку как «${res.name}»`);
+                  onRename?.(res.name);
+                } catch (err: any) {
+                  toast.error(err.message || 'Ошибка сохранения микса');
+                } finally {
+                  setSavingMix(false);
+                }
+              }}
+              disabled={savingMix || tracks.length === 0}
+              title="Сохранить этот Микс дня как постоянный плейлист"
+              className="flex items-center gap-1.5 px-4 py-3 rounded-full bg-cat-surface0 hover:bg-cat-surface1 text-cat-text text-xs font-semibold active:scale-95 transition-all disabled:opacity-40 cursor-pointer shrink-0"
+            >
+              {savingMix ? (
+                <Loader2 className="w-4 h-4 animate-spin text-cat-mauve" />
+              ) : (
+                <BookmarkPlus className="w-4 h-4 text-cat-mauve" />
+              )}
+              <span>Сохранить в медиатеку</span>
+            </button>
+          )}
+
           {/* Rename Playlist Button */}
-          {!isLikedPlaylist && (
+          {!isLikedPlaylist && !isDailyMix && (
             <button
               onClick={() => {
                 setRenameName(playlist.name);
@@ -296,7 +328,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
           )}
 
           {/* Delete Playlist Button */}
-          {onDelete && (
+          {onDelete && !isDailyMix && (
             <button
               onClick={handleDeletePlaylist}
               disabled={deletingPlaylist}

@@ -31,6 +31,7 @@ import {
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
 import { setupWebSocketSync } from './sync';
+import { getOrGenerateDailyMixes, saveDailyMixAsPlaylist } from './dailyMix';
 
 dotenv.config();
 
@@ -281,13 +282,43 @@ server.get('/api/stream/:trackId', async (req: any, reply: any) => {
   }
 });
 
+// ----------------- DAILY MIXES -----------------
+server.get('/api/daily-mixes', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  try {
+    const mixes = await getOrGenerateDailyMixes(req.user.id, false);
+    return { mixes };
+  } catch (err: any) {
+    console.error('[Daily Mixes Error]:', err);
+    return reply.status(500).send({ error: err.message || 'Ошибка генерации Плейлистов дня' });
+  }
+});
+
+server.post('/api/daily-mixes/refresh', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  try {
+    const mixes = await getOrGenerateDailyMixes(req.user.id, true);
+    return { mixes };
+  } catch (err: any) {
+    console.error('[Daily Mixes Refresh Error]:', err);
+    return reply.status(500).send({ error: err.message || 'Ошибка обновления Плейлистов дня' });
+  }
+});
+
+server.post('/api/daily-mixes/:id/save', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  try {
+    const result = saveDailyMixAsPlaylist(req.user.id, Number(req.params.id));
+    return result;
+  } catch (err: any) {
+    return reply.status(400).send({ error: err.message || 'Ошибка сохранения плейлиста' });
+  }
+});
+
 // ----------------- PLAYLISTS -----------------
 server.get('/api/playlists', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const playlists = db.prepare(`
     SELECT p.*, COUNT(pt.track_id) as track_count
     FROM playlists p
     LEFT JOIN playlist_tracks pt ON p.id = pt.playlist_id
-    WHERE p.user_id = ?
+    WHERE p.user_id = ? AND COALESCE(p.is_daily_mix, 0) = 0
     GROUP BY p.id
     ORDER BY p.created_at DESC
   `).all(req.user.id);
@@ -300,7 +331,7 @@ server.post('/api/playlists', { preHandler: [(server as any).authenticate] }, as
   if (!name || !name.trim()) return reply.status(400).send({ error: 'Название обязательно' });
 
   const cleanName = name.trim();
-  const existing = db.prepare('SELECT id FROM playlists WHERE user_id = ? AND LOWER(name) = LOWER(?)').get(req.user.id, cleanName);
+  const existing = db.prepare('SELECT id FROM playlists WHERE user_id = ? AND COALESCE(is_daily_mix, 0) = 0 AND LOWER(name) = LOWER(?)').get(req.user.id, cleanName);
   if (existing) {
     return reply.status(400).send({ error: 'Плейлист с таким названием уже существует' });
   }

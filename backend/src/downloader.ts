@@ -125,6 +125,21 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
   });
 }
 
+export function cancelPlaylistDownloads(playlistIds: number[]) {
+  if (!playlistIds || playlistIds.length === 0) return;
+  const idSet = new Set(playlistIds);
+  for (let i = queue.length - 1; i >= 0; i--) {
+    if (queue[i].playlistId !== null && idSet.has(queue[i].playlistId!)) {
+      queue.splice(i, 1);
+    }
+  }
+  for (const pid of playlistIds) {
+    try {
+      db.prepare('DELETE FROM download_jobs WHERE playlist_id = ?').run(pid);
+    } catch (_) {}
+  }
+}
+
 export function enqueuePlaylistDownload(
   jobId: string,
   userId: number,
@@ -142,12 +157,13 @@ export function enqueuePlaylistDownload(
   }
 
   for (let i = 0; i < tracks.length; i++) {
+    const customPos = (tracks[i] as any).position;
     queue.push({
       jobId,
       userId,
       playlistId,
       track: tracks[i],
-      position: pos + i,
+      position: typeof customPos === 'number' ? customPos : pos + i,
       isLikedOnly
     });
   }
@@ -185,17 +201,27 @@ export async function resumePendingDownloads() {
 export async function resumePlaylistDownload(playlistId: number, existingJobId?: string): Promise<{ success: boolean; queued: number; message: string }> {
   try {
     const playlist: any = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId);
-    if (!playlist || !playlist.spotify_id) {
+    if (!playlist || (!playlist.spotify_id && !playlist.daily_mix_tracks_json)) {
       if (existingJobId) {
         db.prepare("UPDATE download_jobs SET status = 'failed' WHERE id = ?").run(existingJobId);
       }
       return { success: false, queued: 0, message: 'Плейлист или ссылка Spotify не найдены' };
     }
 
-    const playlistData = await fetchSpotifyPlaylist(playlist.spotify_id);
-    if (!playlistData.tracks || playlistData.tracks.length === 0) {
-      return { success: false, queued: 0, message: 'Не удалось получить треки из Spotify' };
+    let targetTracks: SpotifyTrack[] = [];
+    if (playlist.daily_mix_tracks_json) {
+      try {
+        targetTracks = JSON.parse(playlist.daily_mix_tracks_json) || [];
+      } catch (_) {}
+    } else if (playlist.spotify_id) {
+      const playlistData = await fetchSpotifyPlaylist(playlist.spotify_id);
+      targetTracks = playlistData.tracks || [];
     }
+
+    if (!targetTracks || targetTracks.length === 0) {
+      return { success: false, queued: 0, message: 'Не удалось получить треки для загрузки' };
+    }
+    const playlistData = { tracks: targetTracks };
 
     let jobId = existingJobId;
     if (!jobId) {
@@ -248,12 +274,13 @@ export async function resumePlaylistDownload(playlistId: number, existingJobId?:
       ));
 
       if (!isAlreadyAdded && !alreadyInQueue) {
+        const customPos = (track as any).position;
         queue.push({
           jobId: jobId!,
           userId: playlist.user_id,
           playlistId,
           track,
-          position: nextAvailablePos++
+          position: typeof customPos === 'number' ? customPos : nextAvailablePos++
         });
         queuedCount++;
       }
