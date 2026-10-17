@@ -23,9 +23,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <aside className="hidden md:flex flex-col w-64 bg-cat-mantle p-4 border-r border-cat-surface0/30 select-none">
       {/* Brand Header */}
       <div className="flex items-center gap-3 px-2 mb-6 cursor-pointer" onClick={() => setCurrentTab('home')}>
-        <div className="w-9 h-9 rounded-xl bg-cat-mauve/20 flex items-center justify-center text-cat-mauve">
-          <Music2 className="w-5 h-5" />
-        </div>
+        <img src="/favicon.svg" alt="Jellyfy" className="w-9 h-9 rounded-full shadow-md" />
         <div>
           <h1 className="font-bold text-lg text-cat-text tracking-wide">Jellyfy</h1>
           <span className="text-xs text-cat-subtext0">Catppuccin Edition</span>
