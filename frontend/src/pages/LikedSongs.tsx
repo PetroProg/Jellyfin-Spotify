@@ -3,7 +3,7 @@ import { Heart, Play, Shuffle, ChevronUp, ArrowLeft, Download, Check, Loader2 } 
 import { Track } from '../types';
 import { apiRequest } from '../api/client';
 import { useOfflineStore } from '../store/offlineStore';
-import { getOfflinePlaylistData } from '../utils/offline';
+import { getOfflinePlaylistData, saveOfflinePlaylistData } from '../utils/offline';
 import { TrackRow } from '../components/TrackRow';
 import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
@@ -15,14 +15,30 @@ interface LikedSongsProps {
 }
 
 export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
-  const [tracks, setTracks] = useState<Track[]>([]);
-  const [loading, setLoading] = useState(true);
+  const LIKED_PLAYLIST_ID = -1;
+  const CACHED_LIKED_TRACKS_KEY = 'jellyfy_cached_liked_tracks';
+
+  const getInitialTracks = (): Track[] => {
+    try {
+      const offline = getOfflinePlaylistData(LIKED_PLAYLIST_ID);
+      if (offline && offline.tracks && offline.tracks.length > 0) return offline.tracks;
+      const raw = localStorage.getItem(CACHED_LIKED_TRACKS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (_) {}
+    return [];
+  };
+
+  const initialTracks = getInitialTracks();
+  const [tracks, setTracks] = useState<Track[]>(initialTracks);
+  const [loading, setLoading] = useState(initialTracks.length === 0);
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const LIKED_PLAYLIST_ID = -1;
   const isDownloaded = useOfflineStore((s) => s.downloadedIds.includes(LIKED_PLAYLIST_ID));
   const offlineProgress = useOfflineStore((s) => s.progress[LIKED_PLAYLIST_ID]);
   const startDownload = useOfflineStore((s) => s.startDownload);
@@ -49,24 +65,36 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
 
   const loadLikes = async () => {
     try {
-      const data = await apiRequest<{ tracks: Track[] }>('/likes');
+      const data = await apiRequest<{ tracks: Track[] }>('/likes', { timeoutMs: 5000 });
       const loadedTracks = data.tracks || [];
       setTracks(loadedTracks);
+      localStorage.setItem(CACHED_LIKED_TRACKS_KEY, JSON.stringify(loadedTracks));
+
+      const likedPl = {
+        id: LIKED_PLAYLIST_ID,
+        name: 'Любимые треки',
+        description: 'Ваша медиатека сохраненных композиций',
+        created_at: new Date().toISOString(),
+        track_count: loadedTracks.length,
+      };
+      saveOfflinePlaylistData(likedPl, loadedTracks);
+
       if (useOfflineStore.getState().isDownloaded(LIKED_PLAYLIST_ID)) {
-        const likedPl = {
-          id: LIKED_PLAYLIST_ID,
-          name: 'Любимые треки',
-          description: 'Ваша медиатека сохраненных композиций',
-          created_at: new Date().toISOString(),
-          track_count: loadedTracks.length,
-        };
         useOfflineStore.getState().syncPlaylist(LIKED_PLAYLIST_ID, loadedTracks, likedPl);
       }
     } catch (e) {
       console.warn('[LikedSongs] Network error, fallback to offline tracks:', e);
       const offline = getOfflinePlaylistData(LIKED_PLAYLIST_ID);
-      if (offline && offline.tracks) {
+      if (offline && offline.tracks && offline.tracks.length > 0) {
         setTracks(offline.tracks);
+      } else {
+        const raw = localStorage.getItem(CACHED_LIKED_TRACKS_KEY);
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed) && parsed.length > 0) setTracks(parsed);
+          } catch (_) {}
+        }
       }
     } finally {
       setLoading(false);

@@ -4,7 +4,7 @@ import { apiRequest } from '../api/client';
 import { useSyncStore } from './syncStore';
 import { toast } from './toastStore';
 import { useOfflineStore } from './offlineStore';
-import { getCachedTrackUrl, isTrackCached, cacheTrackOffline } from '../utils/offline';
+import { getCachedTrackUrl, isTrackCached, cacheTrackOffline, saveOfflinePlaylistData } from '../utils/offline';
 
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
@@ -152,13 +152,13 @@ function ensureAudioGraph() {
       return filter;
     });
 
-    // Dynamics Compressor (Spotify-like Loudness Normalizer)
+    // Dynamics Compressor (Spotify-like Loudness Normalizer - transparent gentle leveling)
     compressorNode = audioCtx.createDynamicsCompressor();
-    compressorNode.threshold.value = -24;
+    compressorNode.threshold.value = -12;
     compressorNode.knee.value = 30;
-    compressorNode.ratio.value = 12;
-    compressorNode.attack.value = 0.003;
-    compressorNode.release.value = 0.25;
+    compressorNode.ratio.value = 3;
+    compressorNode.attack.value = 0.015;
+    compressorNode.release.value = 0.20;
 
     // Connect audio chain: source -> eqFilters[0..4] -> compressor -> destination
     let lastNode: AudioNode = sourceNode;
@@ -186,7 +186,7 @@ function ensureAudioGraph() {
   }
 }
 
-// Proactive user-gesture unlock for Web Audio API and HTML5 Audio
+// Proactive user-gesture unlock and background/interruption recovery
 if (typeof window !== 'undefined') {
   const unlockAudio = () => {
     ensureAudioGraph();
@@ -203,14 +203,52 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   // Sync Audio Events
   let lastSyncTime = 0;
 
+  const updateMediaPositionState = (cur?: number, dur?: number) => {
+    if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession) {
+      const c = cur ?? audio.currentTime;
+      const d = dur ?? get().duration;
+      if (d > 0 && isFinite(d) && c >= 0 && isFinite(c)) {
+        try {
+          navigator.mediaSession.setPositionState({
+            duration: Math.max(d, c),
+            playbackRate: audio.playbackRate || 1,
+            position: Math.min(c, d)
+          });
+        } catch (_) {}
+      }
+    }
+  };
+
   const handleAudioDuration = () => {
     const dur = audio.duration;
     if (dur && !isNaN(dur) && isFinite(dur) && dur > 0) {
       set({ duration: dur });
+      updateMediaPositionState(audio.currentTime, dur);
       if (useSyncStore.getState().isLocalActive) {
         useSyncStore.getState().sendPlaybackState({ duration: dur });
       }
     }
+  };
+
+  audio.onplay = () => {
+    set({ isPlaying: true });
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = 'playing';
+    }
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(() => {});
+    }
+    updateMediaPositionState();
+    useSyncStore.getState().sendPlaybackState({ isPlaying: true });
+  };
+
+  audio.onpause = () => {
+    set({ isPlaying: false });
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = 'paused';
+    }
+    updateMediaPositionState();
+    useSyncStore.getState().sendPlaybackState({ isPlaying: false });
   };
 
   audio.ontimeupdate = () => {
@@ -230,8 +268,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     set(update);
 
     const now = Date.now();
-    if (now - lastSyncTime > 3000) {
+    if (now - lastSyncTime > 1500) {
       lastSyncTime = now;
+      updateMediaPositionState(cur, update.duration || get().duration);
       if (useSyncStore.getState().isLocalActive) {
         useSyncStore.getState().sendPlaybackState({ currentTime: cur, duration: update.duration || get().duration });
       }
@@ -255,6 +294,29 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
   };
 
+  // Re-sync on app visibility change (e.g. returning from Instagram / other apps)
+  if (typeof window !== 'undefined') {
+    const handleAppVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        if (audioCtx && audioCtx.state === 'suspended') {
+          audioCtx.resume().catch(() => {});
+        }
+        if (get().currentTrack) {
+          const actuallyPaused = audio.paused;
+          if (get().isPlaying !== !actuallyPaused) {
+            set({ isPlaying: !actuallyPaused });
+          }
+          if ('mediaSession' in navigator) {
+            navigator.mediaSession.playbackState = actuallyPaused ? 'paused' : 'playing';
+          }
+          updateMediaPositionState();
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleAppVisibility);
+    window.addEventListener('focus', handleAppVisibility);
+  }
+
   // MediaSession Helper
   const updateMediaSession = (track: Track) => {
     if ('mediaSession' in navigator) {
@@ -263,17 +325,21 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         artist: track.artist,
         album: track.album || 'Jellyfin Spotify',
         artwork: [
-          { src: track.cover_url || '/favicon.svg', sizes: '512x512', type: 'image/png' }
+          { src: track.cover_url || '/favicon.svg', sizes: '512x512', type: 'image/png' },
+          { src: '/pwa-512x512.png', sizes: '512x512', type: 'image/png' },
+          { src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png' }
         ]
       });
+      navigator.mediaSession.playbackState = get().isPlaying ? 'playing' : 'paused';
 
       navigator.mediaSession.setActionHandler('play', () => get().resume());
       navigator.mediaSession.setActionHandler('pause', () => get().pause());
       navigator.mediaSession.setActionHandler('previoustrack', () => get().prevTrack());
       navigator.mediaSession.setActionHandler('nexttrack', () => get().nextTrack());
       navigator.mediaSession.setActionHandler('seekto', (details) => {
-        if (details.seekTime) get().seek(details.seekTime);
+        if (details.seekTime !== undefined && details.seekTime !== null) get().seek(details.seekTime);
       });
+      updateMediaPositionState();
     }
   };
 
@@ -282,6 +348,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     if (prefetchTimeout) clearTimeout(prefetchTimeout);
     prefetchTimeout = setTimeout(async () => {
       try {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) return;
         const { queue, currentIndex } = get();
         if (!queue || currentIndex < 0 || currentIndex + 1 >= queue.length) return;
         const nextTrack = queue[currentIndex + 1];
@@ -292,7 +359,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           }
         }
       } catch (_) {}
-    }, 2500);
+    }, 7000);
   };
 
   return {
@@ -717,10 +784,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     loadLikes: async () => {
       try {
-        const data = await apiRequest<{ tracks: Track[] }>('/likes');
-        const ids = (data.tracks || []).map((t) => t.id);
+        const data = await apiRequest<{ tracks: Track[] }>('/likes', { timeoutMs: 5000 });
+        const tracks = data.tracks || [];
+        const ids = tracks.map((t) => t.id);
         set({ likedTrackIds: ids });
         localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(ids));
+        localStorage.setItem('jellyfy_cached_liked_tracks', JSON.stringify(tracks));
+        saveOfflinePlaylistData({
+          id: -1,
+          name: 'Любимые треки',
+          description: 'Ваша медиатека сохраненных композиций',
+          created_at: new Date().toISOString(),
+          track_count: tracks.length,
+        }, tracks);
       } catch (e) {
         const saved = loadSavedLikedIds();
         if (saved && saved.length > 0) {
@@ -739,7 +815,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       set({ likedTrackIds: newLiked });
 
       try {
-        const res = await apiRequest<{ liked: boolean }>(`/likes/${trackId}`, { method: 'POST' });
+        const res = await apiRequest<{ liked: boolean }>(`/likes/${trackId}`, { method: 'POST', timeoutMs: 6000 });
         const updated = res.liked
           ? Array.from(new Set([...get().likedTrackIds, trackId]))
           : get().likedTrackIds.filter((id) => id !== trackId);
@@ -872,8 +948,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const next = !current;
       if (compressorNode && audioCtx) {
         if (next) {
-          compressorNode.threshold.setValueAtTime(-24, audioCtx.currentTime);
-          compressorNode.ratio.setValueAtTime(12, audioCtx.currentTime);
+          compressorNode.threshold.setValueAtTime(-12, audioCtx.currentTime);
+          compressorNode.ratio.setValueAtTime(3, audioCtx.currentTime);
         } else {
           compressorNode.threshold.setValueAtTime(0, audioCtx.currentTime);
           compressorNode.ratio.setValueAtTime(1, audioCtx.currentTime);

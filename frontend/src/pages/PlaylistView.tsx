@@ -21,10 +21,11 @@ interface PlaylistViewProps {
 type SortField = 'position' | 'title' | 'artist' | 'album' | 'date' | 'duration';
 
 export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, onDeleted, onRenamed }) => {
-  const [playlist, setPlaylist] = useState<Playlist | null>(null);
-  const [tracks, setTracks] = useState<Track[]>([]);
+  const offlineData = getOfflinePlaylistData(Number(playlistId));
+  const [playlist, setPlaylist] = useState<Playlist | null>(offlineData?.playlist || null);
+  const [tracks, setTracks] = useState<Track[]>(offlineData?.tracks || []);
   const [activeJob, setActiveJob] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!offlineData?.playlist);
   const [resuming, setResuming] = useState(false);
   const [sortField, setSortField] = useState<SortField>('position');
   const [sortAsc, setSortAsc] = useState(true);
@@ -66,7 +67,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
   const loadData = async (silent = false) => {
     try {
       if (!silent && !playlist) setLoading(true);
-      const data = await apiRequest<{ playlist: Playlist; tracks: Track[]; activeJob?: any }>(`/playlists/${playlistId}`);
+      const data = await apiRequest<{ playlist: Playlist; tracks: Track[]; activeJob?: any }>(`/playlists/${playlistId}`, { timeoutMs: 5000 });
       setPlaylist(data.playlist);
       setTracks(data.tracks || []);
       setActiveJob(data.activeJob || null);
