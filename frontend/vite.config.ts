@@ -48,12 +48,14 @@ export default defineConfig({
         navigateFallback: '/index.html',
         navigateFallbackDenylist: [/^\/api/],
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        importScripts: ['sw-custom.js'],
         runtimeCaching: [
           {
             urlPattern: ({ url }) => url.pathname.startsWith('/api/stream/'),
             handler: 'CacheFirst',
             options: {
               cacheName: 'jellyfin-spotify-audio-cache',
+              rangeRequests: true,
               expiration: {
                 maxEntries: 2500,
                 maxAgeSeconds: 60 * 24 * 60 * 60 // 60 days

@@ -215,17 +215,26 @@ export const App: React.FC = () => {
       loadPlaylists();
       usePlayerStore.getState().loadLikes();
       useOfflineStore.getState().syncAllDownloadedPlaylists();
+      useOfflineStore.getState().resumePendingDownloads();
       useSyncStore.getState().initSync();
     };
     const handleOffline = () => {
       setIsOnline(false);
     };
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        useOfflineStore.getState().resumePendingDownloads();
+      }
+    };
+
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, []);
 

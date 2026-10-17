@@ -1,12 +1,23 @@
 import { Playlist, Track } from '../types';
 
 export const CACHE_NAME = 'jellyfin-spotify-audio-cache';
-const OFFLINE_PLAYLISTS_KEY = 'offline_playlists_ids';
-const OFFLINE_PLAYLIST_PREFIX = 'jellyfy_offline_playlist_';
-const ALL_PLAYLISTS_CACHE_KEY = 'jellyfy_all_playlists_cache';
+export const OFFLINE_PLAYLISTS_KEY = 'offline_playlists_ids';
+export const OFFLINE_PLAYLIST_PREFIX = 'jellyfy_offline_playlist_';
+export const ALL_PLAYLISTS_CACHE_KEY = 'jellyfy_all_playlists_cache';
+export const DOWNLOAD_QUEUE_KEY = 'jellyfy_download_queue';
 
 // In-memory registry of active Blob URLs for zero-latency instant playback
 const activeBlobUrls = new Map<number, string>();
+
+export interface QueuedDownloadJob {
+  playlistId: number;
+  playlist?: Playlist;
+  tracks: Track[];
+  startedAt: number;
+  totalTracks: number;
+  status: 'downloading' | 'completed' | 'paused';
+  usedBackgroundFetch?: boolean;
+}
 
 export function getSynchronousBlobUrl(trackId: number): string | null {
   return activeBlobUrls.get(trackId) || null;
@@ -23,6 +34,52 @@ export function getOfflinePlaylistIds(): number[] {
 
 export function isPlaylistDownloaded(playlistId: number): boolean {
   return getOfflinePlaylistIds().includes(playlistId);
+}
+
+export function markPlaylistDownloaded(playlistId: number): void {
+  try {
+    const ids = getOfflinePlaylistIds();
+    if (!ids.includes(playlistId)) {
+      ids.push(playlistId);
+      localStorage.setItem(OFFLINE_PLAYLISTS_KEY, JSON.stringify(ids));
+    }
+  } catch (err) {
+    console.warn('[Offline] Failed to mark playlist downloaded:', err);
+  }
+}
+
+export function unmarkPlaylistDownloaded(playlistId: number): void {
+  try {
+    const ids = getOfflinePlaylistIds().filter((id) => id !== playlistId);
+    localStorage.setItem(OFFLINE_PLAYLISTS_KEY, JSON.stringify(ids));
+  } catch (err) {
+    console.warn('[Offline] Failed to unmark playlist downloaded:', err);
+  }
+}
+
+export function getDownloadQueue(): Record<number, QueuedDownloadJob> {
+  try {
+    const raw = localStorage.getItem(DOWNLOAD_QUEUE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveDownloadQueue(queue: Record<number, QueuedDownloadJob>): void {
+  try {
+    localStorage.setItem(DOWNLOAD_QUEUE_KEY, JSON.stringify(queue));
+  } catch (err) {
+    console.warn('[Offline] Failed to save download queue:', err);
+  }
+}
+
+export function removeDownloadQueueItem(playlistId: number): void {
+  const queue = getDownloadQueue();
+  if (queue[playlistId]) {
+    delete queue[playlistId];
+    saveDownloadQueue(queue);
+  }
 }
 
 export function saveAllPlaylistsCache(playlists: Playlist[]): void {
@@ -42,7 +99,11 @@ export function getAllPlaylistsCache(): Playlist[] {
   }
 }
 
-export function saveOfflinePlaylistData(playlist: Playlist, tracks: Track[]): void {
+export function saveOfflinePlaylistData(
+  playlist: Playlist,
+  tracks: Track[],
+  markDownloaded = false
+): void {
   try {
     const key = `${OFFLINE_PLAYLIST_PREFIX}${playlist.id}`;
     const payload = {
@@ -52,17 +113,17 @@ export function saveOfflinePlaylistData(playlist: Playlist, tracks: Track[]): vo
     };
     localStorage.setItem(key, JSON.stringify(payload));
 
-    const ids = getOfflinePlaylistIds();
-    if (!ids.includes(playlist.id)) {
-      ids.push(playlist.id);
-      localStorage.setItem(OFFLINE_PLAYLISTS_KEY, JSON.stringify(ids));
+    if (markDownloaded) {
+      markPlaylistDownloaded(playlist.id);
     }
   } catch (err) {
     console.warn(`[Offline] Failed to save offline playlist data for ${playlist.id}:`, err);
   }
 }
 
-export function getOfflinePlaylistData(playlistId: number): { playlist: Playlist; tracks: Track[] } | null {
+export function getOfflinePlaylistData(
+  playlistId: number
+): { playlist: Playlist; tracks: Track[] } | null {
   try {
     const raw = localStorage.getItem(`${OFFLINE_PLAYLIST_PREFIX}${playlistId}`);
     return raw ? JSON.parse(raw) : null;
@@ -96,6 +157,65 @@ export function getAllOfflinePlaylists(): Playlist[] {
     }
   }
   return list;
+}
+
+/**
+ * Attempts to trigger the standard Background Fetch API (supported in Chromium browsers & Android PWAs).
+ * This allows downloads to continue seamlessly via the OS download manager even if the user
+ * completely closes the browser or swipes away the PWA.
+ */
+export async function tryStartBackgroundFetch(
+  playlistId: number,
+  tracks: Track[],
+  playlistName?: string
+): Promise<boolean> {
+  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return false;
+  try {
+    const reg: any = await navigator.serviceWorker.ready;
+    if (!reg || !('backgroundFetch' in reg)) return false;
+
+    const bgFetchId = `jellyfy-dl-${playlistId}`;
+    try {
+      const existing = await reg.backgroundFetch.get(bgFetchId);
+      if (existing) {
+        return true;
+      }
+    } catch (_) {}
+
+    const requests = tracks.map((t) => `/api/stream/${t.id}`);
+    await reg.backgroundFetch.fetch(bgFetchId, requests, {
+      title: playlistName ? `Загрузка: ${playlistName}` : 'Загрузка музыки в оффлайн',
+      icons: [{ src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png' }],
+      downloadTotal: tracks.length * 4 * 1024 * 1024, // Estimate ~4MB per track
+    });
+
+    return true;
+  } catch (err) {
+    console.warn('[Offline] BackgroundFetch not available or denied:', err);
+    return false;
+  }
+}
+
+/**
+ * Checks how many tracks from the list are already present in CacheStorage.
+ */
+export async function countCachedTracks(tracks: Track[]): Promise<number> {
+  if (typeof window === 'undefined' || !('caches' in window) || !tracks || tracks.length === 0) return 0;
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    let count = 0;
+    for (const track of tracks) {
+      if (activeBlobUrls.has(track.id)) {
+        count++;
+        continue;
+      }
+      const match = await cache.match(`/api/stream/${track.id}`);
+      if (match) count++;
+    }
+    return count;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -153,9 +273,10 @@ export async function isTrackCached(trackId: number): Promise<boolean> {
 }
 
 /**
- * Downloads a single track cleanly into CacheStorage without partial range errors.
+ * Downloads a single track cleanly into CacheStorage without partial range errors,
+ * with timeout resilience.
  */
-export async function cacheTrackOffline(track: Track): Promise<boolean> {
+export async function cacheTrackOffline(track: Track, timeoutMs = 25000): Promise<boolean> {
   if (typeof window === 'undefined' || !('caches' in window) || !track || !track.id) return false;
 
   const streamUrl = `/api/stream/${track.id}`;
@@ -166,32 +287,40 @@ export async function cacheTrackOffline(track: Track): Promise<boolean> {
       return true;
     }
 
-    // Explicitly request full file without Range headers to obtain clean 200 response
-    const res = await fetch(streamUrl, {
-      headers: {
-        'Cache-Control': 'no-cache',
-      },
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    if (res.ok && (res.status === 200 || res.status === 0)) {
-      await cache.put(streamUrl, res);
+    try {
+      // Explicitly request full file without Range headers to obtain clean 200 response
+      const res = await fetch(streamUrl, {
+        signal: controller.signal,
+        headers: {
+          'Cache-Control': 'no-cache',
+        },
+      });
 
-      // Cache cover art if available
-      if (track.cover_url && !track.cover_url.startsWith('data:')) {
-        try {
-          const coverMatch = await cache.match(track.cover_url);
-          if (!coverMatch) {
-            const coverRes = await fetch(track.cover_url);
-            if (coverRes.ok) {
-              await cache.put(track.cover_url, coverRes);
+      if (res.ok && (res.status === 200 || res.status === 0)) {
+        await cache.put(streamUrl, res);
+
+        // Preload cover art non-blockingly
+        if (track.cover_url && !track.cover_url.startsWith('data:')) {
+          cache.match(track.cover_url).then((coverMatch) => {
+            if (!coverMatch) {
+              fetch(track.cover_url!, { signal: AbortSignal.timeout(6000) })
+                .then((cRes) => {
+                  if (cRes.ok) cache.put(track.cover_url!, cRes);
+                })
+                .catch(() => {});
             }
-          }
-        } catch (_) {}
-      }
+          }).catch(() => {});
+        }
 
-      return true;
+        return true;
+      }
+      return false;
+    } finally {
+      clearTimeout(timer);
     }
-    return false;
   } catch (err) {
     console.warn(`[Offline Cache] Error caching track ${track.title}:`, err);
     return false;
@@ -216,22 +345,26 @@ export async function downloadPlaylistOffline(
     saveOfflinePlaylistData(playlist, tracks);
   }
 
-  let done = 0;
+  let done = await countCachedTracks(tracks);
+  if (onProgress) {
+    onProgress(done, tracks.length);
+  }
+
   for (const track of tracks) {
-    await cacheTrackOffline(track);
-    done++;
-    if (onProgress) {
-      onProgress(done, tracks.length);
+    const isCached = await isTrackCached(track.id);
+    if (!isCached) {
+      await cacheTrackOffline(track);
+      done++;
+      if (onProgress) {
+        onProgress(done, tracks.length);
+      }
     }
   }
 
-  const ids = getOfflinePlaylistIds();
-  if (!ids.includes(playlistId)) {
-    ids.push(playlistId);
-    localStorage.setItem(OFFLINE_PLAYLISTS_KEY, JSON.stringify(ids));
-  }
+  markPlaylistDownloaded(playlistId);
+  removeDownloadQueueItem(playlistId);
   if (playlist) {
-    saveOfflinePlaylistData(playlist, tracks);
+    saveOfflinePlaylistData(playlist, tracks, true);
   }
 }
 
@@ -282,7 +415,7 @@ export async function removePlaylistOffline(playlistId: number, tracks: Track[])
 
   for (const track of tracks) {
     const streamUrl = `/api/stream/${track.id}`;
-    await cache.delete(streamUrl);
+    await cache.delete(streamUrl).catch(() => {});
     const blobUrl = activeBlobUrls.get(track.id);
     if (blobUrl) {
       URL.revokeObjectURL(blobUrl);
@@ -290,8 +423,8 @@ export async function removePlaylistOffline(playlistId: number, tracks: Track[])
     }
   }
 
-  const ids = getOfflinePlaylistIds().filter((id) => id !== playlistId);
-  localStorage.setItem(OFFLINE_PLAYLISTS_KEY, JSON.stringify(ids));
+  unmarkPlaylistDownloaded(playlistId);
+  removeDownloadQueueItem(playlistId);
   try {
     localStorage.removeItem(`${OFFLINE_PLAYLIST_PREFIX}${playlistId}`);
   } catch (_) {}
@@ -323,4 +456,5 @@ export async function clearAllOfflineCache(): Promise<void> {
   }
   localStorage.removeItem(OFFLINE_PLAYLISTS_KEY);
   localStorage.removeItem(ALL_PLAYLISTS_CACHE_KEY);
+  localStorage.removeItem(DOWNLOAD_QUEUE_KEY);
 }

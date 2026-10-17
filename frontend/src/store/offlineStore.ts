@@ -7,8 +7,16 @@ import {
   cacheTrackOffline,
   syncDownloadedPlaylist,
   saveOfflinePlaylistData,
+  getDownloadQueue,
+  saveDownloadQueue,
+  removeDownloadQueueItem,
+  tryStartBackgroundFetch,
+  countCachedTracks,
+  isTrackCached,
+  markPlaylistDownloaded,
 } from '../utils/offline';
 import { apiRequest } from '../api/client';
+import { toast } from './toastStore';
 
 export interface OfflineJobProgress {
   inProgress: boolean;
@@ -23,11 +31,66 @@ interface OfflineStoreState {
   loadDownloaded: () => void;
   isDownloaded: (playlistId: number) => boolean;
   getProgress: (playlistId: number) => OfflineJobProgress | null;
+  updateProgress: (playlistId: number, done: number, total: number) => void;
   startDownload: (playlistId: number, tracks: Track[], playlist?: Playlist) => Promise<void>;
   removeDownload: (playlistId: number, tracks: Track[]) => Promise<void>;
   cacheTrack: (track: Track) => Promise<boolean>;
   syncPlaylist: (playlistId: number, tracks: Track[], playlist?: Playlist) => Promise<void>;
   syncAllDownloadedPlaylists: () => Promise<void>;
+  resumePendingDownloads: () => Promise<void>;
+}
+
+// Active abort controllers for cancellable in-flight window downloads
+const activeAbortControllers = new Map<number, AbortController>();
+
+async function runQueueWorker(playlistId: number, tracks: Track[], playlist?: Playlist): Promise<void> {
+  if (activeAbortControllers.has(playlistId)) return;
+
+  const abortController = new AbortController();
+  activeAbortControllers.set(playlistId, abortController);
+
+  try {
+    let done = await countCachedTracks(tracks);
+    useOfflineStore.getState().updateProgress(playlistId, done, tracks.length);
+
+    for (let i = 0; i < tracks.length; i++) {
+      if (abortController.signal.aborted) {
+        break;
+      }
+
+      const track = tracks[i];
+      const isCached = await isTrackCached(track.id);
+      if (!isCached) {
+        await cacheTrackOffline(track);
+        done++;
+        useOfflineStore.getState().updateProgress(playlistId, done, tracks.length);
+      }
+    }
+
+    if (!abortController.signal.aborted) {
+      markPlaylistDownloaded(playlistId);
+      removeDownloadQueueItem(playlistId);
+      if (playlist) {
+        saveOfflinePlaylistData(playlist, tracks, true);
+      }
+
+      useOfflineStore.setState((state) => {
+        const nextProgress = { ...state.progress };
+        delete nextProgress[playlistId];
+        return {
+          downloadedIds: getOfflinePlaylistIds(),
+          progress: nextProgress,
+        };
+      });
+
+      const name = playlist?.name || 'Плейлист';
+      toast.success(`«${name}» успешно скачан для оффлайн доступа`);
+    }
+  } catch (err) {
+    console.warn(`[Offline Queue Worker Error for ${playlistId}]:`, err);
+  } finally {
+    activeAbortControllers.delete(playlistId);
+  }
 }
 
 export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
@@ -36,6 +99,7 @@ export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
 
   loadDownloaded: () => {
     set({ downloadedIds: getOfflinePlaylistIds() });
+    get().resumePendingDownloads();
   },
 
   isDownloaded: (playlistId: number) => {
@@ -46,55 +110,76 @@ export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
     return get().progress[playlistId] || null;
   },
 
+  updateProgress: (playlistId: number, done: number, total: number) => {
+    set((state) => ({
+      progress: {
+        ...state.progress,
+        [playlistId]: { inProgress: true, done, total },
+      },
+    }));
+  },
+
   startDownload: async (playlistId: number, tracks: Track[], playlist?: Playlist) => {
     if (!tracks || tracks.length === 0) return;
     if (get().progress[playlistId]?.inProgress) return;
 
+    // 1. Immediately save playlist metadata to offline cache for instant UI display
     if (playlist) {
-      saveOfflinePlaylistData(playlist, tracks);
+      saveOfflinePlaylistData(playlist, tracks, false);
     }
 
+    // 2. Persist download task into localStorage queue so closing the app does not lose intent
+    const queue = getDownloadQueue();
+    queue[playlistId] = {
+      playlistId,
+      playlist,
+      tracks,
+      startedAt: Date.now(),
+      totalTracks: tracks.length,
+      status: 'downloading',
+    };
+    saveDownloadQueue(queue);
+
+    const initialCached = await countCachedTracks(tracks);
     set((state) => ({
       progress: {
         ...state.progress,
-        [playlistId]: { inProgress: true, done: 0, total: tracks.length },
+        [playlistId]: { inProgress: true, done: initialCached, total: tracks.length },
       },
     }));
 
-    try {
-      await downloadPlaylistOffline(playlistId, tracks, playlist, (done, total) => {
-        set((state) => ({
-          progress: {
-            ...state.progress,
-            [playlistId]: { inProgress: true, done, total },
-          },
-        }));
-      });
-
-      set((state) => {
-        const nextProgress = { ...state.progress };
-        delete nextProgress[playlistId];
-        return {
-          downloadedIds: getOfflinePlaylistIds(),
-          progress: nextProgress,
-        };
-      });
-    } catch (err: any) {
-      console.error('[Offline Store Error]', err);
-      set((state) => {
-        const nextProgress = { ...state.progress };
-        delete nextProgress[playlistId];
-        return {
-          downloadedIds: getOfflinePlaylistIds(),
-          progress: nextProgress,
-        };
-      });
-      throw err;
+    // 3. Try standard Background Fetch API (Android Chrome / Chromium PWA)
+    // This allows downloads to continue in the background via OS download manager even if app is closed
+    const usedBgFetch = await tryStartBackgroundFetch(playlistId, tracks, playlist?.name);
+    if (usedBgFetch) {
+      queue[playlistId].usedBackgroundFetch = true;
+      saveDownloadQueue(queue);
     }
+
+    // 4. Also instruct Service Worker to keep alive with event.waitUntil while tab is backgrounded
+    if (typeof navigator !== 'undefined' && navigator.serviceWorker?.controller) {
+      navigator.serviceWorker.controller.postMessage({
+        type: 'CACHE_TRACKS_IN_BACKGROUND',
+        playlistId,
+        tracks,
+      });
+    }
+
+    // 5. Run active queue worker in background
+    runQueueWorker(playlistId, tracks, playlist);
   },
 
   removeDownload: async (playlistId: number, tracks: Track[]) => {
+    // Abort active controller if currently downloading
+    const controller = activeAbortControllers.get(playlistId);
+    if (controller) {
+      controller.abort();
+      activeAbortControllers.delete(playlistId);
+    }
+
+    removeDownloadQueueItem(playlistId);
     await removePlaylistOffline(playlistId, tracks);
+
     set((state) => {
       const nextProgress = { ...state.progress };
       delete nextProgress[playlistId];
@@ -108,6 +193,56 @@ export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
   cacheTrack: async (track: Track) => {
     if (!track || !track.id) return false;
     return await cacheTrackOffline(track);
+  },
+
+  resumePendingDownloads: async () => {
+    const queue = getDownloadQueue();
+    const queuedIds = Object.keys(queue).map(Number);
+    if (queuedIds.length === 0) return;
+
+    for (const pId of queuedIds) {
+      const item = queue[pId];
+      if (!item || !item.tracks || item.tracks.length === 0) {
+        removeDownloadQueueItem(pId);
+        continue;
+      }
+
+      if (activeAbortControllers.has(pId)) {
+        continue;
+      }
+
+      const total = item.tracks.length;
+      const cachedCount = await countCachedTracks(item.tracks);
+
+      if (cachedCount >= total) {
+        // All tracks downloaded while app was closed or in background!
+        markPlaylistDownloaded(pId);
+        removeDownloadQueueItem(pId);
+        if (item.playlist) {
+          saveOfflinePlaylistData(item.playlist, item.tracks, true);
+        }
+
+        set((state) => {
+          const nextProgress = { ...state.progress };
+          delete nextProgress[pId];
+          return {
+            downloadedIds: getOfflinePlaylistIds(),
+            progress: nextProgress,
+          };
+        });
+      } else {
+        // Partially downloaded - automatically resume downloading remaining tracks!
+        set((state) => ({
+          progress: {
+            ...state.progress,
+            [pId]: { inProgress: true, done: cachedCount, total },
+          },
+        }));
+
+        tryStartBackgroundFetch(pId, item.tracks, item.playlist?.name);
+        runQueueWorker(pId, item.tracks, item.playlist);
+      }
+    }
   },
 
   syncPlaylist: async (playlistId: number, tracks: Track[], playlist?: Playlist) => {
@@ -145,7 +280,6 @@ export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
     for (const pId of downloadedIds) {
       try {
         if (pId === -1) {
-          // Liked songs
           const data = await apiRequest<{ tracks: Track[] }>('/likes');
           if (data.tracks && data.tracks.length > 0) {
             const likedPl: Playlist = {
@@ -158,7 +292,6 @@ export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
             await get().syncPlaylist(-1, data.tracks, likedPl);
           }
         } else {
-          // Custom playlist
           const data = await apiRequest<{ playlist: Playlist; tracks: Track[] }>(`/playlists/${pId}`);
           if (data.tracks && data.tracks.length > 0) {
             await get().syncPlaylist(pId, data.tracks, data.playlist);
@@ -170,3 +303,18 @@ export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
     }
   },
 }));
+
+// Listen to Service Worker background messages to update client progress and state
+if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    if (!event.data) return;
+    if (event.data.type === 'BG_CACHE_PROGRESS') {
+      const { playlistId, done, total } = event.data;
+      if (playlistId !== undefined && done !== undefined && total !== undefined) {
+        useOfflineStore.getState().updateProgress(playlistId, done, total);
+      }
+    } else if (event.data.type === 'BG_FETCH_SUCCESS' || event.data.type === 'BG_CACHE_COMPLETE') {
+      useOfflineStore.getState().resumePendingDownloads();
+    }
+  });
+}
