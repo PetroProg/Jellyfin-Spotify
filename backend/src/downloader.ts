@@ -600,6 +600,10 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
           `).get(track.id, track.title, track.artist);
 
           let trackId = doubleCheck?.id;
+          const actualDurationMs = (probe.valid && probe.durationSec > 0)
+            ? Math.round(probe.durationSec * 1000)
+            : (track.duration_ms || 180000);
+
           if (!trackId) {
             const info = db.prepare(`
               INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id)
@@ -608,12 +612,14 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
               track.title,
               track.artist,
               track.album,
-              track.duration_ms,
+              actualDurationMs,
               finalFile,
               track.cover_url || '',
               track.id
             );
             trackId = info.lastInsertRowid;
+          } else if (probe.valid && probe.durationSec > 0) {
+            db.prepare('UPDATE tracks SET duration_ms = ? WHERE id = ?').run(actualDurationMs, trackId);
           }
 
           if (item.isLikedOnly || !playlistId) {
@@ -836,6 +842,10 @@ async function downloadSingleSpotifyTrackDirectInternal(
     `).get(track.id, track.title, track.artist);
 
     let newTrack: any = doubleCheck;
+    const actualDurationMs = (probe.valid && probe.durationSec > 0)
+      ? Math.round(probe.durationSec * 1000)
+      : (track.duration_ms || 180000);
+
     if (!newTrack) {
       const info = db.prepare(`
         INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id)
@@ -844,12 +854,15 @@ async function downloadSingleSpotifyTrackDirectInternal(
         track.title,
         track.artist,
         track.album || '',
-        track.duration_ms || 180000,
+        actualDurationMs,
         finalFile,
         track.cover_url || '',
         track.id
       );
       newTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
+    } else if (probe.valid && probe.durationSec > 0) {
+      db.prepare('UPDATE tracks SET duration_ms = ? WHERE id = ?').run(actualDurationMs, newTrack.id);
+      newTrack.duration_ms = actualDurationMs;
     }
 
     attachToPlaylist(newTrack);

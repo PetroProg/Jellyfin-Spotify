@@ -87,10 +87,18 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
   if (!currentTrack) return null;
 
   const formatTime = (seconds: number) => {
+    if (!seconds || isNaN(seconds) || !isFinite(seconds)) return '0:00';
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
+
+  const trackDurSec = (currentTrack.duration_ms && currentTrack.duration_ms > 0) ? currentTrack.duration_ms / 1000 : 0;
+  const effectiveDuration = Math.max(
+    duration > 0 && isFinite(duration) ? duration : 0,
+    trackDurSec,
+    currentTime
+  );
 
   return (
     <div className="hidden md:flex items-center justify-between h-20 bg-cat-mantle border-t border-cat-surface0/40 px-5 select-none z-30">
@@ -186,12 +194,12 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
           <input
             type="range"
             min={0}
-            max={duration || 100}
-            value={currentTime}
+            max={effectiveDuration || 100}
+            value={Math.min(currentTime, effectiveDuration || currentTime)}
             onChange={(e) => seek(Number(e.target.value))}
             className="flex-1 h-1 bg-cat-surface1 rounded-lg appearance-none cursor-pointer accent-cat-mauve"
           />
-          <span>{formatTime(duration)}</span>
+          <span>{formatTime(effectiveDuration)}</span>
         </div>
 
         {/* Remote Playback Device Indicator */}

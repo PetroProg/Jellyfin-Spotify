@@ -9,7 +9,13 @@ export const MiniPlayer: React.FC = () => {
 
   if (!currentTrack) return null;
 
-  const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const trackDurSec = (currentTrack.duration_ms && currentTrack.duration_ms > 0) ? currentTrack.duration_ms / 1000 : 0;
+  const effectiveDuration = Math.max(
+    duration > 0 && isFinite(duration) ? duration : 0,
+    trackDurSec,
+    currentTime
+  );
+  const progressPercent = effectiveDuration > 0 ? Math.min(100, (currentTime / effectiveDuration) * 100) : 0;
 
   return (
     <div className="md:hidden fixed bottom-[calc(56px+env(safe-area-inset-bottom))] left-2 right-2 z-30 select-none">

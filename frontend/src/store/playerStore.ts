@@ -202,25 +202,45 @@ if (typeof window !== 'undefined') {
 export const usePlayerStore = create<PlayerState>((set, get) => {
   // Sync Audio Events
   let lastSyncTime = 0;
-  audio.ontimeupdate = () => {
-    const cur = audio.currentTime;
-    set({ currentTime: cur });
-    const now = Date.now();
-    if (now - lastSyncTime > 3000) {
-      lastSyncTime = now;
+
+  const handleAudioDuration = () => {
+    const dur = audio.duration;
+    if (dur && !isNaN(dur) && isFinite(dur) && dur > 0) {
+      set({ duration: dur });
       if (useSyncStore.getState().isLocalActive) {
-        useSyncStore.getState().sendPlaybackState({ currentTime: cur });
+        useSyncStore.getState().sendPlaybackState({ duration: dur });
       }
     }
   };
 
-  audio.onloadedmetadata = () => {
-    const dur = audio.duration || 0;
-    set({ duration: dur });
-    if (useSyncStore.getState().isLocalActive) {
-      useSyncStore.getState().sendPlaybackState({ duration: dur });
+  audio.ontimeupdate = () => {
+    const cur = audio.currentTime;
+    const dur = audio.duration;
+    const update: any = { currentTime: cur };
+
+    if (dur && !isNaN(dur) && isFinite(dur) && dur > 0 && Math.abs(dur - get().duration) > 0.5) {
+      update.duration = dur;
+    } else if (cur > get().duration && get().duration > 0) {
+      const fallbackDur = (get().currentTrack?.duration_ms && get().currentTrack!.duration_ms > 0)
+        ? get().currentTrack!.duration_ms / 1000
+        : cur;
+      update.duration = Math.max(cur, fallbackDur);
+    }
+
+    set(update);
+
+    const now = Date.now();
+    if (now - lastSyncTime > 3000) {
+      lastSyncTime = now;
+      if (useSyncStore.getState().isLocalActive) {
+        useSyncStore.getState().sendPlaybackState({ currentTime: cur, duration: update.duration || get().duration });
+      }
     }
   };
+
+  audio.onloadedmetadata = handleAudioDuration;
+  audio.ondurationchange = handleAudioDuration;
+  audio.oncanplay = handleAudioDuration;
 
   audio.onended = () => {
     const { repeat, nextTrack } = get();
@@ -315,12 +335,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         idx = 0;
       }
 
+      const initialDur = (track.duration_ms && track.duration_ms > 0)
+        ? track.duration_ms / 1000
+        : 0;
+
       set({
         currentTrack: track,
         queue: q,
         originalQueue: newQueue ? [...newQueue] : get().originalQueue,
         currentIndex: idx,
         isPlaying: true,
+        currentTime: 0,
+        duration: initialDur,
       });
 
       ensureAudioGraph();
@@ -337,7 +363,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         }
         audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
         updateMediaSession(track);
-        useSyncStore.getState().sendPlaybackState();
+        useSyncStore.getState().sendPlaybackState({ currentTime: 0, duration: initialDur, isPlaying: true });
         scheduleNextTrackPrefetch();
       });
     },
@@ -351,6 +377,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         idx = 0;
       }
 
+      const initialDur = (track.duration_ms && track.duration_ms > 0)
+        ? track.duration_ms / 1000
+        : 0;
+
       set({
         currentTrack: track,
         queue: q,
@@ -358,6 +388,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         currentIndex: idx,
         isPlaying: autoPlay,
         currentTime: startTime || 0,
+        duration: initialDur,
       });
 
       ensureAudioGraph();
@@ -439,6 +470,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
       }
       const shuffledQueue = [chosenTrack, ...remaining];
+      const initialDur = (chosenTrack.duration_ms && chosenTrack.duration_ms > 0)
+        ? chosenTrack.duration_ms / 1000
+        : 0;
 
       set({
         currentTrack: chosenTrack,
@@ -447,6 +481,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         currentIndex: 0,
         shuffle: true,
         isPlaying: true,
+        currentTime: 0,
+        duration: initialDur,
       });
 
       ensureAudioGraph();
@@ -462,7 +498,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         }
         audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
         updateMediaSession(chosenTrack);
-        useSyncStore.getState().sendPlaybackState();
+        useSyncStore.getState().sendPlaybackState({ currentTime: 0, duration: initialDur, isPlaying: true });
         scheduleNextTrackPrefetch();
       });
     },

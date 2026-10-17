@@ -73,10 +73,18 @@ export const FullPlayer: React.FC = () => {
   if (!isFullPlayerOpen || !currentTrack) return null;
 
   const formatTime = (seconds: number) => {
+    if (!seconds || isNaN(seconds) || !isFinite(seconds)) return '0:00';
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
+
+  const trackDurSec = (currentTrack.duration_ms && currentTrack.duration_ms > 0) ? currentTrack.duration_ms / 1000 : 0;
+  const effectiveDuration = Math.max(
+    duration > 0 && isFinite(duration) ? duration : 0,
+    trackDurSec,
+    currentTime
+  );
 
   const handleClose = () => {
     if (window.history.state?.isFullPlayer) {
@@ -178,14 +186,14 @@ export const FullPlayer: React.FC = () => {
         <input
           type="range"
           min={0}
-          max={duration || 100}
-          value={currentTime}
+          max={effectiveDuration || 100}
+          value={Math.min(currentTime, effectiveDuration || currentTime)}
           onChange={(e) => seek(Number(e.target.value))}
           className="w-full h-1.5 bg-cat-surface1 rounded-lg appearance-none cursor-pointer accent-cat-mauve"
         />
         <div className="flex justify-between text-xs text-cat-subtext0 font-mono">
           <span>{formatTime(currentTime)}</span>
-          <span>{formatTime(duration)}</span>
+          <span>{formatTime(effectiveDuration)}</span>
         </div>
       </div>
 
