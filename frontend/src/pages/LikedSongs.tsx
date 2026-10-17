@@ -144,7 +144,7 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
     <div
       ref={containerRef}
       onScroll={(e) => setShowScrollTop(e.currentTarget.scrollTop > 200)}
-      className="flex-1 overflow-y-auto px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar"
+      className="flex-1 w-full max-w-full overflow-y-auto overflow-x-hidden px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar"
     >
       {onBack && (
         <button
@@ -158,15 +158,15 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       )}
 
       {/* Header */}
-      <div className="flex flex-col sm:flex-row items-center sm:items-end gap-5 mb-8">
+      <div className="w-full max-w-full flex flex-col sm:flex-row items-center sm:items-end gap-5 mb-8 overflow-hidden">
         <div className="w-28 h-28 md:w-36 md:h-36 rounded-3xl bg-gradient-to-br from-cat-mauve to-cat-pink flex items-center justify-center text-cat-base shadow-xl flex-shrink-0">
           <Heart className="w-14 h-14 fill-current" />
         </div>
-        <div className="flex-1 text-center sm:text-left min-w-0 w-full sm:w-auto">
-          <span className="text-xs uppercase tracking-wider text-cat-subtext0 font-semibold">Плейлист</span>
-          <h1 className="text-2xl md:text-4xl font-extrabold text-cat-text mt-1 truncate">Любимые треки</h1>
+        <div className="w-full max-w-full flex-1 text-center sm:text-left min-w-0 px-2 sm:px-0">
+          <span className="text-xs uppercase tracking-wider text-cat-subtext0 font-semibold block truncate">Плейлист</span>
+          <h1 className="text-xl sm:text-2xl md:text-4xl font-extrabold text-cat-text mt-1 break-words line-clamp-2 sm:line-clamp-none leading-tight">Любимые треки</h1>
           <p className="text-xs text-cat-subtext0 mt-2">{tracks.length} треков</p>
-          <div className="flex items-center justify-center sm:justify-start gap-3 mt-4 flex-wrap">
+          <div className="flex items-center justify-center sm:justify-start gap-3 mt-4 flex-wrap w-full max-w-full">
             <button
               onClick={() => tracks.length > 0 && playTrack(tracks[0], tracks, 0)}
               disabled={tracks.length === 0}
@@ -214,10 +214,10 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       </div>
 
       {/* Sorting / Table Header */}
-      <div className="border-b border-cat-surface0/60 pb-2 mb-2 flex items-center justify-between text-xs font-semibold text-cat-subtext0 px-3">
-        <div className="flex items-center gap-4 flex-1 md:w-2/5 md:flex-initial">
-          <span className="w-6 text-center">#</span>
-          <span>Название</span>
+      <div className="border-b border-cat-surface0/60 pb-2 mb-2 flex items-center justify-between text-xs font-semibold text-cat-subtext0 px-2 sm:px-3 w-full max-w-full">
+        <div className="flex items-center gap-3 sm:gap-4 flex-1 md:w-2/5 md:flex-initial min-w-0">
+          <span className="w-6 text-center shrink-0">#</span>
+          <span className="truncate">Название</span>
         </div>
         <div className="hidden md:flex items-center w-1/5 pr-3">
           <span>Исполнитель</span>
@@ -228,9 +228,9 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
         <div className="hidden xl:flex items-center w-28 pr-3">
           <span>Дата</span>
         </div>
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-3 sm:gap-6 shrink-0">
           <span>Время</span>
-          <span className="w-7" />
+          <span className="w-7 shrink-0" />
         </div>
       </div>
 

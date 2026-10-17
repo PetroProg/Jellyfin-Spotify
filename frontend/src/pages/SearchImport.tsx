@@ -273,7 +273,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
   const hasSearch = searchQuery.trim().length > 0;
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar">
+    <div className="flex-1 w-full max-w-full overflow-y-auto overflow-x-hidden px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar">
       {onBack && (
         <button
           onClick={onBack}

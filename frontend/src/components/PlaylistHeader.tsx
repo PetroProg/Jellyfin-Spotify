@@ -180,7 +180,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   };
 
   return (
-    <div className="flex flex-col md:flex-row items-center md:items-end gap-5 mb-6 pt-2 select-none">
+    <div className="w-full max-w-full flex flex-col md:flex-row items-center md:items-end gap-5 mb-6 pt-2 select-none overflow-hidden">
       {/* Cover Art */}
       <div className="relative group w-44 h-44 md:w-52 md:h-52 rounded-3xl bg-cat-surface0 shadow-2xl overflow-hidden flex-shrink-0 flex items-center justify-center border border-cat-surface1/30">
         {playlist.cover_url ? (
@@ -217,19 +217,19 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
       </div>
 
       {/* Info & Action Buttons */}
-      <div className="flex-1 text-center md:text-left min-w-0">
-        <span className="text-xs uppercase tracking-wider text-cat-subtext0 font-semibold">
+      <div className="w-full max-w-full flex-1 text-center md:text-left min-w-0 px-2 sm:px-0">
+        <span className="text-xs uppercase tracking-wider text-cat-subtext0 font-semibold block truncate">
           {isDailyMix ? 'Персональный Плейлист дня' : 'Плейлист'}
         </span>
-        <h1 className="text-2xl md:text-4xl font-extrabold text-cat-text mt-1 truncate">
+        <h1 className="text-xl sm:text-2xl md:text-4xl font-extrabold text-cat-text mt-1 break-words line-clamp-2 md:line-clamp-none leading-tight">
           {playlist.name}
         </h1>
         {playlist.description && (
-          <p className="text-sm text-cat-subtext0 mt-1 line-clamp-2">
+          <p className="text-xs sm:text-sm text-cat-subtext0 mt-1.5 line-clamp-3 md:line-clamp-none break-words">
             {playlist.description}
           </p>
         )}
-        <div className="text-xs text-cat-subtext0 mt-2 flex items-center justify-center md:justify-start gap-2">
+        <div className="text-xs text-cat-subtext0 mt-2 flex items-center justify-center md:justify-start gap-2 flex-wrap">
           {activeJob && activeJob.status === 'downloading' ? (
             <span className="text-cat-mauve font-semibold flex items-center gap-1.5">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -241,7 +241,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
         </div>
 
         {/* Buttons Row */}
-        <div className="flex items-center justify-center md:justify-start gap-3 mt-4 flex-wrap">
+        <div className="flex items-center justify-center md:justify-start gap-3 mt-4 flex-wrap w-full max-w-full">
           <button
             onClick={onPlayAll}
             disabled={tracks.length === 0}

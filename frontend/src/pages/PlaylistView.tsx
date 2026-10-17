@@ -177,7 +177,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
     <div
       ref={containerRef}
       onScroll={(e) => setShowScrollTop(e.currentTarget.scrollTop > 200)}
-      className="flex-1 overflow-y-auto px-4 md:px-8 py-4 pb-28 md:pb-24 select-none custom-scrollbar"
+      className="flex-1 w-full max-w-full overflow-y-auto overflow-x-hidden px-4 md:px-8 py-4 pb-28 md:pb-24 select-none custom-scrollbar"
     >
       {onBack && (
         <button
@@ -210,16 +210,16 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
 
       {/* Live Download Banner */}
       {activeJob && (activeJob.status === 'downloading' || tracks.length < (activeJob.total_tracks || 0)) && (
-        <div className="mb-4 p-4 rounded-2xl bg-cat-mantle border border-cat-mauve/40 shadow-lg overflow-hidden max-w-full box-border">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2.5 min-w-0">
+        <div className="mb-4 p-4 rounded-2xl bg-cat-mantle border border-cat-mauve/40 shadow-lg overflow-hidden w-full max-w-full box-border">
+          <div className="flex items-center justify-between mb-2 gap-2">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
               {activeJob.status === 'downloading' ? (
                 <Loader2 className="w-4 h-4 animate-spin text-cat-mauve shrink-0" />
               ) : (
                 <RefreshCw className="w-4 h-4 text-cat-subtext0 shrink-0" />
               )}
-              <div className="min-w-0">
-                <p className="text-xs font-bold text-cat-text">
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-bold text-cat-text truncate">
                   {activeJob.status === 'downloading'
                     ? 'Идет фоновая загрузка треков в высоком качестве'
                     : 'Загрузка плейлиста была приостановлена'}
@@ -231,8 +231,8 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2.5 shrink-0 ml-3">
-              <span className="text-xs font-black text-cat-mauve">
+            <div className="flex items-center gap-2 shrink-0 ml-1">
+              <span className="text-xs font-black text-cat-mauve whitespace-nowrap">
                 {activeJob.downloaded_tracks || tracks.length} / {activeJob.total_tracks}
               </span>
               <button
@@ -259,15 +259,15 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
       )}
 
       {/* Sorting / Table Header */}
-      <div className="border-b border-cat-surface0/60 pb-2 mb-2 flex items-center justify-between text-xs font-semibold text-cat-subtext0 px-3">
+      <div className="border-b border-cat-surface0/60 pb-2 mb-2 flex items-center justify-between text-xs font-semibold text-cat-subtext0 px-2 sm:px-3 w-full max-w-full">
         {/* Col 1: # and Title */}
-        <div className="flex items-center gap-4 flex-1 md:w-2/5 md:flex-initial">
-          <span className="w-6 text-center">#</span>
+        <div className="flex items-center gap-3 sm:gap-4 flex-1 md:w-2/5 md:flex-initial min-w-0">
+          <span className="w-6 text-center shrink-0">#</span>
           <button
             onClick={() => handleSort('title')}
-            className="flex items-center gap-1 hover:text-cat-text transition-colors"
+            className="flex items-center gap-1 hover:text-cat-text transition-colors truncate"
           >
-            Название <ArrowUpDown className="w-3 h-3" />
+            Название <ArrowUpDown className="w-3 h-3 shrink-0" />
           </button>
         </div>
 
@@ -302,14 +302,14 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
         </div>
 
         {/* Col 5: Duration */}
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-3 sm:gap-6 shrink-0">
           <button
             onClick={() => handleSort('duration')}
             className="flex items-center gap-1 hover:text-cat-text transition-colors"
           >
-            Время <ArrowUpDown className="w-3 h-3" />
+            Время <ArrowUpDown className="w-3 h-3 shrink-0" />
           </button>
-          <span className="w-7" />
+          <span className="w-7 shrink-0" />
         </div>
       </div>
 

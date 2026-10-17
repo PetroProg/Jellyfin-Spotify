@@ -136,7 +136,7 @@ export const Home: React.FC<HomeProps> = ({
     <div
       ref={containerRef}
       onScroll={(e) => setShowScrollTop(e.currentTarget.scrollTop > 200)}
-      className="flex-1 overflow-y-auto px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar"
+      className="flex-1 w-full max-w-full overflow-y-auto overflow-x-hidden px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar"
     >
       {/* Header Greeting */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
