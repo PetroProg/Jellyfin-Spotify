@@ -71,6 +71,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
       setPlaylist(data.playlist);
       setTracks(data.tracks || []);
       setActiveJob(data.activeJob || null);
+      usePlayerStore.getState().updateQueueIfCurrent(Number(playlistId), data.tracks || []);
       if (useOfflineStore.getState().isDownloaded(Number(playlistId))) {
         saveOfflinePlaylistData(data.playlist, data.tracks || []);
         useOfflineStore.getState().syncPlaylist(Number(playlistId), data.tracks || [], data.playlist);
@@ -195,10 +196,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
         playlist={playlist}
         tracks={sortedTracks}
         activeJob={activeJob}
-        onPlayAll={() => sortedTracks.length > 0 && playTrack(sortedTracks[0], sortedTracks, 0)}
+        onPlayAll={() => sortedTracks.length > 0 && playTrack(sortedTracks[0], sortedTracks, 0, Number(playlistId))}
         onShuffleAll={() => {
           if (sortedTracks.length > 0) {
-            shufflePlay(sortedTracks);
+            shufflePlay(sortedTracks, Number(playlistId));
           }
         }}
         onCoverChange={(newUrl) => setPlaylist(prev => prev ? { ...prev, cover_url: newUrl } : null)}
@@ -335,7 +336,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
               track={track}
               index={i}
               playlistName={playlist.name}
-              onPlay={() => playTrack(track, sortedTracks, i)}
+              onPlay={() => playTrack(track, sortedTracks, i, Number(playlistId))}
               onOpenMenu={(e, t) => setMenuState({ track: t, pos: { x: e.clientX, y: e.clientY } })}
             />
           ))

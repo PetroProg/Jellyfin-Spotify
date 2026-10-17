@@ -4,7 +4,7 @@ import { apiRequest } from '../api/client';
 import { useSyncStore } from './syncStore';
 import { toast } from './toastStore';
 import { useOfflineStore } from './offlineStore';
-import { getCachedTrackUrl, isTrackCached, cacheTrackOffline, saveOfflinePlaylistData } from '../utils/offline';
+import { getCachedTrackUrl, isTrackCached, cacheTrackOffline, saveOfflinePlaylistData, getSynchronousBlobUrl } from '../utils/offline';
 
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
@@ -20,6 +20,7 @@ export const EQ_PRESETS: Record<string, { label: string; bands: number[] }> = {
 
 interface PlayerState {
   currentTrack: Track | null;
+  currentPlaylistId: number | null;
   isPlaying: boolean;
   currentTime: number;
   duration: number;
@@ -38,10 +39,11 @@ interface PlayerState {
   eqPreset: string;
   isNormalizerEnabled: boolean;
 
-  playTrack: (track: Track, newQueue?: Track[], index?: number) => void;
-  playTrackLocally: (track: Track, newQueue?: Track[], index?: number, startTime?: number, autoPlay?: boolean) => void;
+  playTrack: (track: Track, newQueue?: Track[], index?: number, playlistId?: number | null) => void;
+  playTrackLocally: (track: Track, newQueue?: Track[], index?: number, startTime?: number, autoPlay?: boolean, playlistId?: number | null) => void;
   stopLocalPlayback: () => void;
-  shufflePlay: (tracks: Track[]) => void;
+  shufflePlay: (tracks: Track[], playlistId?: number | null) => void;
+  updateQueueIfCurrent: (playlistId: number, tracks: Track[]) => void;
   togglePlay: () => void;
   pause: () => void;
   resume: () => void;
@@ -251,6 +253,73 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     useSyncStore.getState().sendPlaybackState({ isPlaying: false });
   };
 
+  let consecutiveErrors = 0;
+  let errorRecoveryTimeout: any = null;
+  let stallTimeout: any = null;
+
+  audio.onerror = () => {
+    const err = audio.error;
+    const { currentTrack } = get();
+    console.warn('[Audio Error Event]:', err?.code, err?.message, currentTrack?.title);
+
+    consecutiveErrors++;
+    if (consecutiveErrors >= 3) {
+      consecutiveErrors = 0;
+      set({ isPlaying: false });
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'paused';
+      }
+      toast.error('Не удалось загрузить аудио (ошибка сети или файл недоступен)');
+      return;
+    }
+
+    toast.warning(`Пропуск «${currentTrack?.title || 'трека'}» (ошибка воспроизведения)`);
+    if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
+    errorRecoveryTimeout = setTimeout(() => {
+      get().nextTrack();
+    }, 400);
+  };
+
+  audio.onplaying = () => {
+    consecutiveErrors = 0;
+    if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
+    if (stallTimeout) clearTimeout(stallTimeout);
+    set({ isPlaying: true });
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = 'playing';
+    }
+    updateMediaPositionState();
+  };
+
+  audio.onwaiting = () => {
+    if (get().isPlaying && 'mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = 'playing';
+    }
+  };
+
+  audio.onstalled = () => {
+    if (!get().isPlaying) return;
+    if (stallTimeout) clearTimeout(stallTimeout);
+    stallTimeout = setTimeout(() => {
+      if (get().isPlaying && audio.readyState < 3) {
+        console.warn('[Audio Stalled]: Stream stalled for >10s, reloading buffer');
+        const curTime = audio.currentTime;
+        audio.load();
+        try {
+          audio.currentTime = curTime;
+        } catch (_) {}
+        audio.play().catch(() => get().nextTrack());
+      }
+    }, 10000);
+  };
+
+  audio.onprogress = () => {
+    if (stallTimeout) {
+      clearTimeout(stallTimeout);
+      stallTimeout = null;
+    }
+  };
+
   audio.ontimeupdate = () => {
     const cur = audio.currentTime;
     const dur = audio.duration;
@@ -362,8 +431,44 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }, 7000);
   };
 
+  let isPrefetchingRecommendations = false;
+  const prefetchRecommendationsIfNeeded = async () => {
+    const { queue, currentIndex, smartShuffle } = get();
+    if (!smartShuffle || isPrefetchingRecommendations) return;
+    if (queue.length > 0 && currentIndex >= queue.length - 2) {
+      isPrefetchingRecommendations = true;
+      try {
+        const lastTrack = queue[queue.length - 1];
+        const data = await apiRequest<{ recommendations: any[] }>(
+          `/recommendations?artists=${encodeURIComponent(lastTrack?.artist || '')}`,
+          { timeoutMs: 4000 }
+        );
+        if (data.recommendations && data.recommendations.length > 0) {
+          const existingIds = new Set(get().queue.map((t) => t.id));
+          const newTracks = data.recommendations
+            .filter((r) => !existingIds.has(r.id))
+            .map((r) => ({
+              id: r.id,
+              title: r.title,
+              artist: r.artist,
+              album: r.album,
+              duration_ms: r.duration_ms,
+              cover_url: r.cover_url,
+            }));
+          if (newTracks.length > 0) {
+            set((state) => ({ queue: [...state.queue, ...newTracks] }));
+          }
+        }
+      } catch (_) {
+      } finally {
+        isPrefetchingRecommendations = false;
+      }
+    }
+  };
+
   return {
     currentTrack: null,
+    currentPlaylistId: null,
     isPlaying: false,
     currentTime: 0,
     duration: 0,
@@ -381,7 +486,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     eqPreset: loadSavedEqPreset(),
     isNormalizerEnabled: loadSavedNormalizer(),
 
-    playTrack: (track, newQueue, index) => {
+    updateQueueIfCurrent: (playlistId: number, newTracks: Track[]) => {
+      const { currentPlaylistId, currentTrack, queue } = get();
+      if (currentPlaylistId !== playlistId || !newTracks || newTracks.length <= queue.length) return;
+      const newIdx = currentTrack ? newTracks.findIndex((t) => t.id === currentTrack.id) : 0;
+      set({
+        queue: newTracks,
+        currentIndex: newIdx >= 0 ? newIdx : get().currentIndex,
+      });
+    },
+
+    playTrack: (track, newQueue, index, playlistId) => {
       const isLocal = useSyncStore.getState().isLocalActive;
       if (!isLocal) {
         useSyncStore.getState().sendRemoteCommand('playTrack', { track, queue: newQueue, index });
@@ -389,6 +504,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           currentTrack: track,
           queue: newQueue ? [...newQueue] : get().queue,
           currentIndex: index !== undefined ? index : 0,
+          currentPlaylistId: playlistId !== undefined ? playlistId : get().currentPlaylistId,
           isPlaying: true,
         });
         return;
@@ -411,6 +527,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         queue: q,
         originalQueue: newQueue ? [...newQueue] : get().originalQueue,
         currentIndex: idx,
+        currentPlaylistId: playlistId !== undefined ? playlistId : get().currentPlaylistId,
         isPlaying: true,
         currentTime: 0,
         duration: initialDur,
@@ -421,21 +538,37 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audioCtx.resume().catch(() => {});
       }
 
-      // Check if track is cached offline for instant 0ms start
-      getCachedTrackUrl(track.id).then((cachedUrl) => {
-        const streamUrl = `/api/stream/${track.id}`;
-        const targetSrc = cachedUrl || streamUrl;
-        if (!audio.src.endsWith(targetSrc) && audio.src !== targetSrc) {
-          audio.src = targetSrc;
-        }
-        audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
-        updateMediaSession(track);
-        useSyncStore.getState().sendPlaybackState({ currentTime: 0, duration: initialDur, isPlaying: true });
-        scheduleNextTrackPrefetch();
-      });
+      // Synchronous source assignment & playback for unbroken mobile background autoplay token
+      const streamUrl = `/api/stream/${track.id}`;
+      const syncBlobUrl = getSynchronousBlobUrl(track.id);
+      const targetSrc = syncBlobUrl || streamUrl;
+
+      if (!audio.src.endsWith(targetSrc) && audio.src !== targetSrc) {
+        audio.src = targetSrc;
+      }
+      audio.currentTime = 0;
+
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          console.warn('[Audio play interrupted / autoplay]:', err);
+          if (err.name === 'NotAllowedError' && typeof document !== 'undefined' && document.visibilityState === 'visible') {
+            toast.info('Нажмите в любом месте для включения звука на этом устройстве');
+          }
+        });
+      }
+
+      updateMediaSession(track);
+      useSyncStore.getState().sendPlaybackState({ currentTime: 0, duration: initialDur, isPlaying: true });
+      scheduleNextTrackPrefetch();
+      prefetchRecommendationsIfNeeded();
+
+      if (!syncBlobUrl) {
+        getCachedTrackUrl(track.id).catch(() => {});
+      }
     },
 
-    playTrackLocally: (track, newQueue, index, startTime, autoPlay = true) => {
+    playTrackLocally: (track, newQueue, index, startTime, autoPlay = true, playlistId) => {
       let q = newQueue && newQueue.length > 0 ? [...newQueue] : get().queue;
       let idx = index !== undefined && index >= 0 ? index : q.findIndex((t) => t.id === track.id);
 
@@ -453,6 +586,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         queue: q,
         originalQueue: newQueue && newQueue.length > 0 ? [...newQueue] : get().originalQueue,
         currentIndex: idx,
+        currentPlaylistId: playlistId !== undefined ? playlistId : get().currentPlaylistId,
         isPlaying: autoPlay,
         currentTime: startTime || 0,
         duration: initialDur,
@@ -463,52 +597,50 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audioCtx.resume().catch(() => {});
       }
 
-      getCachedTrackUrl(track.id).then((cachedUrl) => {
-        const streamUrl = `/api/stream/${track.id}`;
-        const targetSrc = cachedUrl || streamUrl;
-        const needsSourceChange = !audio.src.endsWith(targetSrc) && audio.src !== targetSrc;
-        if (needsSourceChange) {
-          audio.src = targetSrc;
+      const streamUrl = `/api/stream/${track.id}`;
+      const syncBlobUrl = getSynchronousBlobUrl(track.id);
+      const targetSrc = syncBlobUrl || streamUrl;
+      const needsSourceChange = !audio.src.endsWith(targetSrc) && audio.src !== targetSrc;
+      if (needsSourceChange) {
+        audio.src = targetSrc;
+      }
+
+      const applySeek = () => {
+        if (startTime && startTime > 0) {
+          try {
+            audio.currentTime = startTime;
+          } catch (_) {}
         }
+      };
 
-        const applySeek = () => {
-          if (startTime && startTime > 0) {
-            try {
-              audio.currentTime = startTime;
-            } catch (_) {}
-          }
-        };
+      if (!needsSourceChange && audio.readyState >= 1) {
+        applySeek();
+      } else {
+        audio.addEventListener('loadedmetadata', applySeek, { once: true });
+      }
 
-        if (!needsSourceChange && audio.readyState >= 1) {
-          applySeek();
-        } else {
-          audio.addEventListener('loadedmetadata', applySeek, { once: true });
-        }
-
-        if (autoPlay) {
-          audio.play().catch((err) => {
+      if (autoPlay) {
+        const p = audio.play();
+        if (p !== undefined) {
+          p.catch((err) => {
             console.warn('[Audio play interrupted / autoplay policy]:', err);
-            if (err.name === 'NotAllowedError') {
+            if (err.name === 'NotAllowedError' && typeof document !== 'undefined' && document.visibilityState === 'visible') {
               toast.info('Нажмите в любом месте для включения звука на этом устройстве');
-              const unlock = () => {
-                audio.play().catch(() => {});
-                window.removeEventListener('click', unlock);
-                window.removeEventListener('keydown', unlock);
-                window.removeEventListener('touchstart', unlock);
-              };
-              window.addEventListener('click', unlock, { once: true });
-              window.addEventListener('keydown', unlock, { once: true });
-              window.addEventListener('touchstart', unlock, { once: true });
             }
           });
-        } else {
-          audio.pause();
         }
+      } else {
+        audio.pause();
+      }
 
-        updateMediaSession(track);
-        useSyncStore.getState().sendPlaybackState();
-        scheduleNextTrackPrefetch();
-      });
+      updateMediaSession(track);
+      useSyncStore.getState().sendPlaybackState();
+      scheduleNextTrackPrefetch();
+      prefetchRecommendationsIfNeeded();
+
+      if (!syncBlobUrl) {
+        getCachedTrackUrl(track.id).catch(() => {});
+      }
     },
 
     stopLocalPlayback: () => {
@@ -517,7 +649,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       } catch (_) {}
     },
 
-    shufflePlay: (tracks: Track[]) => {
+    shufflePlay: (tracks: Track[], playlistId?: number | null) => {
       if (!tracks || tracks.length === 0) return;
 
       const isLocal = useSyncStore.getState().isLocalActive;
@@ -546,6 +678,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         queue: shuffledQueue,
         originalQueue: original,
         currentIndex: 0,
+        currentPlaylistId: playlistId !== undefined ? playlistId : get().currentPlaylistId,
         shuffle: true,
         isPlaying: true,
         currentTime: 0,
@@ -557,17 +690,26 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audioCtx.resume().catch(() => {});
       }
 
-      getCachedTrackUrl(chosenTrack.id).then((cachedUrl) => {
-        const streamUrl = `/api/stream/${chosenTrack.id}`;
-        const targetSrc = cachedUrl || streamUrl;
-        if (!audio.src.endsWith(targetSrc) && audio.src !== targetSrc) {
-          audio.src = targetSrc;
-        }
-        audio.play().catch((err) => console.warn('[Audio play interrupted]:', err));
-        updateMediaSession(chosenTrack);
-        useSyncStore.getState().sendPlaybackState({ currentTime: 0, duration: initialDur, isPlaying: true });
-        scheduleNextTrackPrefetch();
-      });
+      const streamUrl = `/api/stream/${chosenTrack.id}`;
+      const syncBlobUrl = getSynchronousBlobUrl(chosenTrack.id);
+      const targetSrc = syncBlobUrl || streamUrl;
+      if (!audio.src.endsWith(targetSrc) && audio.src !== targetSrc) {
+        audio.src = targetSrc;
+      }
+      audio.currentTime = 0;
+
+      const p = audio.play();
+      if (p !== undefined) {
+        p.catch((err) => console.warn('[Audio play interrupted]:', err));
+      }
+      updateMediaSession(chosenTrack);
+      useSyncStore.getState().sendPlaybackState({ currentTime: 0, duration: initialDur, isPlaying: true });
+      scheduleNextTrackPrefetch();
+      prefetchRecommendationsIfNeeded();
+
+      if (!syncBlobUrl) {
+        getCachedTrackUrl(chosenTrack.id).catch(() => {});
+      }
     },
 
     togglePlay: () => {
@@ -631,17 +773,35 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         return;
       }
 
-      const { queue, currentIndex, repeat, smartShuffle, playTrack } = get();
+      const { queue, currentIndex, repeat, smartShuffle, playTrack, currentPlaylistId } = get();
       if (queue.length === 0) return;
 
       let nextIndex = currentIndex + 1;
 
       if (nextIndex >= queue.length) {
+        // 1. If currently playing a playlist (e.g. Daily Mix or Import in progress), check if new tracks downloaded on server
+        if (currentPlaylistId && currentPlaylistId > 0) {
+          try {
+            const data = await apiRequest<{ tracks: Track[] }>(`/playlists/${currentPlaylistId}`, { timeoutMs: 3000 });
+            if (data.tracks && data.tracks.length > queue.length) {
+              const currentId = queue[currentIndex]?.id;
+              const newIdx = data.tracks.findIndex((t) => t.id === currentId);
+              if (newIdx !== -1 && newIdx + 1 < data.tracks.length) {
+                set({ queue: data.tracks, currentIndex: newIdx });
+                playTrack(data.tracks[newIdx + 1], data.tracks, newIdx + 1, currentPlaylistId);
+                return;
+              }
+            }
+          } catch (_) {}
+        }
+
+        // 2. Smart shuffle fallback if recommendations weren't already pre-fetched
         if (smartShuffle) {
           try {
             const current = queue[currentIndex];
             const data = await apiRequest<{ recommendations: any[] }>(
-              `/recommendations?artists=${encodeURIComponent(current?.artist || '')}`
+              `/recommendations?artists=${encodeURIComponent(current?.artist || '')}`,
+              { timeoutMs: 4000 }
             );
             if (data.recommendations && data.recommendations.length > 0) {
               const newTracks = data.recommendations.map((r) => ({
@@ -654,7 +814,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
               }));
               const updatedQueue = [...queue, ...newTracks];
               set({ queue: updatedQueue });
-              playTrack(newTracks[0], updatedQueue, nextIndex);
+              playTrack(newTracks[0], updatedQueue, nextIndex, null);
               return;
             }
           } catch (e) {
@@ -671,7 +831,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         }
       }
 
-      playTrack(queue[nextIndex], queue, nextIndex);
+      playTrack(queue[nextIndex], queue, nextIndex, currentPlaylistId);
     },
 
     prevTrack: () => {

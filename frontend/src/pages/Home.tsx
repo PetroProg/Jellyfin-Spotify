@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Plus, Music2, Download, Heart, ChevronUp, Sparkles, RefreshCw, Loader2 } from 'lucide-react';
-import { Playlist } from '../types';
+import { Playlist, Track } from '../types';
 import { useAuthStore } from '../store/authStore';
 import { apiRequest } from '../api/client';
 import { toast } from '../store/toastStore';
+import { usePlayerStore } from '../store/playerStore';
 
 interface HomeProps {
   playlists: Playlist[];
@@ -272,9 +273,25 @@ export const Home: React.FC<HomeProps> = ({
                       </div>
 
                       {/* Play Button Hover */}
-                      <div className="absolute right-2 bottom-8 w-9 h-9 rounded-full bg-cat-mauve text-cat-base flex items-center justify-center shadow-xl opacity-0 group-hover:opacity-100 transition-opacity translate-y-1 group-hover:translate-y-0 duration-200">
+                      <button
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          try {
+                            const res = await apiRequest<{ tracks: Track[] }>(`/playlists/${mix.id}`);
+                            if (res.tracks && res.tracks.length > 0) {
+                              usePlayerStore.getState().playTrack(res.tracks[0], res.tracks, 0, mix.id);
+                            } else {
+                              onSelectPlaylist(mix.id);
+                            }
+                          } catch (_) {
+                            onSelectPlaylist(mix.id);
+                          }
+                        }}
+                        className="absolute right-2 bottom-8 w-9 h-9 rounded-full bg-cat-mauve text-cat-base flex items-center justify-center shadow-xl opacity-0 group-hover:opacity-100 transition-opacity translate-y-1 group-hover:translate-y-0 duration-200 hover:scale-105 active:scale-95 z-10"
+                        title="Включить микс дня"
+                      >
                         <Play className="w-4 h-4 fill-current ml-0.5" />
-                      </div>
+                      </button>
                     </div>
 
                     <h3 className="font-bold text-sm text-cat-text truncate">{mix.name}</h3>

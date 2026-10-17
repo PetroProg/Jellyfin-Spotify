@@ -8,6 +8,10 @@ const ALL_PLAYLISTS_CACHE_KEY = 'jellyfy_all_playlists_cache';
 // In-memory registry of active Blob URLs for zero-latency instant playback
 const activeBlobUrls = new Map<number, string>();
 
+export function getSynchronousBlobUrl(trackId: number): string | null {
+  return activeBlobUrls.get(trackId) || null;
+}
+
 export function getOfflinePlaylistIds(): number[] {
   try {
     const raw = localStorage.getItem(OFFLINE_PLAYLISTS_KEY);
