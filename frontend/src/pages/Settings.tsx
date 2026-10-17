@@ -314,7 +314,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   };
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar">
+    <div className="flex-1 w-full max-w-full overflow-y-auto overflow-x-hidden px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar">
       <div className="max-w-3xl mx-auto space-y-6">
         {onBack && (
           <button
@@ -674,7 +674,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
                   <span>Синхронизация раздела «Любимые треки»</span>
                 </div>
                 <p className="text-xs text-cat-subtext0">
-                  Автоматически скачает все треки с лайком из вашего аккаунта Spotify в медиатеку в качестве 320 kbps.
+                  Догружает новые треки из вашего аккаунта Spotify. Все треки, добавленные на сайте, остаются в сохранности и никогда не удаляются.
                 </p>
                 <button
                   onClick={handleSyncLiked}

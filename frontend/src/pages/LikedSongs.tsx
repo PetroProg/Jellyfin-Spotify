@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Heart, Play, Shuffle, ChevronUp, ArrowLeft, Download, Check, Loader2 } from 'lucide-react';
-import { Track } from '../types';
+import { Heart, Play, Shuffle, ChevronUp, ArrowLeft, Download, Check, Loader2, RefreshCw } from 'lucide-react';
+import { Track, DownloadJob } from '../types';
 import { apiRequest } from '../api/client';
 import { useOfflineStore } from '../store/offlineStore';
 import { getOfflinePlaylistData, saveOfflinePlaylistData } from '../utils/offline';
@@ -37,6 +37,8 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
+  const [activeJob, setActiveJob] = useState<DownloadJob | null>(null);
+  const [syncingSpotify, setSyncingSpotify] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const isDownloaded = useOfflineStore((s) => s.downloadedIds.includes(LIKED_PLAYLIST_ID));
@@ -104,6 +106,46 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
   useEffect(() => {
     loadLikes();
   }, [likedTrackIds]);
+
+  const pollJobs = async () => {
+    try {
+      const data = await apiRequest<{ jobs: DownloadJob[] }>('/spotify/jobs');
+      const likedJob = (data.jobs || []).find(
+        (j) => (j.playlist_name === 'Любимые треки' || j.playlist_id === null) && (j.status === 'downloading' || j.status === 'pending')
+      );
+      setActiveJob(likedJob || null);
+    } catch (_) {}
+  };
+
+  useEffect(() => {
+    pollJobs();
+    const interval = setInterval(pollJobs, 2500);
+    return () => clearInterval(interval);
+  }, []);
+
+  // When Spotify is actively downloading liked tracks, live-refresh the track list
+  useEffect(() => {
+    if (!activeJob) return;
+    const interval = setInterval(() => {
+      loadLikes();
+    }, 2500);
+    return () => clearInterval(interval);
+  }, [activeJob?.id, activeJob?.downloaded_tracks, activeJob?.status]);
+
+  const handleSyncSpotify = async () => {
+    if (syncingSpotify) return;
+    setSyncingSpotify(true);
+    try {
+      const res = await apiRequest<any>('/spotify/import-liked', { method: 'POST' });
+      toast.success(res.message || 'Синхронизация любимых треков начата. Все треки на сайте сохранены.');
+      pollJobs();
+      loadLikes();
+    } catch (err: any) {
+      toast.error(err.message || 'Ошибка синхронизации со Spotify');
+    } finally {
+      setSyncingSpotify(false);
+    }
+  };
 
   useEffect(() => {
     const handleBlacklisted = (e: any) => {
@@ -237,9 +279,58 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
                 <Download className="w-4 h-4" />
               )}
             </button>
+
+            <button
+              onClick={handleSyncSpotify}
+              disabled={Boolean(syncingSpotify || (activeJob && (activeJob.status === 'downloading' || activeJob.status === 'pending')))}
+              title="Синхронизировать со Spotify: догрузит треки из аккаунта Spotify без удаления треков с сайта"
+              className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-full bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-mauve active:scale-95 transition-all text-xs font-semibold disabled:opacity-50 cursor-pointer shrink-0"
+            >
+              {syncingSpotify || (activeJob && (activeJob.status === 'downloading' || activeJob.status === 'pending')) ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin text-cat-mauve" />
+                  <span className="hidden sm:inline">Синхронизация...</span>
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-4 h-4 text-cat-mauve" />
+                  <span className="hidden sm:inline">Синхронизировать Spotify</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
       </div>
+
+      {/* Live Spotify Download Banner */}
+      {activeJob && (activeJob.status === 'downloading' || activeJob.status === 'pending') && (
+        <div className="mb-6 p-4 rounded-2xl bg-cat-surface0/60 border border-cat-mauve/30 shadow-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-cat-mauve/20 text-cat-mauve flex items-center justify-center shrink-0">
+              <Loader2 className="w-5 h-5 animate-spin" />
+            </div>
+            <div className="min-w-0">
+              <h4 className="text-sm font-bold text-cat-text">Синхронизация: догрузка новых любимых треков</h4>
+              <p className="text-xs text-cat-subtext0 truncate max-w-[240px] sm:max-w-md">
+                {activeJob.current_track ? `Скачивается: ${activeJob.current_track}` : 'Подготовка треков...'}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 w-full sm:w-auto shrink-0 justify-between sm:justify-end">
+            <span className="text-xs font-mono font-bold text-cat-mauve shrink-0">
+              {activeJob.downloaded_tracks || 0} / {activeJob.total_tracks || 0}
+            </span>
+            <div className="w-24 sm:w-32 bg-cat-surface1 h-2 rounded-full overflow-hidden shrink-0">
+              <div
+                className="bg-cat-mauve h-full rounded-full transition-all duration-300"
+                style={{
+                  width: `${Math.max(5, Math.min(100, Math.round(((activeJob.downloaded_tracks || 0) / (activeJob.total_tracks || 1)) * 100)))}%`
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Sorting / Table Header */}
       <div className="border-b border-cat-surface0/60 pb-2 mb-2 flex items-center justify-between text-xs font-semibold text-cat-subtext0 px-2 sm:px-3 w-full max-w-full">

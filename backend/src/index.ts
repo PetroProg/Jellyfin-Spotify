@@ -711,7 +711,20 @@ server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenti
       return reply.status(400).send({ error: 'В вашем разделе «Любимые треки» Spotify нет песен' });
     }
 
-    // 1. Get tracks already in user's liked_tracks
+    // Helper for robust title matching (removes remaster/feat noise)
+    const cleanTitle = (str: string) => {
+      return (str || '')
+        .toLowerCase()
+        .replace(/\s*\(feat\..*?\)/gi, '')
+        .replace(/\s*\[feat\..*?\]/gi, '')
+        .replace(/\s*\(remaster.*?\)/gi, '')
+        .replace(/\s*\[remaster.*?\]/gi, '')
+        .replace(/\s*-\s*remaster.*?$/gi, '')
+        .trim();
+    };
+
+    // 1. Get tracks already in user's liked_tracks on this site
+    // (Existing liked tracks on the site are NEVER deleted or modified)
     const existingLiked: any[] = db.prepare(`
       SELECT t.id, t.spotify_id, LOWER(t.title) as title, LOWER(t.artist) as artist
       FROM liked_tracks lt
@@ -721,9 +734,19 @@ server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenti
 
     // 2. Identify missing tracks that need to be added to liked_tracks
     const missingFromLiked = playlistData.tracks.filter((st) => {
+      const stCleanT = cleanTitle(st.title);
+      const stCleanA = (st.artist || '').toLowerCase().trim();
       return !existingLiked.some((er) => {
         if (st.id && er.spotify_id && er.spotify_id === st.id) return true;
-        return er.title === st.title.toLowerCase().trim() && er.artist === st.artist.toLowerCase().trim();
+        const erCleanT = cleanTitle(er.title);
+        const erCleanA = (er.artist || '').toLowerCase().trim();
+        return (
+          er.title === st.title.toLowerCase().trim() &&
+          er.artist === st.artist.toLowerCase().trim()
+        ) || (
+          erCleanT === stCleanT &&
+          erCleanA === stCleanA
+        );
       });
     });
 
@@ -733,7 +756,7 @@ server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenti
 
     for (const st of missingFromLiked) {
       const onDisk: any = db.prepare(`
-        SELECT id FROM tracks 
+        SELECT id, spotify_id FROM tracks 
         WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
            OR (LOWER(title) = ? AND LOWER(artist) = ?)
         LIMIT 1
@@ -741,17 +764,16 @@ server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenti
 
       if (onDisk) {
         db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(req.user.id, onDisk.id);
+        if (st.id && !onDisk.spotify_id) {
+          try {
+            db.prepare('UPDATE tracks SET spotify_id = ? WHERE id = ?').run(st.id, onDisk.id);
+          } catch (_) {}
+        }
         immediatelyLinked++;
       } else {
         needDownload.push(st);
       }
     }
-
-    // Ensure any leftover duplicate playlist named 'Любимые треки' is removed from playlists list
-    db.prepare(`
-      DELETE FROM playlists 
-      WHERE user_id = ? AND (name = 'Любимые треки' OR LOWER(name) = 'liked songs')
-    `).run(req.user.id);
 
     const totalCountRow: any = db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(req.user.id);
 
@@ -762,8 +784,8 @@ server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenti
         totalTracks: totalCountRow?.cnt || 0,
         newTracks: immediatelyLinked,
         message: immediatelyLinked > 0
-          ? `Синхронизировано новых любимых треков: ${immediatelyLinked}. Все треки в разделе «Любимые треки»!`
-          : 'Все ваши любимые треки уже синхронизированы в раздел «Любимые треки»!'
+          ? `Догружено новых треков: ${immediatelyLinked}. Все треки с сайта сохранены!`
+          : 'Все треки из Spotify уже есть в вашем разделе «Любимые треки». Никакие треки с сайта не удалялись.'
       };
     }
 
@@ -782,7 +804,7 @@ server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenti
       jobId,
       newTracks: needDownload.length,
       totalTracks: totalCount,
-      message: `Найдено новых любимых треков: ${needDownload.length}. Загрузка начата.`
+      message: `Найдено новых треков для догрузки: ${needDownload.length}. Треки с сайта не удаляются и остаются в сохранности.`
     };
   } catch (err: any) {
     return reply.status(500).send({ error: err.message || 'Ошибка импорта любимых треков' });
