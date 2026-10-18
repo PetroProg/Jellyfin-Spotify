@@ -1,9 +1,11 @@
 import React, { useEffect } from 'react';
 import { useToastStore } from '../store/toastStore';
 import { AlertTriangle, HelpCircle, X } from 'lucide-react';
+import { useI18nStore } from '../store/i18nStore';
 
 export const ConfirmModal: React.FC = () => {
   const { confirmState, closeConfirm } = useToastStore();
+  const { t, td } = useI18nStore();
 
   useEffect(() => {
     if (!confirmState) return;
@@ -59,17 +61,17 @@ export const ConfirmModal: React.FC = () => {
               id="confirm-dialog-title"
               className="text-base font-bold text-cat-text leading-snug"
             >
-              {confirmState.title}
+              {td(confirmState.title)}
             </h3>
             <p className="mt-2 text-sm text-cat-subtext0 leading-relaxed whitespace-pre-wrap">
-              {confirmState.message}
+              {td(confirmState.message)}
             </p>
           </div>
 
           <button
             onClick={() => closeConfirm(false)}
             className="p-1 rounded-xl text-cat-overlay0 hover:text-cat-text hover:bg-cat-surface0 transition active:scale-95"
-            aria-label="Закрыть"
+            aria-label={t('Close', 'Закрыть')}
           >
             <X className="w-4 h-4" />
           </button>
@@ -82,7 +84,7 @@ export const ConfirmModal: React.FC = () => {
             onClick={() => closeConfirm(false)}
             className="px-4 py-2.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext1 hover:text-cat-text text-sm font-semibold transition active:scale-95 cursor-pointer"
           >
-            {confirmState.cancelText || 'Отмена'}
+            {confirmState.cancelText ? td(confirmState.cancelText) : t('Cancel', 'Отмена')}
           </button>
           <button
             type="button"
@@ -94,7 +96,7 @@ export const ConfirmModal: React.FC = () => {
                 : 'bg-cat-mauve hover:bg-cat-mauve/90 text-cat-base shadow-cat-mauve/20'
             }`}
           >
-            {confirmState.confirmText || 'Подтвердить'}
+            {confirmState.confirmText ? td(confirmState.confirmText) : t('Confirm', 'Подтвердить')}
           </button>
         </div>
       </div>

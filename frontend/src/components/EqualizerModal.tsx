@@ -1,16 +1,18 @@
 import React from 'react';
 import { X, SlidersHorizontal, Volume2, Sparkles, RotateCcw } from 'lucide-react';
 import { usePlayerStore, EQ_PRESETS } from '../store/playerStore';
+import { useI18nStore } from '../store/i18nStore';
 
 const BAND_LABELS = [
-  { freq: '60 Hz', name: 'Саб-бас' },
-  { freq: '230 Hz', name: 'Бас' },
-  { freq: '910 Hz', name: 'Средние' },
-  { freq: '3.6 kHz', name: 'Верх. средние' },
-  { freq: '14 kHz', name: 'Воздух / ВЧ' },
+  { freq: '60 Hz', nameEn: 'Sub-bass', nameRu: 'Саб-бас' },
+  { freq: '230 Hz', nameEn: 'Bass', nameRu: 'Бас' },
+  { freq: '910 Hz', nameEn: 'Mid', nameRu: 'Средние' },
+  { freq: '3.6 kHz', nameEn: 'Upper Mid', nameRu: 'Верх. средние' },
+  { freq: '14 kHz', nameEn: 'Air / Highs', nameRu: 'Воздух / ВЧ' },
 ];
 
 export const EqualizerModal: React.FC = () => {
+  const { lang, t } = useI18nStore();
   const {
     isEqualizerOpen,
     setEqualizerOpen,
@@ -35,8 +37,8 @@ export const EqualizerModal: React.FC = () => {
               <SlidersHorizontal className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="font-bold text-base text-cat-text">Студийный звук & EQ</h3>
-              <p className="text-[11px] text-cat-subtext0">Настройка качества и окраски звука</p>
+              <h3 className="font-bold text-base text-cat-text">{t('Studio Audio & EQ', 'Студийный звук & EQ')}</h3>
+              <p className="text-[11px] text-cat-subtext0">{t('Customize audio quality and tone', 'Настройка качества и окраски звука')}</p>
             </div>
           </div>
           <button
@@ -53,7 +55,7 @@ export const EqualizerModal: React.FC = () => {
             <Sparkles className="w-4 h-4 text-cat-yellow flex-shrink-0" />
             <div>
               <p className="text-xs font-bold text-cat-text">320 kbps Studio Master Engine</p>
-              <p className="text-[10px] text-cat-subtext0">Аудиопоток высокой четкости 44.1 kHz</p>
+              <p className="text-[10px] text-cat-subtext0">{t('High-definition 44.1 kHz audio stream', 'Аудиопоток высокой четкости 44.1 kHz')}</p>
             </div>
           </div>
           <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-cat-green/20 text-cat-green font-semibold">
@@ -66,9 +68,9 @@ export const EqualizerModal: React.FC = () => {
           <div className="flex items-center gap-3">
             <Volume2 className="w-5 h-5 text-cat-mauve flex-shrink-0" />
             <div>
-              <p className="text-xs font-bold text-cat-text">Нормализация громкости</p>
+              <p className="text-xs font-bold text-cat-text">{t('Loudness Normalization', 'Нормализация громкости')}</p>
               <p className="text-[11px] text-cat-subtext0 mt-0.5">
-                Выравнивает уровень треков (как в Spotify), делает бас плотнее
+                {t('Balances volume across tracks (like Spotify) and tightens bass', 'Выравнивает уровень треков (как в Spotify), делает бас плотнее')}
               </p>
             </div>
           </div>
@@ -89,7 +91,7 @@ export const EqualizerModal: React.FC = () => {
         {/* Section 2: Presets */}
         <div className="mb-5">
           <label className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider block mb-2 px-1">
-            Пресеты звучания
+            {t('Sound Presets', 'Пресеты звучания')}
           </label>
           <div className="flex flex-wrap gap-1.5">
             {Object.entries(EQ_PRESETS).map(([key, p]) => (
@@ -102,7 +104,7 @@ export const EqualizerModal: React.FC = () => {
                     : 'bg-cat-surface0/60 hover:bg-cat-surface0 text-cat-text hover:text-cat-mauve border border-cat-surface1/30'
                 }`}
               >
-                {p.label}
+                {lang === 'en' ? (p.labelEn || p.label) : p.label}
               </button>
             ))}
           </div>
@@ -112,15 +114,15 @@ export const EqualizerModal: React.FC = () => {
         <div className="mb-5 bg-cat-surface0/30 border border-cat-surface1/20 rounded-2xl p-4">
           <div className="flex items-center justify-between mb-3 px-1">
             <label className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider">
-              5-полосный эквалайзер (-12 до +12 dB)
+              {t('5-Band Equalizer (-12 to +12 dB)', '5-полосный эквалайзер (-12 до +12 dB)')}
             </label>
             <button
               onClick={resetEqualizer}
               className="text-[11px] text-cat-subtext0 hover:text-cat-mauve flex items-center gap-1 cursor-pointer transition-colors"
-              title="Сбросить в 0 dB"
+              title={t('Reset to 0 dB', 'Сбросить в 0 dB')}
             >
               <RotateCcw className="w-3 h-3" />
-              <span>Сброс</span>
+              <span>{t('Reset', 'Сброс')}</span>
             </button>
           </div>
 
@@ -147,7 +149,7 @@ export const EqualizerModal: React.FC = () => {
                     {band.freq}
                   </span>
                   <span className="text-[9px] text-cat-subtext0 text-center leading-tight">
-                    {band.name}
+                    {lang === 'en' ? band.nameEn : band.nameRu}
                   </span>
                 </div>
               );
@@ -161,7 +163,7 @@ export const EqualizerModal: React.FC = () => {
             onClick={() => setEqualizerOpen(false)}
             className="px-6 py-2.5 rounded-2xl bg-cat-mauve text-cat-base text-xs font-bold hover:opacity-95 active:scale-95 transition-all shadow-md cursor-pointer"
           >
-            Применить и закрыть
+            {t('Apply & Close', 'Применить и закрыть')}
           </button>
         </div>
       </div>

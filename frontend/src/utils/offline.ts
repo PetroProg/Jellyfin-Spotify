@@ -1,4 +1,5 @@
 import { Playlist, Track } from '../types';
+import { tr, td } from '../store/i18nStore';
 
 export const CACHE_NAME = 'jellyfin-spotify-audio-cache';
 export const OFFLINE_PLAYLISTS_KEY = 'offline_playlists_ids';
@@ -143,8 +144,8 @@ export function getAllOfflinePlaylists(): Playlist[] {
       } else {
         list.push({
           id: -1,
-          name: 'Любимые треки',
-          description: 'Ваша медиатека сохраненных композиций',
+          name: tr('Liked Songs', 'Любимые треки'),
+          description: tr('Your library of saved tracks', 'Ваша медиатека сохраненных композиций'),
           created_at: new Date().toISOString(),
           track_count: data?.tracks?.length || 0,
         });
@@ -183,8 +184,11 @@ export async function tryStartBackgroundFetch(
     } catch (_) {}
 
     const requests = tracks.map((t) => `/api/stream/${t.id}`);
+    const displayTitle = playlistName
+      ? tr(`Downloading: ${td(playlistName)}`, `Загрузка: ${playlistName}`)
+      : tr('Downloading music for offline', 'Загрузка музыки в оффлайн');
     await reg.backgroundFetch.fetch(bgFetchId, requests, {
-      title: playlistName ? `Загрузка: ${playlistName}` : 'Загрузка музыки в оффлайн',
+      title: displayTitle,
       icons: [{ src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png' }],
       downloadTotal: tracks.length * 4 * 1024 * 1024, // Estimate ~4MB per track
     });
@@ -337,7 +341,7 @@ export async function downloadPlaylistOffline(
   onProgress?: (done: number, total: number) => void
 ): Promise<void> {
   if (!('caches' in window)) {
-    throw new Error('Кеширование не поддерживается вашим браузером');
+    throw new Error(tr('Caching is not supported by your browser', 'Кеширование не поддерживается вашим браузером'));
   }
 
   // Pre-save metadata so offline views are immediately populated
@@ -434,9 +438,9 @@ export async function getOfflineStorageUsage(): Promise<string> {
   if (navigator.storage && navigator.storage.estimate) {
     const estimate = await navigator.storage.estimate();
     const usedMB = ((estimate.usage || 0) / (1024 * 1024)).toFixed(1);
-    return `${usedMB} МБ`;
+    return tr(`${usedMB} MB`, `${usedMB} МБ`);
   }
-  return 'Около 150 МБ';
+  return tr('About 150 MB', 'Около 150 МБ');
 }
 
 export async function clearAllOfflineCache(): Promise<void> {

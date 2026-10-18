@@ -2,6 +2,7 @@ import React from 'react';
 import { Play, MoreHorizontal, Music2 } from 'lucide-react';
 import { Track } from '../types';
 import { usePlayerStore } from '../store/playerStore';
+import { useI18nStore } from '../store/i18nStore';
 
 interface TrackRowProps {
   track: Track;
@@ -14,11 +15,11 @@ interface TrackRowProps {
 export const TrackRow: React.FC<TrackRowProps> = ({
   track,
   index,
-  playlistName,
   onPlay,
   onOpenMenu,
 }) => {
   const { currentTrack, isPlaying } = usePlayerStore();
+  const { lang } = useI18nStore();
   const isCurrent = currentTrack?.id === track.id;
 
   const formatDuration = (ms: number) => {
@@ -33,7 +34,7 @@ export const TrackRow: React.FC<TrackRowProps> = ({
     try {
       const d = new Date(dateStr.includes('T') ? dateStr : `${dateStr.replace(' ', 'T')}Z`);
       if (isNaN(d.getTime())) return '-';
-      return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' });
+      return d.toLocaleDateString(lang === 'en' ? 'en-US' : 'ru-RU', { day: 'numeric', month: 'short', year: 'numeric' });
     } catch {
       return '-';
     }

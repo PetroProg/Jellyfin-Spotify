@@ -25,9 +25,11 @@ import { DevicePickerModal } from './components/DevicePickerModal';
 import { toast } from './store/toastStore';
 import { useSyncStore } from './store/syncStore';
 import { getAllOfflinePlaylists, getAllPlaylistsCache, saveAllPlaylistsCache } from './utils/offline';
+import { useI18nStore, tr } from './store/i18nStore';
 
 export const App: React.FC = () => {
   const { isAuthenticated, isLoading, fetchMe } = useAuthStore();
+  const { t } = useI18nStore();
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   
   const getInitialTab = (): string => {
@@ -71,16 +73,25 @@ export const App: React.FC = () => {
           });
           const data = await res.json().catch(() => ({}));
           if (res.ok && data.success) {
-            toast.success('Аккаунт Spotify успешно подключен! Лимит на 100 треков снят.', 'Spotify подключен');
+            toast.success(
+              tr('Spotify account connected! The 100-track limit is removed.', 'Аккаунт Spotify успешно подключен! Лимит на 100 треков снят.'),
+              tr('Spotify Connected', 'Spotify подключен')
+            );
             setCurrentTab('settings');
             window.history.replaceState({ tab: 'settings', playlistId: null, isFullPlayer: false }, '', '/');
           } else {
-            toast.error(data.error || 'Ошибка авторизации Spotify', 'Ошибка Spotify');
+            toast.error(
+              data.error || tr('Spotify authorization error', 'Ошибка авторизации Spotify'),
+              tr('Spotify Error', 'Ошибка Spotify')
+            );
             setCurrentTab('settings');
             window.history.replaceState({ tab: 'settings', playlistId: null, isFullPlayer: false }, '', '/');
           }
         } catch (err: any) {
-          toast.error(err.message || 'Ошибка обработки авторизации', 'Ошибка Spotify');
+          toast.error(
+            err.message || tr('Error processing authorization', 'Ошибка обработки авторизации'),
+            tr('Spotify Error', 'Ошибка Spotify')
+          );
         }
       })();
     }
@@ -286,14 +297,14 @@ export const App: React.FC = () => {
         handleSelectPlaylist(res.id);
       }
     } catch (e: any) {
-      toast.error(e.message || 'Ошибка создания плейлиста');
+      toast.error(e.message || t('Failed to create playlist', 'Ошибка создания плейлиста'));
     }
   };
 
   if (isLoading) {
     return (
       <div className="min-h-screen bg-cat-base flex items-center justify-center text-cat-subtext0 text-sm">
-        Инициализация Jellyfy...
+        {t('Initializing Jellyfy...', 'Инициализация Jellyfy...')}
       </div>
     );
   }
@@ -311,7 +322,12 @@ export const App: React.FC = () => {
       {!isOnline && (
         <div className="bg-cat-crust/95 border-b border-cat-yellow/30 px-3 py-1.5 text-xs text-cat-yellow flex items-center justify-center gap-2 select-none z-50">
           <WifiOff className="w-3.5 h-3.5" />
-          <span>Офлайн-режим • Доступны скачанные плейлисты и треки</span>
+          <span>
+            {t(
+              'Offline Mode • Downloaded playlists and tracks are available',
+              'Офлайн-режим • Доступны скачанные плейлисты и треки'
+            )}
+          </span>
         </div>
       )}
       <div className="flex flex-1 overflow-hidden">
@@ -398,16 +414,18 @@ export const App: React.FC = () => {
       {showCreateModal && (
         <div className="fixed inset-0 z-50 bg-cat-crust/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-cat-mantle border border-cat-surface0/80 rounded-3xl p-6 max-w-sm w-full shadow-2xl">
-            <h3 className="font-bold text-lg text-cat-text mb-4">Новый плейлист</h3>
+            <h3 className="font-bold text-lg text-cat-text mb-4">
+              {t('New Playlist', 'Новый плейлист')}
+            </h3>
             <form onSubmit={handleCreatePlaylist} className="space-y-4">
               <div>
                 <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1">
-                  Название
+                  {t('Title', 'Название')}
                 </label>
                 <input
                   type="text"
                   required
-                  placeholder="Мой любимый микс"
+                  placeholder={t('My Favorite Mix', 'Мой любимый микс')}
                   value={newPlaylistName}
                   onChange={(e) => setNewPlaylistName(e.target.value)}
                   className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve"
@@ -416,11 +434,11 @@ export const App: React.FC = () => {
 
               <div>
                 <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1">
-                  Описание (необязательно)
+                  {t('Description (optional)', 'Описание (необязательно)')}
                 </label>
                 <textarea
                   rows={2}
-                  placeholder="Описание плейлиста..."
+                  placeholder={t('Playlist description...', 'Описание плейлиста...')}
                   value={newPlaylistDesc}
                   onChange={(e) => setNewPlaylistDesc(e.target.value)}
                   className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2 text-sm text-cat-text focus:outline-none focus:border-cat-mauve resize-none"
@@ -433,14 +451,14 @@ export const App: React.FC = () => {
                   onClick={() => setShowCreateModal(false)}
                   className="flex-1 py-2.5 rounded-2xl bg-cat-surface0 text-cat-text text-xs font-semibold hover:bg-cat-surface1"
                 >
-                  Отмена
+                  {t('Cancel', 'Отмена')}
                 </button>
                 <button
                   type="submit"
                   disabled={!newPlaylistName.trim()}
                   className="flex-1 py-2.5 rounded-2xl bg-cat-mauve text-cat-base text-xs font-bold hover:opacity-90 disabled:opacity-40"
                 >
-                  Создать
+                  {t('Create', 'Создать')}
                 </button>
               </div>
             </form>

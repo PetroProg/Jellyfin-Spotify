@@ -4,6 +4,7 @@ import { Track, SpotifySearchResult } from '../types';
 import { apiRequest } from '../api/client';
 import { toast } from '../store/toastStore';
 import { useOfflineStore } from '../store/offlineStore';
+import { useI18nStore, formatTrackCount } from '../store/i18nStore';
 
 interface PlaylistWithStatus {
   id: number;
@@ -30,6 +31,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   onUpdated,
   onSpotifyTrackDownloaded,
 }) => {
+  const { lang, t, td } = useI18nStore();
   const [activeTrack, setActiveTrack] = useState<Track | null>(track);
   const [playlists, setPlaylists] = useState<PlaylistWithStatus[]>([]);
   const [loading, setLoading] = useState(true);
@@ -67,6 +69,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   const handleToggle = async (playlist: PlaylistWithStatus) => {
     if (togglingId !== null) return;
     setTogglingId(playlist.id);
+    const displayPlaylistName = td(playlist.name);
 
     // 1. If already downloaded (either as local track or just finished downloading)
     if (activeTrack) {
@@ -99,7 +102,12 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
           // Auto-cache track if this playlist is downloaded on this device!
           if (useOfflineStore.getState().isDownloaded(playlist.id)) {
             useOfflineStore.getState().cacheTrack(activeTrack);
-            toast.success(`Трек добавлен в «${playlist.name}» и сохранен оффлайн`);
+            toast.success(
+              t(
+                `Track added to "${displayPlaylistName}" and saved offline`,
+                `Трек добавлен в «${displayPlaylistName}» и сохранен оффлайн`
+              )
+            );
           }
         }
         onUpdated?.();
@@ -143,13 +151,20 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
           // Auto-cache track if this playlist is downloaded on this device!
           if (useOfflineStore.getState().isDownloaded(playlist.id)) {
             useOfflineStore.getState().cacheTrack(res.track);
-            toast.success(`Трек добавлен в «${playlist.name}» и сохранен оффлайн`);
+            toast.success(
+              t(
+                `Track added to "${displayPlaylistName}" and saved offline`,
+                `Трек добавлен в «${displayPlaylistName}» и сохранен оффлайн`
+              )
+            );
           } else {
-            toast.success(`Трек добавлен в «${playlist.name}»`);
+            toast.success(
+              t(`Track added to "${displayPlaylistName}"`, `Трек добавлен в «${displayPlaylistName}»`)
+            );
           }
         }
       } catch (err: any) {
-        toast.error(err.message || 'Ошибка скачивания и добавления в плейлист');
+        toast.error(err.message || t('Error downloading and adding to playlist', 'Ошибка скачивания и добавления в плейлист'));
       } finally {
         setTogglingId(null);
       }
@@ -198,7 +213,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         }
       }
     } catch (err: any) {
-      toast.error(err.message || 'Ошибка создания плейлиста');
+      toast.error(err.message || t('Error creating playlist', 'Ошибка создания плейлиста'));
     } finally {
       setSavingNew(false);
     }
@@ -209,18 +224,13 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   const displayArtist = activeTrack?.artist || spotifyTrack?.artist || '';
   const displayTitle = activeTrack?.title || spotifyTrack?.title || '';
 
-  const filteredPlaylists = playlists.filter((p) =>
-    p.name.toLowerCase().includes(search.toLowerCase().trim())
-  );
+  const filteredPlaylists = playlists.filter((p) => {
+    const q = search.toLowerCase().trim();
+    return p.name.toLowerCase().includes(q) || td(p.name).toLowerCase().includes(q);
+  });
 
   const savedPlaylists = filteredPlaylists.filter((p) => p.has_track === 1);
   const otherPlaylists = filteredPlaylists.filter((p) => p.has_track === 0);
-
-  const formatCount = (cnt: number) => {
-    if (cnt % 10 === 1 && cnt % 100 !== 11) return `${cnt} трек`;
-    if ([2, 3, 4].includes(cnt % 10) && ![12, 13, 14].includes(cnt % 100)) return `${cnt} трека`;
-    return `${cnt} треков`;
-  };
 
   return (
     <div className="fixed inset-0 z-50 bg-cat-crust/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
@@ -228,13 +238,13 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-cat-surface0/60">
           <div>
-            <h3 className="font-bold text-base text-cat-text">Добавить в плейлист</h3>
+            <h3 className="font-bold text-base text-cat-text">{t('Add to Playlist', 'Добавить в плейлист')}</h3>
             <p className="text-xs text-cat-subtext0 truncate max-w-[240px]">
               {displayArtist} — {displayTitle}
             </p>
             {!activeTrack && spotifyTrack && (
               <span className="text-[10px] text-cat-mauve block mt-0.5 font-medium">
-                ⚡ Скачается автоматически при выборе
+                {t('⚡ Will download automatically when selected', '⚡ Скачается автоматически при выборе')}
               </span>
             )}
           </div>
@@ -253,7 +263,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Поиск плейлиста"
+            placeholder={t('Find a playlist', 'Поиск плейлиста')}
             className="w-full bg-cat-surface0/70 border border-cat-surface1/30 rounded-2xl pl-10 pr-3.5 py-2 text-xs text-cat-text placeholder-cat-subtext0 focus:outline-none focus:border-cat-mauve transition-colors"
           />
         </div>
@@ -267,7 +277,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                 autoFocus
                 value={newPlaylistName}
                 onChange={(e) => setNewPlaylistName(e.target.value)}
-                placeholder="Название нового плейлиста"
+                placeholder={t('New playlist name', 'Название нового плейлиста')}
                 className="flex-1 bg-cat-surface0 border border-cat-surface1/40 rounded-xl px-3 py-1.5 text-xs text-cat-text focus:outline-none focus:border-cat-mauve"
               />
               <button
@@ -275,14 +285,14 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                 disabled={savingNew || !newPlaylistName.trim()}
                 className="px-3 py-1.5 rounded-xl bg-cat-mauve text-cat-base text-xs font-bold hover:opacity-90 disabled:opacity-40"
               >
-                {savingNew ? '...' : 'Создать'}
+                {savingNew ? '...' : t('Create', 'Создать')}
               </button>
               <button
                 type="button"
                 onClick={() => setCreatingNew(false)}
                 className="px-2 py-1.5 text-xs text-cat-subtext0 hover:text-cat-text"
               >
-                Отмена
+                {t('Cancel', 'Отмена')}
               </button>
             </form>
           ) : (
@@ -291,7 +301,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
               className="flex items-center gap-2 text-xs font-semibold text-cat-text hover:text-cat-mauve transition-colors py-1.5 px-2 rounded-xl hover:bg-cat-surface0/40 w-full"
             >
               <Plus className="w-4 h-4 text-cat-mauve" />
-              <span>Создать плейлист</span>
+              <span>{t('New Playlist', 'Создать плейлист')}</span>
             </button>
           )}
         </div>
@@ -301,11 +311,11 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
           {loading ? (
             <div className="py-12 flex flex-col items-center justify-center gap-2 text-cat-subtext0 text-xs">
               <Loader2 className="w-5 h-5 animate-spin text-cat-mauve" />
-              <span>Загрузка плейлистов...</span>
+              <span>{t('Loading playlists...', 'Загрузка плейлистов...')}</span>
             </div>
           ) : filteredPlaylists.length === 0 ? (
             <div className="py-10 text-center text-xs text-cat-subtext0">
-              {search ? 'Плейлисты не найдены' : 'У вас пока нет созданных плейлистов'}
+              {search ? t('No playlists found', 'Плейлисты не найдены') : t('You have not created any playlists yet', 'У вас пока нет созданных плейлистов')}
             </div>
           ) : (
             <>
@@ -313,7 +323,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
               {savedPlaylists.length > 0 && (
                 <div>
                   <h4 className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider px-2 mb-1.5">
-                    Сохранено в плейлистах
+                    {t('Saved in', 'Сохранено в плейлистах')}
                   </h4>
                   <div className="space-y-1">
                     {savedPlaylists.map((p) => (
@@ -333,10 +343,10 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                           </div>
                           <div className="min-w-0 flex-1">
                             <p className="text-sm font-semibold text-cat-text truncate group-hover:text-cat-mauve transition-colors">
-                              {p.name}
+                              {td(p.name)}
                             </p>
                             <p className="text-[11px] text-cat-subtext0">
-                              {formatCount(p.track_count)}
+                              {formatTrackCount(p.track_count, lang)}
                             </p>
                           </div>
                         </div>
@@ -346,7 +356,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                             <div className="flex items-center gap-1.5 text-cat-mauve">
                               <Loader2 className="w-5 h-5 animate-spin" />
                               {!activeTrack && spotifyTrack && (
-                                <span className="text-[10px] font-semibold hidden xs:inline">Качается...</span>
+                                <span className="text-[10px] font-semibold hidden xs:inline">{t('Downloading...', 'Качается...')}</span>
                               )}
                             </div>
                           ) : (
@@ -364,7 +374,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                 <div>
                   {savedPlaylists.length > 0 && (
                     <h4 className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider px-2 mb-1.5 mt-3">
-                      Недавно обновлено
+                      {t('Recently Updated', 'Недавно обновлено')}
                     </h4>
                   )}
                   <div className="space-y-1">
@@ -385,10 +395,10 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                           </div>
                           <div className="min-w-0 flex-1">
                             <p className="text-sm font-semibold text-cat-text truncate group-hover:text-cat-mauve transition-colors">
-                              {p.name}
+                              {td(p.name)}
                             </p>
                             <p className="text-[11px] text-cat-subtext0">
-                              {formatCount(p.track_count)}
+                              {formatTrackCount(p.track_count, lang)}
                             </p>
                           </div>
                         </div>
@@ -398,7 +408,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                             <div className="flex items-center gap-1.5 text-cat-mauve">
                               <Loader2 className="w-5 h-5 animate-spin" />
                               {!activeTrack && spotifyTrack && (
-                                <span className="text-[10px] font-semibold hidden xs:inline">Качается...</span>
+                                <span className="text-[10px] font-semibold hidden xs:inline">{t('Downloading...', 'Качается...')}</span>
                               )}
                             </div>
                           ) : (
@@ -420,7 +430,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
             onClick={onClose}
             className="px-5 py-2 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-text text-xs font-bold transition-colors"
           >
-            Готово
+            {t('Done', 'Готово')}
           </button>
         </div>
       </div>

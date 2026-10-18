@@ -4,6 +4,7 @@ import { useAuthStore } from './authStore';
 import { usePlayerStore } from './playerStore';
 import { toast } from './toastStore';
 import { getToken } from '../api/client';
+import { tr } from './i18nStore';
 
 export interface ConnectedDevice {
   id: string;
@@ -55,26 +56,26 @@ function detectDevice(): { name: string; type: 'desktop' | 'mobile' | 'tablet' }
     const ua = navigator.userAgent || '';
 
     let type: 'desktop' | 'mobile' | 'tablet' = 'desktop';
-    let defaultName = 'Браузер';
+    let defaultName = tr('Web Browser', 'Браузер');
 
     if (/iPad|Tablet/i.test(ua)) {
       type = 'tablet';
-      defaultName = 'Планшет';
+      defaultName = tr('Tablet', 'Планшет');
     } else if (/iPhone/i.test(ua)) {
       type = 'mobile';
       defaultName = 'iPhone';
     } else if (/Android/i.test(ua)) {
       type = 'mobile';
-      defaultName = 'Телефон (Android)';
+      defaultName = tr('Phone (Android)', 'Телефон (Android)');
     } else if (/Macintosh|Mac OS X/i.test(ua)) {
       type = 'desktop';
       defaultName = 'MacBook';
     } else if (/Windows NT/i.test(ua)) {
       type = 'desktop';
-      defaultName = 'Компьютер (Windows)';
+      defaultName = tr('PC (Windows)', 'Компьютер (Windows)');
     } else if (/Linux/i.test(ua)) {
       type = 'desktop';
-      defaultName = 'Компьютер (Linux)';
+      defaultName = tr('PC (Linux)', 'Компьютер (Linux)');
     }
 
     return {
@@ -82,7 +83,7 @@ function detectDevice(): { name: string; type: 'desktop' | 'mobile' | 'tablet' }
       type,
     };
   } catch (_) {
-    return { name: 'Устройство', type: 'desktop' };
+    return { name: tr('Device', 'Устройство'), type: 'desktop' };
   }
 }
 
@@ -238,7 +239,9 @@ export const useSyncStore = create<SyncState>((set, get) => {
                     state.currentTime,
                     shouldPlay
                   );
-                  toast.success(`Звук переключен на «${get().deviceName}»`);
+                  toast.success(
+                    tr(`Audio switched to "${get().deviceName}"`, `Звук переключен на «${get().deviceName}»`)
+                  );
                 }
                 break;
               }

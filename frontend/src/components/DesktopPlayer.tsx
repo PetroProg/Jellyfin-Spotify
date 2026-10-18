@@ -6,16 +6,17 @@ import {
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { useSyncStore } from '../store/syncStore';
-import { apiRequest } from '../api/client';
 import { AddToPlaylistModal } from './AddToPlaylistModal';
 import { EqualizerModal } from './EqualizerModal';
 import { toast } from '../store/toastStore';
+import { useI18nStore } from '../store/i18nStore';
 
 interface DesktopPlayerProps {
   onToggleQueue?: () => void;
 }
 
 export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) => {
+  const { t } = useI18nStore();
   const {
     currentTrack,
     isPlaying,
@@ -76,9 +77,14 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
     try {
       const trackToBlacklist = currentTrack;
       await blacklistTrack(trackToBlacklist);
-      toast.info(`«${trackToBlacklist.title}» добавлена в «Никогда не включать» и удалена из плейлистов`);
+      toast.info(
+        t(
+          `"${trackToBlacklist.title}" added to "Never Play This" and removed from playlists`,
+          `«${trackToBlacklist.title}» добавлена в «Никогда не включать» и удалена из плейлистов`
+        )
+      );
     } catch (e: any) {
-      toast.error(e.message || 'Ошибка добавления в черный список');
+      toast.error(e.message || t('Error adding to blacklist', 'Ошибка добавления в черный список'));
     } finally {
       setBlacklisting(false);
     }
@@ -118,14 +124,14 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
         <div className="flex items-center gap-0.5 shrink-0">
           <button
             onClick={() => setIsAddToPlaylistOpen(true)}
-            title="Добавить в плейлист"
+            title={t('Add to Playlist', 'Добавить в плейлист')}
             className="p-1.5 rounded-full text-cat-subtext0 hover:text-cat-text transition-transform active:scale-125 cursor-pointer"
           >
             <FolderPlus className="w-5 h-5" />
           </button>
           <button
             onClick={handleToggleLike}
-            title={isLiked ? "Удалить из любимых" : "В любимые треки"}
+            title={isLiked ? t('Remove from Liked', 'Удалить из любимых') : t('Save to Liked Songs', 'В любимые треки')}
             className={`p-1.5 rounded-full transition-transform active:scale-125 cursor-pointer ${
               isLiked ? 'text-cat-red' : 'text-cat-subtext0 hover:text-cat-text'
             }`}
@@ -135,7 +141,7 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
           <button
             onClick={handleBlacklistCurrent}
             disabled={blacklisting}
-            title="Никогда не включать"
+            title={t('Never Play This', 'Никогда не включать')}
             className="p-1.5 rounded-full text-cat-subtext0 hover:text-cat-red transition-transform active:scale-125 cursor-pointer disabled:opacity-40"
           >
             <Ban className="w-5 h-5" />
@@ -148,7 +154,7 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
         <div className="flex items-center gap-4 mb-1.5">
           <button
             onClick={toggleShuffle}
-            title="Перемешать"
+            title={t('Shuffle', 'Перемешать')}
             className={`p-1.5 rounded-lg transition-colors ${
               shuffle ? 'text-cat-mauve' : 'text-cat-subtext0 hover:text-cat-text'
             }`}
@@ -179,7 +185,7 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
           </button>
           <button
             onClick={toggleRepeat}
-            title="Повтор"
+            title={t('Repeat', 'Повтор')}
             className={`p-1.5 rounded-lg transition-colors ${
               repeat !== 'off' ? 'text-cat-mauve' : 'text-cat-subtext0 hover:text-cat-text'
             }`}
@@ -207,10 +213,10 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
           <button
             onClick={() => setDevicePickerOpen(true)}
             className="mt-1 flex items-center gap-1.5 text-[11px] font-semibold text-cat-green hover:underline cursor-pointer"
-            title="Нажмите для смены устройства"
+            title={t('Click to switch device', 'Нажмите для смены устройства')}
           >
             <Radio className="w-3.5 h-3.5 animate-pulse" />
-            <span>Играет на: {activeDeviceName}</span>
+            <span>{t('Playing on:', 'Играет на:')} {activeDeviceName}</span>
           </button>
         )}
       </div>
@@ -219,7 +225,7 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
       <div className="flex items-center justify-end gap-3 w-1/4 min-w-[200px] text-cat-subtext0">
         <button
           onClick={toggleSmartShuffle}
-          title={smartShuffle ? 'Smart Shuffle активен' : 'Включить Smart Shuffle'}
+          title={smartShuffle ? t('Smart Shuffle active', 'Smart Shuffle активен') : t('Enable Smart Shuffle', 'Включить Smart Shuffle')}
           className={`p-1.5 rounded-lg transition-colors ${
             smartShuffle ? 'text-cat-mauve' : 'hover:text-cat-text'
           }`}
@@ -229,7 +235,7 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
 
         <button
           onClick={() => setEqualizerOpen(true)}
-          title="Студийный звук & Эквалайзер"
+          title={t('Studio Audio & Equalizer', 'Студийный звук & Эквалайзер')}
           className="p-1.5 rounded-lg hover:text-cat-mauve text-cat-subtext0 transition-colors cursor-pointer active:scale-95"
         >
           <SlidersHorizontal className="w-4 h-4" />
@@ -238,7 +244,7 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
         {/* Device Picker Button */}
         <button
           onClick={() => setDevicePickerOpen(true)}
-          title={!isLocalActive ? `Играет на: ${activeDeviceName}` : 'Подключенные устройства'}
+          title={!isLocalActive ? `${t('Playing on:', 'Играет на:')} ${activeDeviceName}` : t('Connected Devices', 'Подключенные устройства')}
           className={`p-1.5 rounded-lg transition-colors cursor-pointer active:scale-95 ${
             !isLocalActive ? 'text-cat-green bg-cat-green/15' : 'hover:text-cat-mauve text-cat-subtext0'
           }`}
@@ -249,7 +255,7 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
         {onToggleQueue && (
           <button
             onClick={onToggleQueue}
-            title="Очередь воспроизведения"
+            title={t('Play Queue', 'Очередь воспроизведения')}
             className="p-1.5 rounded-lg hover:text-cat-text transition-colors"
           >
             <ListMusic className="w-4 h-4" />
@@ -259,7 +265,7 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
         <div className="flex items-center gap-2">
           <button
             onClick={toggleMute}
-            title={volume === 0 ? 'Включить звук' : 'Без звука'}
+            title={volume === 0 ? t('Unmute', 'Включить звук') : t('Mute', 'Без звука')}
             className="hover:text-cat-text transition-colors p-0.5 rounded"
           >
             {volume === 0 ? <VolumeX className="w-4 h-4 text-cat-red" /> : <Volume2 className="w-4 h-4" />}

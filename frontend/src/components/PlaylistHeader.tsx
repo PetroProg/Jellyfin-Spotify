@@ -4,6 +4,7 @@ import { Playlist, Track } from '../types';
 import { useOfflineStore } from '../store/offlineStore';
 import { apiRequest } from '../api/client';
 import { toast, confirmDialog } from '../store/toastStore';
+import { useI18nStore, formatTrackCount } from '../store/i18nStore';
 
 interface PlaylistHeaderProps {
   playlist: Playlist;
@@ -26,6 +27,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   onRename,
   onDelete,
 }) => {
+  const { lang, t, td } = useI18nStore();
   const isDownloaded = useOfflineStore((s) => s.downloadedIds.includes(playlist.id));
   const offlineProgress = useOfflineStore((s) => s.progress[playlist.id]);
   const startDownload = useOfflineStore((s) => s.startDownload);
@@ -59,12 +61,12 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
 
     const trimmedName = renameName.trim();
     if (!trimmedName) {
-      toast.error('Название плейлиста не может быть пустым');
+      toast.error(t('Playlist name cannot be empty', 'Название плейлиста не может быть пустым'));
       return;
     }
 
     if (trimmedName.toLowerCase() === 'любимые треки' || trimmedName.toLowerCase() === 'liked songs') {
-      toast.error('Имя «Любимые треки» зарезервировано для системного раздела');
+      toast.error(t('The name "Liked Songs" is reserved for the system section', 'Имя «Любимые треки» зарезервировано для системного раздела'));
       return;
     }
 
@@ -82,9 +84,9 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
       playlist.description = renameDesc.trim();
       onRename?.(trimmedName, renameDesc.trim());
       setShowRenameModal(false);
-      toast.success('Плейлист переименован');
+      toast.success(t('Playlist renamed', 'Плейлист переименован'));
     } catch (err: any) {
-      toast.error(err.message || 'Ошибка переименования плейлиста');
+      toast.error(err.message || t('Error renaming playlist', 'Ошибка переименования плейлиста'));
     } finally {
       setSavingRename(false);
     }
@@ -93,11 +95,15 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
   const handleDeletePlaylist = async () => {
     if (deletingPlaylist) return;
 
+    const displayPlaylistName = td(playlist.name);
     const ok = await confirmDialog({
-      title: 'Удалить плейлист?',
-      message: `Вы уверены, что хотите безвозвратно удалить плейлист «${playlist.name}»? Это действие нельзя отменить.`,
-      confirmText: 'Удалить плейлист',
-      cancelText: 'Отмена',
+      title: t('Delete playlist?', 'Удалить плейлист?'),
+      message: t(
+        `Are you sure you want to permanently delete the playlist "${displayPlaylistName}"? This action cannot be undone.`,
+        `Вы уверены, что хотите безвозвратно удалить плейлист «${displayPlaylistName}»? Это действие нельзя отменить.`
+      ),
+      confirmText: t('Delete Playlist', 'Удалить плейлист'),
+      cancelText: t('Cancel', 'Отмена'),
       isDestructive: true
     });
     if (!ok) return;
@@ -110,10 +116,12 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
         } catch (_) {}
       }
       await apiRequest(`/playlists/${playlist.id}`, { method: 'DELETE' });
-      toast.success(`Плейлист «${playlist.name}» успешно удален`);
+      toast.success(
+        t(`Playlist "${displayPlaylistName}" deleted`, `Плейлист «${displayPlaylistName}» успешно удален`)
+      );
       onDelete?.();
     } catch (e: any) {
-      toast.error(e.message || 'Ошибка удаления плейлиста');
+      toast.error(e.message || t('Error deleting playlist', 'Ошибка удаления плейлиста'));
       setDeletingPlaylist(false);
     }
   };
@@ -123,7 +131,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
     if (!file) return;
 
     if (!file.type.startsWith('image/')) {
-      toast.warning('Пожалуйста, выберите файл изображения (JPG, PNG, WebP)');
+      toast.warning(t('Please select an image file (JPG, PNG, WebP)', 'Пожалуйста, выберите файл изображения (JPG, PNG, WebP)'));
       return;
     }
 
@@ -139,10 +147,10 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
         if (res.cover_url) {
           playlist.cover_url = res.cover_url;
           onCoverChange?.(res.cover_url);
-          toast.success('Обложка плейлиста обновлена!');
+          toast.success(t('Playlist cover updated!', 'Обложка плейлиста обновлена!'));
         }
       } catch (err: any) {
-        toast.error(err.message || 'Ошибка загрузки обложки');
+        toast.error(err.message || t('Error uploading cover', 'Ошибка загрузки обложки'));
       } finally {
         setUploadingCover(false);
       }
@@ -152,29 +160,43 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
 
   const handleToggleDownload = async () => {
     if (downloading) return;
+    const displayPlaylistName = td(playlist.name);
 
     if (isDownloaded) {
       const ok = await confirmDialog({
-        title: 'Удалить оффлайн-треки?',
-        message: `Вы уверены, что хотите удалить все скачанные треки плейлиста «${playlist.name}» из памяти устройства?`,
-        confirmText: 'Удалить',
-        cancelText: 'Отмена',
+        title: t('Remove offline tracks?', 'Удалить оффлайн-треки?'),
+        message: t(
+          `Are you sure you want to remove all downloaded tracks of "${displayPlaylistName}" from device storage?`,
+          `Вы уверены, что хотите удалить все скачанные треки плейлиста «${displayPlaylistName}» из памяти устройства?`
+        ),
+        confirmText: t('Remove', 'Удалить'),
+        cancelText: t('Cancel', 'Отмена'),
         isDestructive: true
       });
       if (!ok) return;
 
       try {
         await removeDownload(playlist.id, tracks);
-        toast.info(`Скачанные треки плейлиста «${playlist.name}» удалены из памяти`);
+        toast.info(
+          t(
+            `Downloaded tracks of "${displayPlaylistName}" removed from storage`,
+            `Скачанные треки плейлиста «${displayPlaylistName}» удалены из памяти`
+          )
+        );
       } catch (e: any) {
-        toast.error(e.message || 'Ошибка удаления из оффлайн');
+        toast.error(e.message || t('Error removing offline tracks', 'Ошибка удаления из оффлайн'));
       }
     } else {
       try {
         await startDownload(playlist.id, tracks, playlist);
-        toast.success(`Скачивание треков плейлиста «${playlist.name}» начато`);
+        toast.success(
+          t(
+            `Started downloading tracks of "${displayPlaylistName}"`,
+            `Скачивание треков плейлиста «${displayPlaylistName}» начато`
+          )
+        );
       } catch (e: any) {
-        toast.error(e.message || 'Ошибка сохранения оффлайн');
+        toast.error(e.message || t('Error saving offline', 'Ошибка сохранения оффлайн'));
       }
     }
   };
@@ -195,14 +217,14 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
           className={`absolute inset-0 bg-cat-crust/70 backdrop-blur-xs flex flex-col items-center justify-center gap-1.5 text-cat-text cursor-pointer transition-all duration-200 ${
             uploadingCover ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
           }`}
-          title="Сменить обложку плейлиста"
+          title={t('Change playlist cover', 'Сменить обложку плейлиста')}
         >
           {uploadingCover ? (
             <Loader2 className="w-7 h-7 text-cat-mauve animate-spin" />
           ) : (
             <>
               <Camera className="w-7 h-7 text-cat-mauve drop-shadow" />
-              <span className="text-xs font-bold drop-shadow">Сменить обложку</span>
+              <span className="text-xs font-bold drop-shadow">{t('Change cover', 'Сменить обложку')}</span>
             </>
           )}
         </label>
@@ -219,24 +241,27 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
       {/* Info & Action Buttons */}
       <div className="w-full max-w-full flex-1 text-center md:text-left min-w-0 px-2 sm:px-0">
         <span className="text-xs uppercase tracking-wider text-cat-subtext0 font-semibold block truncate">
-          {isDailyMix ? 'Персональный Плейлист дня' : 'Плейлист'}
+          {isDailyMix ? t('Personal Daily Mix', 'Персональный Плейлист дня') : t('Playlist', 'Плейлист')}
         </span>
         <h1 className="text-xl sm:text-2xl md:text-4xl font-extrabold text-cat-text mt-1 break-words line-clamp-2 md:line-clamp-none leading-tight">
-          {playlist.name}
+          {td(playlist.name)}
         </h1>
         {playlist.description && (
           <p className="text-xs sm:text-sm text-cat-subtext0 mt-1.5 line-clamp-3 md:line-clamp-none break-words">
-            {playlist.description}
+            {td(playlist.description)}
           </p>
         )}
         <div className="text-xs text-cat-subtext0 mt-2 flex items-center justify-center md:justify-start gap-2 flex-wrap">
           {activeJob && activeJob.status === 'downloading' ? (
             <span className="text-cat-mauve font-semibold flex items-center gap-1.5">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              Загружено {tracks.length} из {activeJob.total_tracks} треков
+              {t(
+                `Downloaded ${tracks.length} of ${activeJob.total_tracks} tracks`,
+                `Загружено ${tracks.length} из ${activeJob.total_tracks} треков`
+              )}
             </span>
           ) : (
-            <span>{tracks.length} треков</span>
+            <span>{formatTrackCount(tracks.length, lang)}</span>
           )}
         </div>
 
@@ -248,13 +273,13 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
             className="flex items-center gap-2 px-6 py-3 rounded-full bg-cat-mauve text-cat-base font-bold hover:opacity-95 active:scale-95 transition-all shadow-lg shadow-cat-mauve/20 disabled:opacity-40"
           >
             <Play className="w-5 h-5 fill-current" />
-            Слушать
+            {t('Play', 'Слушать')}
           </button>
 
           <button
             onClick={onShuffleAll}
             disabled={tracks.length === 0}
-            title="Перемешать"
+            title={t('Shuffle', 'Перемешать')}
             className="p-3 rounded-full bg-cat-surface0 hover:bg-cat-surface1 text-cat-text active:scale-95 transition-all disabled:opacity-40 cursor-pointer"
           >
             <Shuffle className="w-5 h-5" />
@@ -263,7 +288,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
           <button
             onClick={handleToggleDownload}
             disabled={tracks.length === 0 || downloading}
-            title={isDownloaded ? 'Удалить из оффлайн' : 'Скачать весь плейлист оффлайн'}
+            title={isDownloaded ? t('Remove from offline', 'Удалить из оффлайн') : t('Download entire playlist offline', 'Скачать весь плейлист оффлайн')}
             className={`flex items-center gap-1.5 p-3 rounded-full active:scale-95 transition-all disabled:opacity-40 cursor-pointer shrink-0 ${
               isDownloaded
                 ? 'bg-cat-green/20 text-cat-green border border-cat-green/30'
@@ -291,16 +316,18 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
                   const res = await apiRequest<{ id: number; name: string }>(`/daily-mixes/${playlist.id}/save`, {
                     method: 'POST',
                   });
-                  toast.success(`Сохранено в медиатеку как «${res.name}»`);
+                  toast.success(
+                    t(`Saved to library as "${td(res.name)}"`, `Сохранено в медиатеку как «${res.name}»`)
+                  );
                   onRename?.(res.name);
                 } catch (err: any) {
-                  toast.error(err.message || 'Ошибка сохранения микса');
+                  toast.error(err.message || t('Error saving mix', 'Ошибка сохранения микса'));
                 } finally {
                   setSavingMix(false);
                 }
               }}
               disabled={savingMix || tracks.length === 0}
-              title="Сохранить этот Микс дня как постоянный плейлист"
+              title={t('Save this Daily Mix as a permanent playlist', 'Сохранить этот Микс дня как постоянный плейлист')}
               className="flex items-center gap-1.5 px-4 py-3 rounded-full bg-cat-surface0 hover:bg-cat-surface1 text-cat-text text-xs font-semibold active:scale-95 transition-all disabled:opacity-40 cursor-pointer shrink-0"
             >
               {savingMix ? (
@@ -308,7 +335,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
               ) : (
                 <BookmarkPlus className="w-4 h-4 text-cat-mauve" />
               )}
-              <span>Сохранить в медиатеку</span>
+              <span>{t('Save to Library', 'Сохранить в медиатеку')}</span>
             </button>
           )}
 
@@ -320,7 +347,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
                 setRenameDesc(playlist.description || '');
                 setShowRenameModal(true);
               }}
-              title="Переименовать плейлист"
+              title={t('Rename playlist', 'Переименовать плейлист')}
               className="p-3 rounded-full bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-mauve active:scale-95 transition-all cursor-pointer shrink-0"
             >
               <Pencil className="w-5 h-5" />
@@ -332,7 +359,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
             <button
               onClick={handleDeletePlaylist}
               disabled={deletingPlaylist}
-              title="Удалить плейлист"
+              title={t('Delete playlist', 'Удалить плейлист')}
               className="p-3 rounded-full bg-cat-surface0 hover:bg-cat-red/20 text-cat-subtext0 hover:text-cat-red active:scale-95 transition-all disabled:opacity-40 cursor-pointer shrink-0"
             >
               {deletingPlaylist ? (
@@ -349,17 +376,17 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
       {showRenameModal && (
         <div className="fixed inset-0 z-50 bg-cat-crust/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-cat-mantle border border-cat-surface0/80 rounded-3xl p-6 max-w-sm w-full shadow-2xl animate-in zoom-in-95 duration-200">
-            <h3 className="font-bold text-lg text-cat-text mb-4">Переименовать плейлист</h3>
+            <h3 className="font-bold text-lg text-cat-text mb-4">{t('Rename Playlist', 'Переименовать плейлист')}</h3>
             <form onSubmit={handleRenameSubmit} className="space-y-4">
               <div>
                 <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1">
-                  Название
+                  {t('Name', 'Название')}
                 </label>
                 <input
                   type="text"
                   required
                   autoFocus
-                  placeholder="Новое название плейлиста"
+                  placeholder={t('New playlist name', 'Новое название плейлиста')}
                   value={renameName}
                   onChange={(e) => setRenameName(e.target.value)}
                   className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve"
@@ -368,11 +395,11 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
 
               <div>
                 <label className="text-xs font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1">
-                  Описание (необязательно)
+                  {t('Description (optional)', 'Описание (необязательно)')}
                 </label>
                 <textarea
                   rows={2}
-                  placeholder="Описание плейлиста..."
+                  placeholder={t('Playlist description...', 'Описание плейлиста...')}
                   value={renameDesc}
                   onChange={(e) => setRenameDesc(e.target.value)}
                   className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-2.5 text-sm text-cat-text focus:outline-none focus:border-cat-mauve resize-none"
@@ -386,7 +413,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
                   disabled={savingRename}
                   className="flex-1 py-2.5 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-sm font-semibold text-cat-subtext0 hover:text-cat-text transition-colors"
                 >
-                  Отмена
+                  {t('Cancel', 'Отмена')}
                 </button>
                 <button
                   type="submit"
@@ -394,7 +421,7 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
                   className="flex-1 py-2.5 rounded-2xl bg-cat-mauve hover:opacity-90 active:scale-95 text-sm font-bold text-cat-base transition-all flex items-center justify-center gap-2 disabled:opacity-50"
                 >
                   {savingRename && <Loader2 className="w-4 h-4 animate-spin" />}
-                  <span>Сохранить</span>
+                  <span>{t('Save', 'Сохранить')}</span>
                 </button>
               </div>
             </form>

@@ -1,3 +1,5 @@
+import { tr, td } from '../store/i18nStore';
+
 const API_BASE = '/api';
 
 export function getToken(): string | null {
@@ -27,7 +29,7 @@ export async function apiRequest<T = any>(endpoint: string, options: RequestInit
   }
 
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    const offlineErr: any = new Error('Отсутствует подключение к сети');
+    const offlineErr: any = new Error(tr('No network connection', 'Отсутствует подключение к сети'));
     offlineErr.isNetworkError = true;
     offlineErr.isOffline = true;
     throw offlineErr;
@@ -45,7 +47,11 @@ export async function apiRequest<T = any>(endpoint: string, options: RequestInit
       signal: options.signal || controller.signal,
     });
   } catch (netErr: any) {
-    const offlineErr: any = new Error(netErr.name === 'AbortError' ? 'Таймаут запроса к серверу' : (netErr.message || 'Ошибка сети'));
+    const offlineErr: any = new Error(
+      netErr.name === 'AbortError'
+        ? tr('Server request timed out', 'Таймаут запроса к серверу')
+        : netErr.message || tr('Network error', 'Ошибка сети')
+    );
     offlineErr.isNetworkError = true;
     offlineErr.isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
     throw offlineErr;
@@ -56,14 +62,15 @@ export async function apiRequest<T = any>(endpoint: string, options: RequestInit
   if (res.status === 401) {
     setToken(null);
     window.location.href = '/login';
-    const err: any = new Error('Сессия истекла, авторизуйтесь снова');
+    const err: any = new Error(tr('Session expired, please log in again', 'Сессия истекла, авторизуйтесь снова'));
     err.status = 401;
     throw err;
   }
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const error: any = new Error(data.error || `Ошибка сервера (${res.status})`);
+    const rawErr = data.error ? td(data.error) : tr(`Server error (${res.status})`, `Ошибка сервера (${res.status})`);
+    const error: any = new Error(rawErr);
     error.status = res.status;
     throw error;
   }

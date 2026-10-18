@@ -10,6 +10,7 @@ import { usePlayerStore } from '../store/playerStore';
 import { toast } from '../store/toastStore';
 import { useOfflineStore } from '../store/offlineStore';
 import { getOfflinePlaylistData, saveOfflinePlaylistData } from '../utils/offline';
+import { useI18nStore } from '../store/i18nStore';
 
 interface PlaylistViewProps {
   playlistId: number;
@@ -21,6 +22,7 @@ interface PlaylistViewProps {
 type SortField = 'position' | 'title' | 'artist' | 'album' | 'date' | 'duration';
 
 export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, onDeleted, onRenamed }) => {
+  const { t } = useI18nStore();
   const offlineData = getOfflinePlaylistData(Number(playlistId));
   const [playlist, setPlaylist] = useState<Playlist | null>(offlineData?.playlist || null);
   const [tracks, setTracks] = useState<Track[]>(offlineData?.tracks || []);
@@ -55,10 +57,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
     setResuming(true);
     try {
       await apiRequest(`/playlists/${playlistId}/resume`, { method: 'POST' });
-      toast.info('Возобновление загрузки начато');
+      toast.info(t('Download resumed', 'Возобновление загрузки начато'));
       await loadData();
     } catch (err: any) {
-      toast.error(err.message || 'Ошибка возобновления загрузки');
+      toast.error(err.message || t('Failed to resume download', 'Ошибка возобновления загрузки'));
     } finally {
       setResuming(false);
     }
@@ -143,9 +145,14 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
   const handleBlacklist = async (track: Track) => {
     try {
       await usePlayerStore.getState().blacklistTrack(track);
-      toast.info(`«${track.title}» добавлена в «Никогда не включать» и удалена из плейлистов`);
+      toast.info(
+        t(
+          `"${track.title}" added to "Never Play" and removed from playlists`,
+          `«${track.title}» добавлена в «Никогда не включать» и удалена из плейлистов`
+        )
+      );
     } catch (e: any) {
-      toast.error(e.message || 'Ошибка добавления в черный список');
+      toast.error(e.message || t('Failed to add to blacklist', 'Ошибка добавления в черный список'));
     }
   };
 
@@ -153,16 +160,16 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
     try {
       await apiRequest(`/playlists/${playlistId}/tracks/${track.id}`, { method: 'DELETE' });
       setTracks(prev => prev.filter(t => t.id !== track.id));
-      toast.success('Трек удален из плейлиста');
+      toast.success(t('Track removed from playlist', 'Трек удален из плейлиста'));
     } catch (e: any) {
-      toast.error(e.message || 'Ошибка удаления трека из плейлиста');
+      toast.error(e.message || t('Failed to remove track from playlist', 'Ошибка удаления трека из плейлиста'));
     }
   };
 
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center text-cat-subtext0">
-        Загрузка плейлиста...
+        {t('Loading playlist...', 'Загрузка плейлиста...')}
       </div>
     );
   }
@@ -170,7 +177,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
   if (!playlist) {
     return (
       <div className="flex-1 flex items-center justify-center text-cat-subtext0">
-        Плейлист не найден
+        {t('Playlist not found', 'Плейлист не найден')}
       </div>
     );
   }
@@ -185,10 +192,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
         <button
           onClick={onBack}
           className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-cat-surface0/80 hover:bg-cat-surface1 border border-cat-surface1/50 text-sm font-semibold text-cat-subtext0 hover:text-cat-text transition-all duration-200 mb-4 cursor-pointer active:scale-95 group shadow-sm w-fit"
-          title="Вернуться назад"
+          title={t('Go back', 'Вернуться назад')}
         >
           <ArrowLeft className="w-4 h-4 text-cat-mauve transition-transform group-hover:-translate-x-1" />
-          <span>Назад</span>
+          <span>{t('Back', 'Назад')}</span>
         </button>
       )}
 
@@ -223,13 +230,18 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-bold text-cat-text truncate">
                   {activeJob.status === 'downloading'
-                    ? 'Идет фоновая загрузка треков в высоком качестве'
-                    : 'Загрузка плейлиста была приостановлена'}
+                    ? t('Downloading tracks in high quality in the background', 'Идет фоновая загрузка треков в высоком качестве')
+                    : t('Playlist download was paused', 'Загрузка плейлиста была приостановлена')}
                 </p>
                 <p className="text-[11px] text-cat-subtext0 truncate">
                   {activeJob.status === 'downloading'
-                    ? (activeJob.current_track ? `Качается: ${activeJob.current_track}` : 'Поиск и загрузка аудио...')
-                    : `Скачано ${tracks.length} из ${activeJob.total_tracks} треков`}
+                    ? activeJob.current_track
+                      ? t(`Downloading: ${activeJob.current_track}`, `Качается: ${activeJob.current_track}`)
+                      : t('Searching and downloading audio...', 'Поиск и загрузка аудио...')
+                    : t(
+                        `Downloaded ${tracks.length} of ${activeJob.total_tracks} tracks`,
+                        `Скачано ${tracks.length} из ${activeJob.total_tracks} треков`
+                      )}
                 </p>
               </div>
             </div>
@@ -240,11 +252,13 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
               <button
                 onClick={handleResume}
                 disabled={resuming}
-                title="Возобновить / проверить загрузку"
+                title={t('Resume / verify download', 'Возобновить / проверить загрузку')}
                 className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cat-surface0 hover:bg-cat-surface1 text-xs text-cat-subtext0 hover:text-cat-text transition-colors disabled:opacity-50"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${resuming ? 'animate-spin text-cat-mauve' : ''}`} />
-                <span className="hidden sm:inline">{resuming ? 'Запуск...' : 'Возобновить'}</span>
+                <span className="hidden sm:inline">
+                  {resuming ? t('Starting...', 'Запуск...') : t('Resume', 'Возобновить')}
+                </span>
               </button>
             </div>
           </div>
@@ -269,7 +283,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
             onClick={() => handleSort('title')}
             className="flex items-center gap-1 hover:text-cat-text transition-colors truncate"
           >
-            Название <ArrowUpDown className="w-3 h-3 shrink-0" />
+            {t('Title', 'Название')} <ArrowUpDown className="w-3 h-3 shrink-0" />
           </button>
         </div>
 
@@ -279,7 +293,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
             onClick={() => handleSort('artist')}
             className="flex items-center gap-1 hover:text-cat-text transition-colors"
           >
-            Исполнитель <ArrowUpDown className="w-3 h-3" />
+            {t('Artist', 'Исполнитель')} <ArrowUpDown className="w-3 h-3" />
           </button>
         </div>
 
@@ -289,7 +303,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
             onClick={() => handleSort('album')}
             className="flex items-center gap-1 hover:text-cat-text transition-colors"
           >
-            Альбом <ArrowUpDown className="w-3 h-3" />
+            {t('Album', 'Альбом')} <ArrowUpDown className="w-3 h-3" />
           </button>
         </div>
 
@@ -299,7 +313,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
             onClick={() => handleSort('date')}
             className="flex items-center gap-1 hover:text-cat-text transition-colors"
           >
-            Дата <ArrowUpDown className="w-3 h-3" />
+            {t('Date', 'Дата')} <ArrowUpDown className="w-3 h-3" />
           </button>
         </div>
 
@@ -309,7 +323,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
             onClick={() => handleSort('duration')}
             className="flex items-center gap-1 hover:text-cat-text transition-colors"
           >
-            Время <ArrowUpDown className="w-3 h-3 shrink-0" />
+            {t('Time', 'Время')} <ArrowUpDown className="w-3 h-3 shrink-0" />
           </button>
           <span className="w-7 shrink-0" />
         </div>
@@ -322,11 +336,18 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
             {activeJob && activeJob.status === 'downloading' ? (
               <div className="flex flex-col items-center justify-center gap-3">
                 <Loader2 className="w-6 h-6 animate-spin text-cat-mauve" />
-                <p className="font-semibold text-cat-text">Идет загрузка первых треков из Spotify...</p>
-                <p className="text-xs text-cat-subtext0">Они появятся в списке автоматически по мере скачивания</p>
+                <p className="font-semibold text-cat-text">
+                  {t('Downloading the first tracks from Spotify...', 'Идет загрузка первых треков из Spotify...')}
+                </p>
+                <p className="text-xs text-cat-subtext0">
+                  {t(
+                    'They will appear in the list automatically as they finish downloading',
+                    'Они появятся в списке автоматически по мере скачивания'
+                  )}
+                </p>
               </div>
             ) : (
-              'В этом плейлисте пока нет треков'
+              t('No tracks in this playlist yet', 'В этом плейлисте пока нет треков')
             )}
           </div>
         ) : (
@@ -370,8 +391,8 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
       {showScrollTop && (
         <button
           onClick={scrollToTop}
-          title="Наверх"
-          aria-label="Прокрутить наверх"
+          title={t('Back to top', 'Наверх')}
+          aria-label={t('Scroll to top', 'Прокрутить наверх')}
           className="fixed bottom-36 md:bottom-28 right-5 md:right-8 z-40 p-3.5 rounded-full bg-cat-mauve text-cat-base shadow-2xl hover:scale-110 active:scale-95 transition-all duration-200 cursor-pointer flex items-center justify-center border-2 border-cat-base animate-in fade-in zoom-in-75"
         >
           <ChevronUp className="w-5 h-5 stroke-[2.5]" />

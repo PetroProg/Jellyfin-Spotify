@@ -9,12 +9,14 @@ import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { usePlayerStore } from '../store/playerStore';
 import { toast, confirmDialog } from '../store/toastStore';
+import { useI18nStore, formatTrackCount } from '../store/i18nStore';
 
 interface LikedSongsProps {
   onBack?: () => void;
 }
 
 export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
+  const { lang, t } = useI18nStore();
   const LIKED_PLAYLIST_ID = -1;
   const CACHED_LIKED_TRACKS_KEY = 'jellyfy_cached_liked_tracks';
 
@@ -137,11 +139,17 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
     setSyncingSpotify(true);
     try {
       const res = await apiRequest<any>('/spotify/import-liked', { method: 'POST' });
-      toast.success(res.message || 'Синхронизация любимых треков начата. Все треки на сайте сохранены.');
+      toast.success(
+        res.message ||
+          t(
+            'Started syncing Liked Songs. All your existing tracks on the site are preserved.',
+            'Синхронизация любимых треков начата. Все треки на сайте сохранены.'
+          )
+      );
       pollJobs();
       loadLikes();
     } catch (err: any) {
-      toast.error(err.message || 'Ошибка синхронизации со Spotify');
+      toast.error(err.message || t('Failed to sync with Spotify', 'Ошибка синхронизации со Spotify'));
     } finally {
       setSyncingSpotify(false);
     }
@@ -168,9 +176,14 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
   const handleBlacklist = async (track: Track) => {
     try {
       await usePlayerStore.getState().blacklistTrack(track);
-      toast.info(`«${track.title}» добавлена в «Никогда не включать» и удалена из плейлистов`);
+      toast.info(
+        t(
+          `"${track.title}" added to "Never Play" and removed from playlists`,
+          `«${track.title}» добавлена в «Никогда не включать» и удалена из плейлистов`
+        )
+      );
     } catch (e: any) {
-      toast.error(e.message || 'Ошибка добавления в черный список');
+      toast.error(e.message || t('Failed to add to blacklist', 'Ошибка добавления в черный список'));
     }
   };
 
@@ -179,19 +192,22 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
 
     if (isDownloaded) {
       const ok = await confirmDialog({
-        title: 'Удалить любимые треки?',
-        message: 'Вы уверены, что хотите удалить все скачанные любимые треки из памяти устройства?',
-        confirmText: 'Удалить',
-        cancelText: 'Отмена',
+        title: t('Remove offline Liked Songs?', 'Удалить любимые треки?'),
+        message: t(
+          'Are you sure you want to remove all downloaded Liked Songs from this device?',
+          'Вы уверены, что хотите удалить все скачанные любимые треки из памяти устройства?'
+        ),
+        confirmText: t('Remove', 'Удалить'),
+        cancelText: t('Cancel', 'Отмена'),
         isDestructive: true
       });
       if (!ok) return;
 
       try {
         await removeDownload(LIKED_PLAYLIST_ID, tracks);
-        toast.info('Скачанные любимые треки удалены из памяти');
+        toast.info(t('Downloaded Liked Songs removed from device memory', 'Скачанные любимые треки удалены из памяти'));
       } catch (e: any) {
-        toast.error(e.message || 'Ошибка удаления из оффлайн');
+        toast.error(e.message || t('Failed to remove offline cache', 'Ошибка удаления из оффлайн'));
       }
     } else {
       try {
@@ -203,9 +219,9 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
           track_count: tracks.length,
         };
         await startDownload(LIKED_PLAYLIST_ID, tracks, likedPl);
-        toast.success('Скачивание любимых треков начато');
+        toast.success(t('Started downloading Liked Songs for offline', 'Скачивание любимых треков начато'));
       } catch (e: any) {
-        toast.error(e.message || 'Ошибка сохранения оффлайн');
+        toast.error(e.message || t('Failed to save offline', 'Ошибка сохранения оффлайн'));
       }
     }
   };
@@ -220,10 +236,10 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
         <button
           onClick={onBack}
           className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-cat-surface0/80 hover:bg-cat-surface1 border border-cat-surface1/50 text-sm font-semibold text-cat-subtext0 hover:text-cat-text transition-all duration-200 mb-4 cursor-pointer active:scale-95 group shadow-sm w-fit"
-          title="Вернуться назад"
+          title={t('Go back', 'Вернуться назад')}
         >
           <ArrowLeft className="w-4 h-4 text-cat-mauve transition-transform group-hover:-translate-x-1" />
-          <span>Назад</span>
+          <span>{t('Back', 'Назад')}</span>
         </button>
       )}
 
@@ -233,9 +249,13 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
           <Heart className="w-14 h-14 fill-current" />
         </div>
         <div className="w-full max-w-full flex-1 text-center sm:text-left min-w-0 px-2 sm:px-0">
-          <span className="text-xs uppercase tracking-wider text-cat-subtext0 font-semibold block truncate">Плейлист</span>
-          <h1 className="text-xl sm:text-2xl md:text-4xl font-extrabold text-cat-text mt-1 break-words line-clamp-2 sm:line-clamp-none leading-tight">Любимые треки</h1>
-          <p className="text-xs text-cat-subtext0 mt-2">{tracks.length} треков</p>
+          <span className="text-xs uppercase tracking-wider text-cat-subtext0 font-semibold block truncate">
+            {t('Playlist', 'Плейлист')}
+          </span>
+          <h1 className="text-xl sm:text-2xl md:text-4xl font-extrabold text-cat-text mt-1 break-words line-clamp-2 sm:line-clamp-none leading-tight">
+            {t('Liked Songs', 'Любимые треки')}
+          </h1>
+          <p className="text-xs text-cat-subtext0 mt-2">{formatTrackCount(tracks.length, lang)}</p>
           <div className="flex items-center justify-center sm:justify-start gap-3 mt-4 flex-wrap w-full max-w-full">
             <button
               onClick={() => tracks.length > 0 && playTrack(tracks[0], tracks, 0)}
@@ -243,7 +263,7 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
               className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-cat-mauve text-cat-base font-bold hover:opacity-95 active:scale-95 transition-all disabled:opacity-40"
             >
               <Play className="w-4 h-4 fill-current" />
-              Слушать
+              {t('Play', 'Слушать')}
             </button>
             <button
               onClick={() => {
@@ -252,7 +272,7 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
                 }
               }}
               disabled={tracks.length === 0}
-              title="Перемешать"
+              title={t('Shuffle', 'Перемешать')}
               className="p-2.5 rounded-full bg-cat-surface0 hover:bg-cat-surface1 text-cat-text active:scale-95 transition-all disabled:opacity-40 cursor-pointer"
             >
               <Shuffle className="w-4 h-4" />
@@ -261,7 +281,11 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
             <button
               onClick={handleToggleDownload}
               disabled={tracks.length === 0 || downloading}
-              title={isDownloaded ? 'Удалить из оффлайн' : 'Скачать все любимые треки оффлайн'}
+              title={
+                isDownloaded
+                  ? t('Remove from offline', 'Удалить из оффлайн')
+                  : t('Download all Liked Songs for offline', 'Скачать все любимые треки оффлайн')
+              }
               className={`flex items-center gap-1.5 p-2.5 rounded-full active:scale-95 transition-all disabled:opacity-40 cursor-pointer shrink-0 ${
                 isDownloaded
                   ? 'bg-cat-green/20 text-cat-green border border-cat-green/30'
@@ -283,18 +307,21 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
             <button
               onClick={handleSyncSpotify}
               disabled={Boolean(syncingSpotify || (activeJob && (activeJob.status === 'downloading' || activeJob.status === 'pending')))}
-              title="Синхронизировать со Spotify: догрузит треки из аккаунта Spotify без удаления треков с сайта"
+              title={t(
+                'Sync with Spotify: downloads missing tracks from your Spotify account without deleting any tracks on the site',
+                'Синхронизировать со Spotify: догрузит треки из аккаунта Spotify без удаления треков с сайта'
+              )}
               className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-full bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-mauve active:scale-95 transition-all text-xs font-semibold disabled:opacity-50 cursor-pointer shrink-0"
             >
               {syncingSpotify || (activeJob && (activeJob.status === 'downloading' || activeJob.status === 'pending')) ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin text-cat-mauve" />
-                  <span className="hidden sm:inline">Синхронизация...</span>
+                  <span className="hidden sm:inline">{t('Syncing...', 'Синхронизация...')}</span>
                 </>
               ) : (
                 <>
                   <RefreshCw className="w-4 h-4 text-cat-mauve" />
-                  <span className="hidden sm:inline">Синхронизировать Spotify</span>
+                  <span className="hidden sm:inline">{t('Sync Spotify', 'Синхронизировать Spotify')}</span>
                 </>
               )}
             </button>
@@ -310,9 +337,13 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
               <Loader2 className="w-5 h-5 animate-spin" />
             </div>
             <div className="min-w-0">
-              <h4 className="text-sm font-bold text-cat-text">Синхронизация: догрузка новых любимых треков</h4>
+              <h4 className="text-sm font-bold text-cat-text">
+                {t('Syncing: downloading new Liked Songs', 'Синхронизация: догрузка новых любимых треков')}
+              </h4>
               <p className="text-xs text-cat-subtext0 truncate max-w-[240px] sm:max-w-md">
-                {activeJob.current_track ? `Скачивается: ${activeJob.current_track}` : 'Подготовка треков...'}
+                {activeJob.current_track
+                  ? t(`Downloading: ${activeJob.current_track}`, `Скачивается: ${activeJob.current_track}`)
+                  : t('Preparing tracks...', 'Подготовка треков...')}
               </p>
             </div>
           </div>
@@ -336,19 +367,19 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       <div className="border-b border-cat-surface0/60 pb-2 mb-2 flex items-center justify-between text-xs font-semibold text-cat-subtext0 px-2 sm:px-3 w-full max-w-full">
         <div className="flex items-center gap-3 sm:gap-4 flex-1 md:w-2/5 md:flex-initial min-w-0">
           <span className="w-6 text-center shrink-0">#</span>
-          <span className="truncate">Название</span>
+          <span className="truncate">{t('Title', 'Название')}</span>
         </div>
         <div className="hidden md:flex items-center w-1/5 pr-3">
-          <span>Исполнитель</span>
+          <span>{t('Artist', 'Исполнитель')}</span>
         </div>
         <div className="hidden lg:flex items-center w-1/5 pr-3">
-          <span>Альбом</span>
+          <span>{t('Album', 'Альбом')}</span>
         </div>
         <div className="hidden xl:flex items-center w-28 pr-3">
-          <span>Дата</span>
+          <span>{t('Date', 'Дата')}</span>
         </div>
         <div className="flex items-center gap-3 sm:gap-6 shrink-0">
-          <span>Время</span>
+          <span>{t('Time', 'Время')}</span>
           <span className="w-7 shrink-0" />
         </div>
       </div>
@@ -356,9 +387,13 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       {/* Tracklist */}
       <div className="space-y-0.5">
         {loading ? (
-          <div className="py-12 text-center text-cat-subtext0 text-sm">Загрузка любимых треков...</div>
+          <div className="py-12 text-center text-cat-subtext0 text-sm">
+            {t('Loading Liked Songs...', 'Загрузка любимых треков...')}
+          </div>
         ) : tracks.length === 0 ? (
-          <div className="py-12 text-center text-cat-subtext0 text-sm">У вас пока нет любимых треков</div>
+          <div className="py-12 text-center text-cat-subtext0 text-sm">
+            {t('You do not have any Liked Songs yet', 'У вас пока нет любимых треков')}
+          </div>
         ) : (
           tracks.map((track, i) => (
             <TrackRow
@@ -396,8 +431,8 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       {showScrollTop && (
         <button
           onClick={scrollToTop}
-          title="Наверх"
-          aria-label="Прокрутить наверх"
+          title={t('Back to top', 'Наверх')}
+          aria-label={t('Scroll to top', 'Прокрутить наверх')}
           className="fixed bottom-36 md:bottom-28 right-5 md:right-8 z-40 p-3.5 rounded-full bg-cat-mauve text-cat-base shadow-2xl hover:scale-110 active:scale-95 transition-all duration-200 cursor-pointer flex items-center justify-center border-2 border-cat-base animate-in fade-in zoom-in-75"
         >
           <ChevronUp className="w-5 h-5 stroke-[2.5]" />

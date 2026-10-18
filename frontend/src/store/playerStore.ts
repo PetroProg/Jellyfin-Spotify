@@ -3,19 +3,20 @@ import { Track, RepeatMode } from '../types';
 import { apiRequest } from '../api/client';
 import { useSyncStore } from './syncStore';
 import { toast } from './toastStore';
+import { tr } from './i18nStore';
 import { useOfflineStore } from './offlineStore';
 import { getCachedTrackUrl, isTrackCached, cacheTrackOffline, saveOfflinePlaylistData, getSynchronousBlobUrl } from '../utils/offline';
 
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
-export const EQ_PRESETS: Record<string, { label: string; bands: number[] }> = {
-  flat: { label: 'Оригинал (Flat)', bands: [0, 0, 0, 0, 0] },
-  bass: { label: 'Усиление басов', bands: [6, 4, 1, 0, 0] },
-  rock: { label: 'Рок', bands: [5, 2, -1, 3, 5] },
-  pop: { label: 'Поп', bands: [-1, 2, 4, 3, 1] },
-  vocal: { label: 'Чистый вокал', bands: [-2, 0, 5, 4, 2] },
-  electronic: { label: 'Электроника', bands: [6, 4, -1, 3, 6] },
-  hiphop: { label: 'Хип-хоп', bands: [7, 4, 0, 2, 3] },
+export const EQ_PRESETS: Record<string, { label: string; labelEn: string; bands: number[] }> = {
+  flat: { label: 'Оригинал (Flat)', labelEn: 'Original (Flat)', bands: [0, 0, 0, 0, 0] },
+  bass: { label: 'Усиление басов', labelEn: 'Bass Boost', bands: [6, 4, 1, 0, 0] },
+  rock: { label: 'Рок', labelEn: 'Rock', bands: [5, 2, -1, 3, 5] },
+  pop: { label: 'Поп', labelEn: 'Pop', bands: [-1, 2, 4, 3, 1] },
+  vocal: { label: 'Чистый вокал', labelEn: 'Clean Vocal', bands: [-2, 0, 5, 4, 2] },
+  electronic: { label: 'Электроника', labelEn: 'Electronic', bands: [6, 4, -1, 3, 6] },
+  hiphop: { label: 'Хип-хоп', labelEn: 'Hip-Hop', bands: [7, 4, 0, 2, 3] },
 };
 
 interface PlayerState {
@@ -553,7 +554,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         playPromise.catch((err) => {
           console.warn('[Audio play interrupted / autoplay]:', err);
           if (err.name === 'NotAllowedError' && typeof document !== 'undefined' && document.visibilityState === 'visible') {
-            toast.info('Нажмите в любом месте для включения звука на этом устройстве');
+            toast.info(tr('Click anywhere to enable audio on this device', 'Нажмите в любом месте для включения звука на этом устройстве'));
           }
         });
       }
@@ -625,7 +626,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           p.catch((err) => {
             console.warn('[Audio play interrupted / autoplay policy]:', err);
             if (err.name === 'NotAllowedError' && typeof document !== 'undefined' && document.visibilityState === 'visible') {
-              toast.info('Нажмите в любом месте для включения звука на этом устройстве');
+              toast.info(tr('Click anywhere to enable audio on this device', 'Нажмите в любом месте для включения звука на этом устройстве'));
             }
           });
         }

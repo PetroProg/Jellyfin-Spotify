@@ -6,12 +6,13 @@ import {
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { useSyncStore } from '../store/syncStore';
-import { apiRequest } from '../api/client';
 import { AddToPlaylistModal } from './AddToPlaylistModal';
 import { EqualizerModal } from './EqualizerModal';
 import { toast } from '../store/toastStore';
+import { useI18nStore } from '../store/i18nStore';
 
 export const FullPlayer: React.FC = () => {
+  const { t } = useI18nStore();
   const {
     currentTrack,
     isPlaying,
@@ -62,9 +63,14 @@ export const FullPlayer: React.FC = () => {
     try {
       const trackToBlacklist = currentTrack;
       await blacklistTrack(trackToBlacklist);
-      toast.info(`«${trackToBlacklist.title}» добавлена в «Никогда не включать» и удалена из плейлистов`);
+      toast.info(
+        t(
+          `"${trackToBlacklist.title}" added to "Never Play This" and removed from playlists`,
+          `«${trackToBlacklist.title}» добавлена в «Никогда не включать» и удалена из плейлистов`
+        )
+      );
     } catch (e: any) {
-      toast.error(e.message || 'Ошибка добавления в черный список');
+      toast.error(e.message || t('Error adding to blacklist', 'Ошибка добавления в черный список'));
     } finally {
       setBlacklisting(false);
     }
@@ -106,23 +112,23 @@ export const FullPlayer: React.FC = () => {
         </button>
         <div className="text-center">
           <span className="text-[11px] uppercase tracking-wider text-cat-subtext0 font-semibold block">
-            Сейчас играет
+            {t('Now Playing', 'Сейчас играет')}
           </span>
           <span className="text-xs text-cat-text font-medium truncate max-w-[200px] block">
-            {currentTrack.album || 'Из медиатеки'}
+            {currentTrack.album || t('From Library', 'Из медиатеки')}
           </span>
         </div>
         <div className="flex items-center gap-1 -mr-2">
           <button
             onClick={() => setEqualizerOpen(true)}
-            title="Студийный звук & Эквалайзер"
+            title={t('Studio Audio & Equalizer', 'Студийный звук & Эквалайзер')}
             className="p-2 text-cat-subtext0 hover:text-cat-mauve active:scale-95 transition-all cursor-pointer"
           >
             <SlidersHorizontal className="w-5 h-5" />
           </button>
           <button
             onClick={toggleSmartShuffle}
-            title="Smart Shuffle (Умные рекомендации)"
+            title={t('Smart Shuffle (Smart Recommendations)', 'Smart Shuffle (Умные рекомендации)')}
             className={`p-2 rounded-xl transition-all ${
               smartShuffle ? 'text-cat-mauve' : 'text-cat-subtext0/50'
             }`}
@@ -156,14 +162,14 @@ export const FullPlayer: React.FC = () => {
         <div className="flex items-center gap-1 shrink-0">
           <button
             onClick={() => setIsAddToPlaylistOpen(true)}
-            title="Добавить в плейлист"
+            title={t('Add to Playlist', 'Добавить в плейлист')}
             className="p-2 rounded-full text-cat-subtext0 hover:text-cat-text transition-transform active:scale-125"
           >
             <FolderPlus className="w-7 h-7" />
           </button>
           <button
             onClick={handleToggleLike}
-            title={isLiked ? "Удалить из любимых" : "В любимые треки"}
+            title={isLiked ? t('Remove from Liked', 'Удалить из любимых') : t('Save to Liked Songs', 'В любимые треки')}
             className={`p-2 rounded-full transition-transform active:scale-125 ${
               isLiked ? 'text-cat-red' : 'text-cat-subtext0 hover:text-cat-text'
             }`}
@@ -173,7 +179,7 @@ export const FullPlayer: React.FC = () => {
           <button
             onClick={handleBlacklistCurrent}
             disabled={blacklisting}
-            title="Никогда не включать"
+            title={t('Never Play This', 'Никогда не включать')}
             className="p-2 rounded-full text-cat-subtext0 hover:text-cat-red transition-transform active:scale-125 disabled:opacity-40"
           >
             <Ban className="w-7 h-7" />
@@ -253,7 +259,7 @@ export const FullPlayer: React.FC = () => {
         >
           <Radio className={`w-4 h-4 ${!isLocalActive ? 'animate-pulse text-cat-green' : 'text-cat-subtext0'}`} />
           <span className="truncate max-w-[200px]">
-            {isLocalActive ? 'Слушать на этом устройстве' : `Играет на: ${activeDeviceName}`}
+            {isLocalActive ? t('Listening on this device', 'Слушать на этом устройстве') : `${t('Playing on:', 'Играет на:')} ${activeDeviceName}`}
           </span>
         </button>
 
@@ -261,7 +267,7 @@ export const FullPlayer: React.FC = () => {
           onClick={() => setDevicePickerOpen(true)}
           className="text-xs text-cat-mauve font-bold hover:underline shrink-0"
         >
-          Устройства
+          {t('Devices', 'Устройства')}
         </button>
       </div>
 

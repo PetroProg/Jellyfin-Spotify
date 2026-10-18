@@ -1,5 +1,6 @@
 import React from 'react';
 import { Home, Search, Heart, Settings } from 'lucide-react';
+import { useI18nStore } from '../store/i18nStore';
 
 interface BottomNavProps {
   currentTab: string;
@@ -12,11 +13,13 @@ export const BottomNav: React.FC<BottomNavProps> = ({
   setCurrentTab,
   onClearSelectedPlaylist,
 }) => {
+  const { t } = useI18nStore();
+
   const tabs = [
-    { id: 'home', label: 'Главная', icon: Home },
-    { id: 'search', label: 'Поиск', icon: Search },
-    { id: 'liked', label: 'Любимые', icon: Heart },
-    { id: 'settings', label: 'Настройки', icon: Settings },
+    { id: 'home', label: t('Home', 'Главная'), icon: Home },
+    { id: 'search', label: t('Search', 'Поиск'), icon: Search },
+    { id: 'liked', label: t('Liked', 'Любимые'), icon: Heart },
+    { id: 'settings', label: t('Settings', 'Настройки'), icon: Settings },
   ];
 
   return (

@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 import { 
-  X, Laptop, Smartphone, Tablet, Radio, Volume2, Check, 
-  Pencil, Sparkles, CheckCircle2, ArrowRightLeft, Loader2
+  X, Laptop, Smartphone, Tablet, Radio, Volume2, 
+  Pencil, ArrowRightLeft, Loader2
 } from 'lucide-react';
-import { useSyncStore, ConnectedDevice } from '../store/syncStore';
+import { useSyncStore } from '../store/syncStore';
+import { useI18nStore } from '../store/i18nStore';
 
 export const DevicePickerModal: React.FC = () => {
+  const { t } = useI18nStore();
   const { 
     isDevicePickerOpen, 
     setDevicePickerOpen, 
@@ -67,10 +69,12 @@ export const DevicePickerModal: React.FC = () => {
             </div>
             <div>
               <h3 className="text-base font-bold text-cat-text leading-snug">
-                Подключенные устройства
+                {t('Connected Devices', 'Подключенные устройства')}
               </h3>
               <p className="text-xs text-cat-subtext0">
-                {activeDeviceName ? `Сейчас играет на: ${activeDeviceName}` : 'Выберите устройство вывода звука'}
+                {activeDeviceName
+                  ? `${t('Currently playing on:', 'Сейчас играет на:')} ${activeDeviceName}`
+                  : t('Select audio output device', 'Выберите устройство вывода звука')}
               </p>
             </div>
           </div>
@@ -86,7 +90,7 @@ export const DevicePickerModal: React.FC = () => {
         <div className="mb-4 p-3 rounded-2xl bg-cat-surface0/50 border border-cat-surface1/30 flex items-center justify-between">
           <div className="min-w-0 flex-1 pr-2">
             <span className="text-[10px] uppercase font-bold text-cat-subtext0 tracking-wider block">
-              Имя этого устройства
+              {t('This Device Name', 'Имя этого устройства')}
             </span>
             {editingName ? (
               <form onSubmit={handleSaveName} className="flex items-center gap-2 mt-1">
@@ -113,7 +117,7 @@ export const DevicePickerModal: React.FC = () => {
                     setEditingName(true);
                   }}
                   className="p-1 text-cat-subtext0 hover:text-cat-mauve transition-colors"
-                  title="Изменить имя устройства"
+                  title={t('Rename device', 'Изменить имя устройства')}
                 >
                   <Pencil className="w-3.5 h-3.5" />
                 </button>
@@ -127,7 +131,7 @@ export const DevicePickerModal: React.FC = () => {
               className="px-3 py-1.5 rounded-xl bg-cat-mauve text-cat-base font-bold text-xs hover:opacity-95 active:scale-95 transition-all shadow-sm shrink-0 flex items-center gap-1.5"
             >
               <ArrowRightLeft className="w-3.5 h-3.5" />
-              <span>Играть здесь</span>
+              <span>{t('Play Here', 'Играть здесь')}</span>
             </button>
           )}
         </div>
@@ -136,9 +140,9 @@ export const DevicePickerModal: React.FC = () => {
         <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar pr-1">
           {devices.length === 0 ? (
             <div className="py-6 text-center text-cat-subtext0 text-xs">
-              Другие устройства пока не подключены.
+              {t('No other devices connected right now.', 'Другие устройства пока не подключены.')}
               <br />
-              Откройте Jellyfy на телефоне или компьютере под этим аккаунтом.
+              {t('Open Jellyfy on your phone or computer with this account.', 'Откройте Jellyfy на телефоне или компьютере под этим аккаунтом.')}
             </div>
           ) : (
             devices.map((dev) => {
@@ -167,12 +171,12 @@ export const DevicePickerModal: React.FC = () => {
                         </span>
                         {isThisDevice && (
                           <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-cat-surface1/60 text-cat-subtext0 shrink-0">
-                            Это устройство
+                            {t('This device', 'Это устройство')}
                           </span>
                         )}
                       </div>
                       <p className={`text-xs mt-0.5 ${isActiveOutput ? 'text-cat-green/90 font-medium' : 'text-cat-subtext0'}`}>
-                        {isActiveOutput ? '● Играет сейчас' : 'Нажмите для переключения'}
+                        {isActiveOutput ? t('● Playing now', '● Играет сейчас') : t('Click to switch', 'Нажмите для переключения')}
                       </p>
                     </div>
                   </div>
@@ -193,7 +197,7 @@ export const DevicePickerModal: React.FC = () => {
                           handleDeviceClick(dev.id);
                         }}
                         className="p-1.5 rounded-xl hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-mauve transition-colors"
-                        title="Переключить воспроизведение сюда"
+                        title={t('Switch playback here', 'Переключить воспроизведение сюда')}
                       >
                         <Volume2 className="w-4 h-4" />
                       </button>
@@ -207,12 +211,12 @@ export const DevicePickerModal: React.FC = () => {
 
         {/* Footer info */}
         <div className="mt-4 pt-3 border-t border-cat-surface0/60 flex items-center justify-between text-[11px] text-cat-subtext0">
-          <span>Синхронизация в реальном времени</span>
+          <span>{t('Real-time sync', 'Синхронизация в реальном времени')}</span>
           <button
             onClick={() => setDevicePickerOpen(false)}
             className="font-bold text-cat-mauve hover:underline"
           >
-            Закрыть
+            {t('Close', 'Закрыть')}
           </button>
         </div>
       </div>

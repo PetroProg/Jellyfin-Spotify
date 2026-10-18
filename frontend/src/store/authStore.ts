@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { User } from '../types';
 import { apiRequest, setToken, getToken } from '../api/client';
+import { useI18nStore, tr } from './i18nStore';
 
 const CACHED_USER_KEY = 'jellyfy_cached_user';
 
@@ -45,6 +46,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
     login: (token, user) => {
       setToken(token);
       setCachedUser(user);
+      useI18nStore.getState().initFirstLoginLang(user?.id);
       set({ user, isAuthenticated: true, isLoading: false });
     },
 
@@ -75,14 +77,16 @@ export const useAuthStore = create<AuthState>((set, get) => {
         set({ user: data.user, isAuthenticated: true, isLoading: false });
       } catch (err: any) {
         // Only log out if the backend explicitly rejected the token (HTTP 401)
-        if (err?.status === 401 || err?.message?.includes('Сессия истекла')) {
+        if (err?.status === 401 || err?.message?.includes('Сессия истекла') || err?.message?.includes('Session expired')) {
           setToken(null);
           setCachedUser(null);
           set({ user: null, isAuthenticated: false, isLoading: false });
         } else {
           // Network error / offline mode: preserve the active session using the cached user profile
           console.warn('[Auth] Server unreachable or offline, continuing with cached session');
-          const fallbackUser = getCachedUser() || ({ id: 0, username: 'offline', display_name: 'Пользователь (Офлайн)' } as User);
+          const fallbackUser =
+            getCachedUser() ||
+            ({ id: 0, username: 'offline', display_name: tr('User (Offline)', 'Пользователь (Офлайн)') } as User);
           set({ user: fallbackUser, isAuthenticated: true, isLoading: false });
         }
       }

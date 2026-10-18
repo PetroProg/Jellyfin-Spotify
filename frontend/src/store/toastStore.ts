@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { td } from './i18nStore';
 
 export type ToastType = 'success' | 'error' | 'info' | 'warning';
 
@@ -45,8 +46,8 @@ export const useToastStore = create<ToastState>((set, get) => ({
     const newToast: ToastItem = {
       id,
       type,
-      message,
-      title,
+      message: td(message),
+      title: title ? td(title) : undefined,
       duration,
       createdAt: Date.now()
     };

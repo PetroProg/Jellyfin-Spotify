@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Loader2, Download, ArrowRight, HardDriveDownload } from 'lucide-react';
+import { Loader2, ArrowRight, HardDriveDownload } from 'lucide-react';
 import { DownloadJob } from '../types';
 import { apiRequest } from '../api/client';
 import { useOfflineStore } from '../store/offlineStore';
 import { usePlayerStore } from '../store/playerStore';
+import { useI18nStore } from '../store/i18nStore';
 
 interface GlobalDownloadBarProps {
   onOpenPlaylist: (id: number) => void;
@@ -15,9 +16,8 @@ interface GlobalDownloadBarProps {
 export const GlobalDownloadBar: React.FC<GlobalDownloadBarProps> = ({
   onOpenPlaylist,
   onOpenLiked,
-  currentPlaylistId,
-  currentTab,
 }) => {
+  const { t, td } = useI18nStore();
   const currentTrack = usePlayerStore((s) => s.currentTrack);
   const [backendJobs, setBackendJobs] = useState<DownloadJob[]>([]);
   const offlineProgressMap = useOfflineStore((s) => s.progress);
@@ -73,7 +73,7 @@ export const GlobalDownloadBar: React.FC<GlobalDownloadBarProps> = ({
     <div
       onClick={handleNavigate}
       className={`w-full max-w-full overflow-hidden box-border bg-cat-mantle/95 backdrop-blur-md border-t border-cat-surface1/60 hover:border-cat-mauve/40 transition-all shadow-2xl px-4 py-2 flex flex-col sm:flex-row items-center justify-between gap-2.5 z-30 cursor-pointer select-none ${mobileMarginClass}`}
-      title="Нажмите, чтобы открыть плейлист"
+      title={t('Click to open playlist', 'Нажмите, чтобы открыть плейлист')}
     >
       <div className="flex items-center gap-3 min-w-0 w-full sm:w-auto overflow-hidden">
         <div className="w-7 h-7 rounded-lg bg-cat-mauve/20 text-cat-mauve flex items-center justify-center shrink-0">
@@ -84,7 +84,7 @@ export const GlobalDownloadBar: React.FC<GlobalDownloadBarProps> = ({
           {hasBackend && activeBackendJob && (
             <div className="flex items-center gap-2 flex-wrap min-w-0">
               <span className="text-xs font-bold text-cat-text truncate max-w-[200px] sm:max-w-none">
-                ⚡ Сервер: «{activeBackendJob.playlist_name}»
+                ⚡ {t('Server:', 'Сервер:')} «{td(activeBackendJob.playlist_name)}»
               </span>
               <span className="text-[11px] font-mono text-cat-mauve font-semibold shrink-0">
                 {activeBackendJob.downloaded_tracks}/{activeBackendJob.total_tracks}
@@ -101,7 +101,8 @@ export const GlobalDownloadBar: React.FC<GlobalDownloadBarProps> = ({
             <div className="flex items-center gap-2 flex-wrap min-w-0">
               <span className="text-xs font-semibold text-cat-teal truncate flex items-center gap-1 max-w-[220px] sm:max-w-none">
                 <HardDriveDownload className="w-3.5 h-3.5 inline shrink-0" />
-                Оффлайн-сохранение {Number(activeOfflineEntry[0]) === -1 ? '«Любимые треки»' : ''}
+                {t('Offline saving', 'Оффлайн-сохранение')}{' '}
+                {Number(activeOfflineEntry[0]) === -1 ? t('"Liked Songs"', '«Любимые треки»') : ''}
               </span>
               <span className="text-[11px] font-mono text-cat-teal font-semibold shrink-0">
                 {activeOfflineEntry[1].done}/{activeOfflineEntry[1].total}
@@ -156,7 +157,7 @@ export const GlobalDownloadBar: React.FC<GlobalDownloadBarProps> = ({
         )}
 
         <div className="flex items-center gap-1 text-[11px] font-semibold text-cat-mauve hover:text-cat-text transition-colors shrink-0">
-          <span>Открыть</span>
+          <span>{t('Open', 'Открыть')}</span>
           <ArrowRight className="w-3 h-3" />
         </div>
       </div>

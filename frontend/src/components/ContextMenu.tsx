@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { ListPlus, Ban, FolderPlus, Trash2, Heart } from 'lucide-react';
 import { Track } from '../types';
 import { usePlayerStore } from '../store/playerStore';
+import { useI18nStore } from '../store/i18nStore';
 
 interface ContextMenuProps {
   track: Track;
@@ -24,6 +25,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
   const { likedTrackIds, toggleLikeTrack } = usePlayerStore();
+  const { t } = useI18nStore();
   const isLiked = likedTrackIds.includes(track.id);
 
   useEffect(() => {
@@ -87,70 +89,70 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         style={{ top: `${safeY}px`, left: `${safeX}px` }}
         className="fixed z-50 w-52 bg-cat-mantle/95 backdrop-blur-md rounded-2xl p-1.5 shadow-2xl border border-cat-surface0/80 text-sm select-none animate-in fade-in zoom-in-95 duration-150"
       >
-      <div className="px-3 py-1.5 border-b border-cat-surface0/40 mb-1">
-        <p className="font-semibold text-cat-text truncate text-xs">{track.title}</p>
-        <p className="text-cat-subtext0 truncate text-[11px]">{track.artist}</p>
-      </div>
+        <div className="px-3 py-1.5 border-b border-cat-surface0/40 mb-1">
+          <p className="font-semibold text-cat-text truncate text-xs">{track.title}</p>
+          <p className="text-cat-subtext0 truncate text-[11px]">{track.artist}</p>
+        </div>
 
-      <button
-        onClick={() => {
-          onAddToQueue(track);
-          onClose();
-        }}
-        className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-text hover:bg-cat-surface0 text-left transition-colors"
-      >
-        <ListPlus className="w-4 h-4 text-cat-mauve" />
-        В очередь
-      </button>
-
-      <button
-        onClick={() => {
-          toggleLikeTrack(track.id);
-          onClose();
-        }}
-        className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-text hover:bg-cat-surface0 text-left transition-colors"
-      >
-        <Heart className={`w-4 h-4 ${isLiked ? 'fill-current text-cat-red' : 'text-cat-subtext0'}`} />
-        {isLiked ? 'Удалить из любимых' : 'В любимые треки'}
-      </button>
-
-      {onAddToPlaylist && (
         <button
           onClick={() => {
-            onAddToPlaylist(track);
+            onAddToQueue(track);
             onClose();
           }}
           className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-text hover:bg-cat-surface0 text-left transition-colors"
         >
-          <FolderPlus className="w-4 h-4 text-cat-peach" />
-          Добавить в плейлист
+          <ListPlus className="w-4 h-4 text-cat-mauve" />
+          {t('Add to Queue', 'В очередь')}
         </button>
-      )}
 
-      {onRemoveFromPlaylist && (
         <button
           onClick={() => {
-            onRemoveFromPlaylist(track);
+            toggleLikeTrack(track.id);
             onClose();
           }}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-red hover:bg-cat-surface0 text-left transition-colors"
+          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-text hover:bg-cat-surface0 text-left transition-colors"
         >
-          <Trash2 className="w-4 h-4 text-cat-red" />
-          Удалить из плейлиста
+          <Heart className={`w-4 h-4 ${isLiked ? 'fill-current text-cat-red' : 'text-cat-subtext0'}`} />
+          {isLiked ? t('Remove from Liked', 'Удалить из любимых') : t('Save to Liked Songs', 'В любимые треки')}
         </button>
-      )}
 
-      <button
-        onClick={() => {
-          onBlacklist(track);
-          onClose();
-        }}
-        className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-red/80 hover:text-cat-red hover:bg-cat-surface0 text-left transition-colors"
-      >
-        <Ban className="w-4 h-4" />
-        Никогда не включать
-      </button>
-    </div>
-  </>
-);
+        {onAddToPlaylist && (
+          <button
+            onClick={() => {
+              onAddToPlaylist(track);
+              onClose();
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-text hover:bg-cat-surface0 text-left transition-colors"
+          >
+            <FolderPlus className="w-4 h-4 text-cat-peach" />
+            {t('Add to Playlist', 'Добавить в плейлист')}
+          </button>
+        )}
+
+        {onRemoveFromPlaylist && (
+          <button
+            onClick={() => {
+              onRemoveFromPlaylist(track);
+              onClose();
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-red hover:bg-cat-surface0 text-left transition-colors"
+          >
+            <Trash2 className="w-4 h-4 text-cat-red" />
+            {t('Remove from Playlist', 'Удалить из плейлиста')}
+          </button>
+        )}
+
+        <button
+          onClick={() => {
+            onBlacklist(track);
+            onClose();
+          }}
+          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-red/80 hover:text-cat-red hover:bg-cat-surface0 text-left transition-colors"
+        >
+          <Ban className="w-4 h-4" />
+          {t('Never Play This', 'Никогда не включать')}
+        </button>
+      </div>
+    </>
+  );
 };

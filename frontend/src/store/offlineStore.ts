@@ -17,6 +17,7 @@ import {
 } from '../utils/offline';
 import { apiRequest } from '../api/client';
 import { toast } from './toastStore';
+import { tr, td } from './i18nStore';
 
 export interface OfflineJobProgress {
   inProgress: boolean;
@@ -83,8 +84,10 @@ async function runQueueWorker(playlistId: number, tracks: Track[], playlist?: Pl
         };
       });
 
-      const name = playlist?.name || 'Плейлист';
-      toast.success(`«${name}» успешно скачан для оффлайн доступа`);
+      const name = playlist?.name ? td(playlist.name) : tr('Playlist', 'Плейлист');
+      toast.success(
+        tr(`"${name}" downloaded for offline playback`, `«${name}» успешно скачан для оффлайн доступа`)
+      );
     }
   } catch (err) {
     console.warn(`[Offline Queue Worker Error for ${playlistId}]:`, err);

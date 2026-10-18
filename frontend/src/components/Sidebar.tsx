@@ -1,6 +1,7 @@
 import React from 'react';
 import { Home, Search, Heart, Settings, Plus, Music2 } from 'lucide-react';
 import { Playlist } from '../types';
+import { useI18nStore } from '../store/i18nStore';
 
 interface SidebarProps {
   currentTab: string;
@@ -19,6 +20,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectPlaylist,
   onCreatePlaylist,
 }) => {
+  const { t, td } = useI18nStore();
+
   return (
     <aside className="hidden md:flex flex-col w-64 bg-cat-mantle p-4 border-r border-cat-surface0/30 select-none">
       {/* Brand Header */}
@@ -41,7 +44,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           }`}
         >
           <Home className="w-5 h-5" />
-          Главная
+          {t('Home', 'Главная')}
         </button>
 
         <button
@@ -53,7 +56,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           }`}
         >
           <Search className="w-5 h-5" />
-          Поиск & Импорт
+          {t('Search & Import', 'Поиск & Импорт')}
         </button>
 
         <button
@@ -65,7 +68,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           }`}
         >
           <Heart className="w-5 h-5" />
-          Любимые треки
+          {t('Liked Songs', 'Любимые треки')}
         </button>
 
         <button
@@ -77,16 +80,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
           }`}
         >
           <Settings className="w-5 h-5" />
-          Настройки
+          {t('Settings', 'Настройки')}
         </button>
       </nav>
 
       {/* Playlists Header */}
       <div className="flex items-center justify-between px-3 mb-2 text-xs font-semibold text-cat-subtext0 uppercase tracking-wider">
-        <span>Плейлисты</span>
+        <span>{t('Playlists', 'Плейлисты')}</span>
         <button
           onClick={onCreatePlaylist}
-          title="Создать плейлист"
+          title={t('Create playlist', 'Создать плейлист')}
           className="p-1 rounded-lg hover:bg-cat-surface0 text-cat-subtext0 hover:text-cat-mauve transition-colors"
         >
           <Plus className="w-4 h-4" />
@@ -114,7 +117,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <Music2 className="w-3.5 h-3.5" />
                 )}
               </div>
-              <span className="truncate">{p.name}</span>
+              <span className="truncate">{td(p.name)}</span>
             </button>
           );
         })}

@@ -24,6 +24,7 @@ import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { usePlayerStore } from '../store/playerStore';
 import { toast } from '../store/toastStore';
+import { useI18nStore } from '../store/i18nStore';
 
 interface SearchImportProps {
   onOpenPlaylist: (id: number) => void;
@@ -31,6 +32,7 @@ interface SearchImportProps {
 }
 
 export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBack }) => {
+  const { t, td } = useI18nStore();
   const [spotifyUrl, setSpotifyUrl] = useState('');
   const [isImporting, setIsImporting] = useState(false);
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
@@ -142,13 +144,13 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
       setSpotifyUrl('');
       loadJobs();
       if (res.message) {
-        toast.success(res.message, 'Импорт из Spotify');
+        toast.success(res.message, t('Spotify Import', 'Импорт из Spotify'));
       }
       if (res.playlistId) {
         onOpenPlaylist(res.playlistId);
       }
     } catch (err: any) {
-      toast.error(err.message || 'Ошибка импорта плейлиста');
+      toast.error(err.message || t('Failed to import playlist', 'Ошибка импорта плейлиста'));
     } finally {
       setIsImporting(false);
     }
@@ -173,13 +175,13 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
       loadJobs();
       loadPlaylists();
       if (res.message) {
-        toast.success(res.message, 'Импорт треков');
+        toast.success(res.message, t('Track Import', 'Импорт треков'));
       }
       if (res.playlistId) {
         onOpenPlaylist(res.playlistId);
       }
     } catch (err: any) {
-      toast.error(err.message || 'Ошибка импорта списка треков');
+      toast.error(err.message || t('Failed to import track list', 'Ошибка импорта списка треков'));
     } finally {
       setIsImportingList(false);
     }
@@ -224,7 +226,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
         playTrack(res.track, [res.track], 0);
       }
     } catch (err: any) {
-      toast.error(err.message || 'Ошибка скачивания трека');
+      toast.error(err.message || t('Failed to download track', 'Ошибка скачивания трека'));
     } finally {
       setDownloadingTrackId(null);
     }
@@ -257,9 +259,14 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
     try {
       await usePlayerStore.getState().blacklistTrack(track);
       setLocalResults((prev) => prev.filter((t) => t.id !== track.id));
-      toast.info(`«${track.title}» добавлена в «Никогда не включать» и удалена из плейлистов`);
+      toast.info(
+        t(
+          `"${track.title}" added to "Never Play" and removed from playlists`,
+          `«${track.title}» добавлена в «Никогда не включать» и удалена из плейлистов`
+        )
+      );
     } catch (e: any) {
-      toast.error(e.message || 'Ошибка добавления в черный список');
+      toast.error(e.message || t('Failed to add to blacklist', 'Ошибка добавления в черный список'));
     }
   };
 
@@ -278,16 +285,16 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
         <button
           onClick={onBack}
           className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-cat-surface0/80 hover:bg-cat-surface1 border border-cat-surface1/50 text-sm font-semibold text-cat-subtext0 hover:text-cat-text transition-all duration-200 mb-4 cursor-pointer active:scale-95 group shadow-sm w-fit"
-          title="Вернуться назад"
+          title={t('Go back', 'Вернуться назад')}
         >
           <ArrowLeft className="w-4 h-4 text-cat-mauve transition-transform group-hover:-translate-x-1" />
-          <span>Назад</span>
+          <span>{t('Back', 'Назад')}</span>
         </button>
       )}
 
       {/* Page Title */}
       <h1 className="text-2xl md:text-3xl font-extrabold text-cat-text mb-6">
-        Поиск & Импорт песен
+        {t('Search & Import Songs', 'Поиск & Импорт песен')}
       </h1>
 
       {/* Search Input Box */}
@@ -298,7 +305,10 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Поиск любых песен (в вашей медиатеке и Spotify)..."
+            placeholder={t(
+              'Search any song (in your library & Spotify)...',
+              'Поиск любых песен (в вашей медиатеке и Spotify)...'
+            )}
             className="w-full bg-cat-mantle border border-cat-surface0/80 rounded-2xl pl-12 pr-12 py-3.5 text-sm text-cat-text placeholder-cat-subtext0/60 focus:outline-none focus:border-cat-mauve shadow-lg transition-all"
           />
           {searching && (
@@ -312,7 +322,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                 setSpotifyResults([]);
               }}
               className="absolute right-3 p-1.5 rounded-lg text-cat-subtext0 hover:text-cat-text cursor-pointer active:scale-90"
-              title="Очистить поиск"
+              title={t('Clear search', 'Очистить поиск')}
             >
               <X className="w-4 h-4" />
             </button>
@@ -326,11 +336,13 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
           {searching && localResults.length === 0 && spotifyResults.length === 0 ? (
             <div className="py-12 text-center text-cat-subtext0 text-sm flex items-center justify-center gap-2">
               <Loader2 className="w-5 h-5 animate-spin text-cat-mauve" />
-              <span>Поиск «{searchQuery}»...</span>
+              <span>{t(`Searching "${searchQuery}"...`, `Поиск «${searchQuery}»...`)}</span>
             </div>
           ) : !searching && localResults.length === 0 && spotifyResults.length === 0 ? (
             <div className="py-10 text-center text-cat-subtext0 text-sm bg-cat-mantle/50 rounded-2xl border border-cat-surface0/40">
-              По запросу «<span className="text-cat-text font-semibold">{searchQuery}</span>» ничего не найдено
+              {t('No results found for "', 'По запросу «')}
+              <span className="text-cat-text font-semibold">{searchQuery}</span>
+              {t('"', '» ничего не найдено')}
             </div>
           ) : (
             <>
@@ -340,7 +352,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                   <div className="flex items-center gap-2 mb-3">
                     <Library className="w-4 h-4 text-cat-green" />
                     <h3 className="text-sm font-bold uppercase tracking-wider text-cat-text">
-                      В вашей медиатеке ({localResults.length})
+                      {t(`In Your Library (${localResults.length})`, `В вашей медиатеке (${localResults.length})`)}
                     </h3>
                   </div>
                   <div className="space-y-0.5">
@@ -363,7 +375,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                   <div className="flex items-center gap-2 mb-3">
                     <Sparkles className="w-4 h-4 text-cat-mauve" />
                     <h3 className="text-sm font-bold uppercase tracking-wider text-cat-text">
-                      Найдено в Spotify (каталог)
+                      {t('Found on Spotify (Catalog)', 'Найдено в Spotify (каталог)')}
                     </h3>
                   </div>
                   <div className="space-y-2">
@@ -401,7 +413,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                             <div className="flex items-center gap-1.5 sm:gap-2">
                               <span className="text-[11px] px-2.5 py-1 rounded-full bg-cat-green/20 text-cat-green font-semibold flex items-center gap-1">
                                 <Check className="w-3.5 h-3.5 stroke-[2.5]" />
-                                <span className="hidden sm:inline">В медиатеке</span>
+                                <span className="hidden sm:inline">{t('In Library', 'В медиатеке')}</span>
                               </span>
                               <button
                                 onClick={() => {
@@ -409,14 +421,14 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                     playTrack(st.local_track, [st.local_track], 0);
                                   }
                                 }}
-                                title="Слушать"
+                                title={t('Play', 'Слушать')}
                                 className="p-2 rounded-full bg-cat-mauve text-cat-base hover:opacity-95 active:scale-95 transition-all shadow-md cursor-pointer"
                               >
                                 <Play className="w-4 h-4 fill-current ml-0.5" />
                               </button>
                               <button
                                 onClick={() => setAddToPlaylistTrack(st.local_track || null)}
-                                title="Добавить в плейлист"
+                                title={t('Add to playlist', 'Добавить в плейлист')}
                                 className="p-2 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-mauve transition-all cursor-pointer active:scale-95"
                               >
                                 <ListPlus className="w-4 h-4" />
@@ -428,26 +440,29 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                 onClick={() => setAddToPlaylistSpotify(st)}
                                 disabled={downloadingTrackId === st.id}
                                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-mauve text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
-                                title="Добавить в плейлист (трек скачается автоматически)"
+                                title={t(
+                                  'Add to playlist (track will download automatically)',
+                                  'Добавить в плейлист (трек скачается автоматически)'
+                                )}
                               >
                                 <ListPlus className="w-3.5 h-3.5 text-cat-mauve" />
-                                <span className="hidden xs:inline">В плейлист</span>
+                                <span className="hidden xs:inline">{t('To Playlist', 'В плейлист')}</span>
                               </button>
                               <button
                                 onClick={() => handleDownloadSingle(st)}
                                 disabled={downloadingTrackId === st.id}
                                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cat-mauve/20 hover:bg-cat-mauve text-cat-mauve hover:text-cat-base text-xs font-bold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
-                                title="Скачать на сервер в высоком качестве"
+                                title={t('Download to server in high quality', 'Скачать на сервер в высоком качестве')}
                               >
                                 {downloadingTrackId === st.id ? (
                                   <>
                                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                    <span className="hidden xs:inline">Качается...</span>
+                                    <span className="hidden xs:inline">{t('Downloading...', 'Качается...')}</span>
                                   </>
                                 ) : (
                                   <>
                                     <Download className="w-3.5 h-3.5" />
-                                    <span>Скачать</span>
+                                    <span>{t('Download', 'Скачать')}</span>
                                   </>
                                 )}
                               </button>
@@ -462,7 +477,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                   pos: { x: e.clientX, y: e.clientY }
                                 })
                               }
-                              title="Действия с треком"
+                              title={t('Track actions', 'Действия с треком')}
                               className="p-1.5 rounded-xl hover:bg-cat-surface0 text-cat-subtext0 hover:text-cat-text transition-colors cursor-pointer"
                             >
                               <MoreHorizontal className="w-4 h-4" />
@@ -487,8 +502,15 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
               <Download className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-cat-text">Импорт музыки из Spotify</h2>
-              <p className="text-xs text-cat-subtext0">По ссылке на плейлист или напрямую списком из буфера обмена</p>
+              <h2 className="text-base font-bold text-cat-text">
+                {t('Import Music from Spotify', 'Импорт музыки из Spotify')}
+              </h2>
+              <p className="text-xs text-cat-subtext0">
+                {t(
+                  'By playlist URL or directly as a track list from your clipboard',
+                  'По ссылке на плейлист или напрямую списком из буфера обмена'
+                )}
+              </p>
             </div>
           </div>
 
@@ -504,7 +526,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
               }`}
             >
               <Link2 className="w-3.5 h-3.5" />
-              <span>По ссылке</span>
+              <span>{t('By Link', 'По ссылке')}</span>
             </button>
             <button
               type="button"
@@ -516,7 +538,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
               }`}
             >
               <ClipboardList className="w-3.5 h-3.5" />
-              <span>Списком (Ctrl+V)</span>
+              <span>{t('By List (Ctrl+V)', 'Списком (Ctrl+V)')}</span>
             </button>
           </div>
         </div>
@@ -538,10 +560,10 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
               {isImporting ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Импорт...</span>
+                  <span>{t('Importing...', 'Импорт...')}</span>
                 </>
               ) : (
-                <span>Импортировать</span>
+                <span>{t('Import', 'Импортировать')}</span>
               )}
             </button>
           </form>
@@ -550,10 +572,18 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
             <div className="p-3 rounded-2xl bg-cat-surface0/50 border border-cat-surface1/30 text-xs text-cat-subtext0 space-y-1">
               <p className="font-semibold text-cat-text flex items-center gap-1.5">
                 <Sparkles className="w-3.5 h-3.5 text-cat-yellow" />
-                <span>Лайфхак для плейлистов любого размера (&gt;100 треков):</span>
+                <span>
+                  {t(
+                    'Pro tip for playlists of any size (>100 tracks):',
+                    'Лайфхак для плейлистов любого размера (>100 треков):'
+                  )}
+                </span>
               </p>
               <p>
-                В приложении Spotify на ПК откройте любой плейлист, нажмите <kbd className="px-1.5 py-0.5 rounded bg-cat-surface1 font-mono text-cat-text">Ctrl+A</kbd> (выделить всё), затем <kbd className="px-1.5 py-0.5 rounded bg-cat-surface1 font-mono text-cat-text">Ctrl+C</kbd> (скопировать) и вставьте сюда через <kbd className="px-1.5 py-0.5 rounded bg-cat-surface1 font-mono text-cat-text">Ctrl+V</kbd>. Приложение загрузит все треки без каких-либо лимитов!
+                {t(
+                  'In the Spotify Desktop app, open any playlist, press Ctrl+A (Select All), then Ctrl+C (Copy), and paste here with Ctrl+V. Jellyfy will download all tracks without any limits!',
+                  'В приложении Spotify на ПК откройте любой плейлист, нажмите Ctrl+A (выделить всё), затем Ctrl+C (скопировать) и вставьте сюда через Ctrl+V. Приложение загрузит все треки без каких-либо лимитов!'
+                )}
               </p>
             </div>
 
@@ -561,24 +591,27 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
               rows={5}
               value={listText}
               onChange={(e) => setListText(e.target.value)}
-              placeholder={"Вставьте ссылки на треки или названия (каждый с новой строки):\nhttps://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT\nThree Days Grace - Never Too Late\nLinkin Park - Numb"}
+              placeholder={t(
+                'Paste track links or titles (one per line):\nhttps://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT\nThree Days Grace - Never Too Late\nLinkin Park - Numb',
+                'Вставьте ссылки на треки или названия (каждый с новой строки):\nhttps://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT\nThree Days Grace - Never Too Late\nLinkin Park - Numb'
+              )}
               className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl p-4 text-xs font-mono text-cat-text placeholder-cat-subtext0/50 focus:outline-none focus:border-cat-mauve transition-colors custom-scrollbar"
             />
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1.5">
-                  Куда сохранить треки
+                  {t('Where to save tracks', 'Куда сохранить треки')}
                 </label>
                 <select
                   value={listTargetPlaylistId}
                   onChange={(e) => setListTargetPlaylistId(e.target.value)}
                   className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-3.5 py-2.5 text-xs text-cat-text focus:outline-none focus:border-cat-mauve cursor-pointer"
                 >
-                  <option value="new">+ Создать новый плейлист</option>
+                  <option value="new">{t('+ Create a new playlist', '+ Создать новый плейлист')}</option>
                   {playlists.map((pl) => (
                     <option key={pl.id} value={pl.id}>
-                      {pl.name}
+                      {td(pl.name)}
                     </option>
                   ))}
                 </select>
@@ -587,13 +620,13 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
               {listTargetPlaylistId === 'new' && (
                 <div>
                   <label className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider block mb-1.5">
-                    Название нового плейлиста
+                    {t('New Playlist Name', 'Название нового плейлиста')}
                   </label>
                   <input
                     type="text"
                     value={listPlaylistName}
                     onChange={(e) => setListPlaylistName(e.target.value)}
-                    placeholder="Например: Моя коллекция"
+                    placeholder={t('e.g. My Collection', 'Например: Моя коллекция')}
                     className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-3.5 py-2.5 text-xs text-cat-text focus:outline-none focus:border-cat-mauve"
                   />
                 </div>
@@ -608,12 +641,12 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
               {isImportingList ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Импорт списка...</span>
+                  <span>{t('Importing list...', 'Импорт списка...')}</span>
                 </>
               ) : (
                 <>
                   <Download className="w-4 h-4" />
-                  <span>Импортировать список треков</span>
+                  <span>{t('Import Track List', 'Импортировать список треков')}</span>
                 </>
               )}
             </button>
@@ -626,16 +659,16 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
         <div className="mb-8">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-bold uppercase tracking-wider text-cat-subtext0">
-              Очередь скачивания на сервер
+              {t('Server Download Queue', 'Очередь скачивания на сервер')}
             </h3>
             {jobs.some((j) => j.status === 'completed' || j.status === 'failed') && (
               <button
                 onClick={handleClearCompleted}
                 className="text-xs text-cat-subtext0 hover:text-cat-mauve transition-colors flex items-center gap-1.5 cursor-pointer py-1 px-2.5 rounded-lg hover:bg-cat-surface0 active:scale-95"
-                title="Очистить все завершенные задачи"
+                title={t('Clear all completed jobs', 'Очистить все завершенные задачи')}
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span>Очистить завершенные</span>
+                <span>{t('Clear completed', 'Очистить завершенные')}</span>
               </button>
             )}
           </div>
@@ -649,19 +682,21 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="font-semibold text-sm text-cat-text truncate">{job.playlist_name}</span>
+                      <span className="font-semibold text-sm text-cat-text truncate">{td(job.playlist_name)}</span>
                       <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
                         job.status === 'completed'
                           ? 'bg-cat-green/20 text-cat-green'
                           : 'bg-cat-mauve/20 text-cat-mauve'
                       }`}>
-                        {job.status === 'completed' ? 'Завершено' : 'Загрузка'}
+                        {job.status === 'completed'
+                          ? t('Completed', 'Завершено')
+                          : t('Downloading', 'Загрузка')}
                       </span>
                     </div>
 
                     {job.current_track && (
                       <p className="text-xs text-cat-subtext0 mt-1 truncate">
-                        Качается: <span className="text-cat-text">{job.current_track}</span>
+                        {t('Downloading:', 'Качается:')} <span className="text-cat-text">{job.current_track}</span>
                       </p>
                     )}
 
@@ -673,7 +708,10 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                       />
                     </div>
                     <span className="text-[11px] font-mono text-cat-subtext0 mt-1 block">
-                      {job.downloaded_tracks} из {job.total_tracks} треков ({percent}%)
+                      {t(
+                        `${job.downloaded_tracks} of ${job.total_tracks} tracks (${percent}%)`,
+                        `${job.downloaded_tracks} из ${job.total_tracks} треков (${percent}%)`
+                      )}
                     </span>
                   </div>
 
@@ -684,12 +722,12 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cat-surface0 text-xs font-semibold text-cat-mauve hover:bg-cat-surface1 transition-colors"
                       >
                         <ExternalLink className="w-3.5 h-3.5" />
-                        Слушать
+                        {t('Open', 'Слушать')}
                       </button>
                     )}
                     <button
                       onClick={() => handleDeleteJob(job.id)}
-                      title="Убрать из списка"
+                      title={t('Remove from list', 'Убрать из списка')}
                       className="p-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-red transition-colors cursor-pointer active:scale-95"
                     >
                       <X className="w-4 h-4" />

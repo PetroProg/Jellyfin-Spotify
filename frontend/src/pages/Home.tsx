@@ -5,6 +5,7 @@ import { useAuthStore } from '../store/authStore';
 import { apiRequest } from '../api/client';
 import { toast } from '../store/toastStore';
 import { usePlayerStore } from '../store/playerStore';
+import { useI18nStore, formatTrackCount } from '../store/i18nStore';
 
 interface HomeProps {
   playlists: Playlist[];
@@ -62,6 +63,7 @@ export const Home: React.FC<HomeProps> = ({
   onOpenLiked,
 }) => {
   const { user } = useAuthStore();
+  const { lang, t, td } = useI18nStore();
   const [showScrollTop, setShowScrollTop] = useState(false);
   const [dailyMixes, setDailyMixes] = useState<Playlist[]>(() => {
     try {
@@ -113,17 +115,27 @@ export const Home: React.FC<HomeProps> = ({
     if (refreshingMixes) return;
     setRefreshingMixes(true);
     try {
-      toast.info('Подбираем новые треки по категориям ваших плейлистов...');
+      toast.info(
+        t(
+          'Selecting new tracks across your playlist categories...',
+          'Подбираем новые треки по категориям ваших плейлистов...'
+        )
+      );
       const data = await apiRequest<{ mixes: Playlist[] }>('/daily-mixes/refresh', { method: 'POST' });
       if (data.mixes) {
         setDailyMixes(data.mixes);
         try {
           localStorage.setItem(DAILY_MIXES_CACHE_KEY, JSON.stringify(data.mixes));
         } catch (_) {}
-        toast.success('Плейлисты дня обновлены и поставлены на предзагрузку!');
+        toast.success(
+          t(
+            'Daily Mixes updated and queued for pre-downloading!',
+            'Плейлисты дня обновлены и поставлены на предзагрузку!'
+          )
+        );
       }
     } catch (err: any) {
-      toast.error(err.message || 'Не удалось обновить Плейлисты дня');
+      toast.error(err.message || t('Failed to refresh Daily Mixes', 'Не удалось обновить Плейлисты дня'));
     } finally {
       setRefreshingMixes(false);
     }
@@ -143,9 +155,14 @@ export const Home: React.FC<HomeProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <div>
           <h1 className="text-2xl md:text-3xl font-extrabold text-cat-text">
-            Привет, {user?.display_name || user?.username || 'Музыкант'}! 👋
+            {t(
+              `Hello, ${user?.display_name || user?.username || 'Music Lover'}! 👋`,
+              `Привет, ${user?.display_name || user?.username || 'Музыкант'}! 👋`
+            )}
           </h1>
-          <p className="text-xs text-cat-subtext0 mt-1">Твоя личная библиотека музыки в высоком качестве</p>
+          <p className="text-xs text-cat-subtext0 mt-1">
+            {t('Your personal high-quality music library', 'Твоя личная библиотека музыки в высоком качестве')}
+          </p>
         </div>
 
         {/* Quick Action Buttons */}
@@ -155,14 +172,14 @@ export const Home: React.FC<HomeProps> = ({
             className="flex items-center gap-1.5 px-4 py-2.5 rounded-2xl bg-cat-mauve text-cat-base text-xs font-bold hover:opacity-95 active:scale-95 transition-all shadow-md"
           >
             <Download className="w-4 h-4" />
-            Импорт Spotify
+            {t('Import Spotify', 'Импорт Spotify')}
           </button>
           <button
             onClick={onCreatePlaylist}
             className="flex items-center gap-1.5 px-4 py-2.5 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-text text-xs font-bold active:scale-95 transition-all"
           >
             <Plus className="w-4 h-4 text-cat-mauve" />
-            Новый плейлист
+            {t('New Playlist', 'Новый плейлист')}
           </button>
         </div>
       </div>
@@ -178,8 +195,8 @@ export const Home: React.FC<HomeProps> = ({
             <Heart className="w-7 h-7 fill-current" />
           </div>
           <div>
-            <h3 className="font-bold text-base text-cat-text">Любимые треки</h3>
-            <p className="text-xs text-cat-subtext0 mt-0.5">Твоя коллекция</p>
+            <h3 className="font-bold text-base text-cat-text">{t('Liked Songs', 'Любимые треки')}</h3>
+            <p className="text-xs text-cat-subtext0 mt-0.5">{t('Your collection', 'Твоя коллекция')}</p>
           </div>
         </div>
 
@@ -192,22 +209,27 @@ export const Home: React.FC<HomeProps> = ({
             <Download className="w-7 h-7" />
           </div>
           <div>
-            <h3 className="font-bold text-base text-cat-text">Импорт плейлиста</h3>
-            <p className="text-xs text-cat-subtext0 mt-0.5">Вставить ссылку Spotify</p>
+            <h3 className="font-bold text-base text-cat-text">{t('Import Playlist', 'Импорт плейлиста')}</h3>
+            <p className="text-xs text-cat-subtext0 mt-0.5">{t('Paste a Spotify link', 'Вставить ссылку Spotify')}</p>
           </div>
         </div>
       </div>
 
-      {/* Daily Mixes Section ("Сделано для тебя • Плейлисты дня") */}
+      {/* Daily Mixes Section ("Made for You • Daily Mixes") */}
       {(loadingMixes || dailyMixes.length > 0) && (
         <div className="mb-10">
           <div className="flex items-center justify-between gap-3 mb-4">
             <div className="flex items-center gap-2">
               <Sparkles className="w-5 h-5 text-cat-mauve" />
               <div>
-                <h2 className="text-lg font-bold text-cat-text leading-tight">Плейлисты дня • Для тебя</h2>
+                <h2 className="text-lg font-bold text-cat-text leading-tight">
+                  {t('Daily Mixes • Made for You', 'Плейлисты дня • Для тебя')}
+                </h2>
                 <p className="text-[11px] text-cat-subtext0">
-                  Разделены по жанрам твоих плейлистов • 80% новых треков и 20% любимой классики
+                  {t(
+                    'Grouped by your playlist genres • 80% fresh tracks & 20% familiar favorites',
+                    'Разделены по жанрам твоих плейлистов • 80% новых треков и 20% любимой классики'
+                  )}
                 </p>
               </div>
             </div>
@@ -216,10 +238,12 @@ export const Home: React.FC<HomeProps> = ({
               onClick={handleRefreshMixes}
               disabled={refreshingMixes || loadingMixes}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext1 hover:text-cat-text text-xs font-medium transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
-              title="Сгенерировать свежие Плейлисты дня"
+              title={t('Generate fresh Daily Mixes', 'Сгенерировать свежие Плейлисты дня')}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${refreshingMixes ? 'animate-spin text-cat-mauve' : ''}`} />
-              <span className="hidden sm:inline">{refreshingMixes ? 'Генерация...' : 'Обновить миксы'}</span>
+              <span className="hidden sm:inline">
+                {refreshingMixes ? t('Generating...', 'Генерация...') : t('Refresh Mixes', 'Обновить миксы')}
+              </span>
             </button>
           </div>
 
@@ -227,9 +251,14 @@ export const Home: React.FC<HomeProps> = ({
             <div className="bg-cat-mantle/80 border border-cat-surface0/60 rounded-3xl p-8 flex flex-col items-center justify-center text-center gap-3">
               <Loader2 className="w-8 h-8 text-cat-mauve animate-spin" />
               <div>
-                <p className="text-sm font-semibold text-cat-text">Собираем персональные Плейлисты дня...</p>
+                <p className="text-sm font-semibold text-cat-text">
+                  {t('Building your personal Daily Mixes...', 'Собираем персональные Плейлисты дня...')}
+                </p>
                 <p className="text-xs text-cat-subtext0 mt-1">
-                  Анализируем категории ваших плейлистов и подбираем новые треки по каждому жанру
+                  {t(
+                    'Analyzing your playlist genres and picking fresh tracks for each category',
+                    'Анализируем категории ваших плейлистов и подбираем новые треки по каждому жанру'
+                  )}
                 </p>
               </div>
             </div>
@@ -261,7 +290,7 @@ export const Home: React.FC<HomeProps> = ({
                       {/* Spotify-style Daily Mix Top Overlay */}
                       <div className="absolute inset-x-0 top-0 p-2.5 flex items-center justify-between bg-gradient-to-b from-cat-crust/85 via-cat-crust/40 to-transparent">
                         <span className="text-[10px] font-extrabold tracking-wider uppercase px-2 py-0.5 rounded-md bg-cat-crust/90 text-cat-text border border-white/10">
-                          МИКС ДНЯ #{mixNum}
+                          {t(`DAILY MIX #${mixNum}`, `МИКС ДНЯ #${mixNum}`)}
                         </span>
                       </div>
 
@@ -269,7 +298,7 @@ export const Home: React.FC<HomeProps> = ({
                       <div
                         className={`absolute inset-x-0 bottom-0 px-2.5 py-1.5 bg-gradient-to-r ${accent.badgeBg} text-cat-crust font-extrabold text-[10px] tracking-wider uppercase truncate`}
                       >
-                        {mix.category_title || mix.category_badge || 'Персональный микс'}
+                        {td(mix.category_title || mix.category_badge || t('Personal Mix', 'Персональный микс'))}
                       </div>
 
                       {/* Play Button Hover */}
@@ -288,28 +317,33 @@ export const Home: React.FC<HomeProps> = ({
                           }
                         }}
                         className="absolute right-2 bottom-8 w-9 h-9 rounded-full bg-cat-mauve text-cat-base flex items-center justify-center shadow-xl opacity-0 group-hover:opacity-100 transition-opacity translate-y-1 group-hover:translate-y-0 duration-200 hover:scale-105 active:scale-95 z-10"
-                        title="Включить микс дня"
+                        title={t('Play Daily Mix', 'Включить микс дня')}
                       >
                         <Play className="w-4 h-4 fill-current ml-0.5" />
                       </button>
                     </div>
 
-                    <h3 className="font-bold text-sm text-cat-text truncate">{mix.name}</h3>
+                    <h3 className="font-bold text-sm text-cat-text truncate">{td(mix.name)}</h3>
                     <p className="text-[11px] text-cat-subtext0 line-clamp-2 mt-0.5 leading-snug flex-1">
                       {mix.seed_artists && mix.seed_artists.length > 0
-                        ? `${mix.seed_artists.join(', ')} и новые треки`
-                        : mix.description || 'Новые треки в твоем стиле'}
+                        ? t(
+                            `${mix.seed_artists.join(', ')} and new tracks`,
+                            `${mix.seed_artists.join(', ')} и новые треки`
+                          )
+                        : td(mix.description) || t('Fresh tracks in your style', 'Новые треки в твоем стиле')}
                     </p>
 
                     <div className="mt-2 pt-1.5 border-t border-cat-surface0/60 flex items-center justify-between text-[11px]">
                       {isDownloading ? (
                         <span className="text-cat-mauve font-medium flex items-center gap-1 truncate">
                           <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
-                          Предзагрузка {mix.activeJob?.downloaded_tracks || mix.track_count || 0}/
+                          {t('Preloading', 'Предзагрузка')} {mix.activeJob?.downloaded_tracks || mix.track_count || 0}/
                           {mix.activeJob?.total_tracks || 25}
                         </span>
                       ) : (
-                        <span className="text-cat-subtext0">{mix.track_count || 0} треков • Готов</span>
+                        <span className="text-cat-subtext0">
+                          {formatTrackCount(mix.track_count || 0, lang)} • {t('Ready', 'Готов')}
+                        </span>
                       )}
                     </div>
                   </div>
@@ -322,16 +356,18 @@ export const Home: React.FC<HomeProps> = ({
 
       {/* Playlists Grid */}
       <div className="mb-8">
-        <h2 className="text-lg font-bold text-cat-text mb-4">Твои плейлисты</h2>
+        <h2 className="text-lg font-bold text-cat-text mb-4">{t('Your Playlists', 'Твои плейлисты')}</h2>
         {playlists.length === 0 ? (
           <div className="bg-cat-mantle p-8 rounded-3xl border border-cat-surface0/60 text-center">
             <Music2 className="w-12 h-12 text-cat-subtext0/40 mx-auto mb-3" />
-            <p className="text-sm text-cat-subtext0 mb-4">У вас пока нет плейлистов</p>
+            <p className="text-sm text-cat-subtext0 mb-4">
+              {t('You do not have any playlists yet', 'У вас пока нет плейлистов')}
+            </p>
             <button
               onClick={onOpenImport}
               className="px-5 py-2.5 rounded-full bg-cat-mauve text-cat-base font-bold text-xs"
             >
-              Импортировать из Spotify
+              {t('Import from Spotify', 'Импортировать из Spotify')}
             </button>
           </div>
         ) : (
@@ -356,9 +392,9 @@ export const Home: React.FC<HomeProps> = ({
                     <Play className="w-4 h-4 fill-current ml-0.5" />
                   </div>
                 </div>
-                <h3 className="font-semibold text-sm text-cat-text truncate">{playlist.name}</h3>
+                <h3 className="font-semibold text-sm text-cat-text truncate">{td(playlist.name)}</h3>
                 <p className="text-xs text-cat-subtext0 truncate mt-0.5">
-                  {playlist.track_count ? `${playlist.track_count} треков` : 'Плейлист'}
+                  {playlist.track_count ? formatTrackCount(playlist.track_count, lang) : t('Playlist', 'Плейлист')}
                 </p>
               </div>
             ))}
@@ -370,8 +406,8 @@ export const Home: React.FC<HomeProps> = ({
       {showScrollTop && (
         <button
           onClick={scrollToTop}
-          title="Наверх"
-          aria-label="Прокрутить наверх"
+          title={t('Back to top', 'Наверх')}
+          aria-label={t('Scroll to top', 'Прокрутить наверх')}
           className="fixed bottom-36 md:bottom-28 right-5 md:right-8 z-40 p-3.5 rounded-full bg-cat-mauve text-cat-base shadow-2xl hover:scale-110 active:scale-95 transition-all duration-200 cursor-pointer flex items-center justify-center border-2 border-cat-base animate-in fade-in zoom-in-75"
         >
           <ChevronUp className="w-5 h-5 stroke-[2.5]" />

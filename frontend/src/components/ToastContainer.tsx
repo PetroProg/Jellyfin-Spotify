@@ -1,8 +1,10 @@
 import React from 'react';
 import { useToastStore, ToastItem } from '../store/toastStore';
 import { CheckCircle2, AlertCircle, Info, AlertTriangle, X } from 'lucide-react';
+import { useI18nStore } from '../store/i18nStore';
 
 const ToastCard: React.FC<{ toast: ToastItem; onDismiss: (id: string) => void }> = ({ toast, onDismiss }) => {
+  const { t, td } = useI18nStore();
   const isSuccess = toast.type === 'success';
   const isError = toast.type === 'error';
   const isWarning = toast.type === 'warning';
@@ -53,11 +55,11 @@ const ToastCard: React.FC<{ toast: ToastItem; onDismiss: (id: string) => void }>
         <div className="flex-1 min-w-0 pt-0.5">
           {toast.title && (
             <h4 className="text-xs font-bold uppercase tracking-wider text-cat-text mb-0.5">
-              {toast.title}
+              {td(toast.title)}
             </h4>
           )}
           <p className="text-sm text-cat-text/90 font-medium leading-snug break-words">
-            {toast.message}
+            {td(toast.message)}
           </p>
         </div>
 
@@ -65,7 +67,7 @@ const ToastCard: React.FC<{ toast: ToastItem; onDismiss: (id: string) => void }>
         <button
           onClick={() => onDismiss(toast.id)}
           className="p-1 rounded-lg text-cat-subtext0 hover:text-cat-text hover:bg-cat-surface0/60 transition active:scale-95 flex-shrink-0"
-          aria-label="Закрыть"
+          aria-label={t('Close', 'Закрыть')}
         >
           <X className="w-4 h-4" />
         </button>

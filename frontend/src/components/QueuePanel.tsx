@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Heart, Ban, Music2 } from 'lucide-react';
-import { Track } from '../types';
+import { Ban, Music2 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { apiRequest } from '../api/client';
+import { useI18nStore } from '../store/i18nStore';
 
 export const QueuePanel: React.FC = () => {
+  const { t } = useI18nStore();
   const { queue, currentIndex, playTrack, currentTrack } = usePlayerStore();
   const [recommendations, setRecommendations] = useState<any[]>([]);
 
@@ -35,10 +36,10 @@ export const QueuePanel: React.FC = () => {
   return (
     <aside className="hidden xl:flex flex-col w-72 bg-cat-mantle p-4 border-l border-cat-surface0/30 select-none">
       {/* Up Next Section */}
-      <h3 className="text-sm font-bold text-cat-text mb-3">В очереди</h3>
+      <h3 className="text-sm font-bold text-cat-text mb-3">{t('Up Next', 'В очереди')}</h3>
       <div className="space-y-2 mb-6">
         {upNext.length === 0 ? (
-          <p className="text-xs text-cat-subtext0">Очередь пуста</p>
+          <p className="text-xs text-cat-subtext0">{t('Queue is empty', 'Очередь пуста')}</p>
         ) : (
           upNext.map((track, i) => (
             <div
@@ -63,10 +64,10 @@ export const QueuePanel: React.FC = () => {
       </div>
 
       {/* Discover Similar Section */}
-      <h3 className="text-sm font-bold text-cat-text mb-3">Похожая музыка</h3>
+      <h3 className="text-sm font-bold text-cat-text mb-3">{t('Similar Music', 'Похожая музыка')}</h3>
       <div className="space-y-2 flex-1 overflow-y-auto custom-scrollbar">
         {recommendations.length === 0 ? (
-          <p className="text-xs text-cat-subtext0">Нет рекомендаций</p>
+          <p className="text-xs text-cat-subtext0">{t('No recommendations', 'Нет рекомендаций')}</p>
         ) : (
           recommendations.slice(0, 5).map((rec, i) => (
             <div
@@ -93,7 +94,7 @@ export const QueuePanel: React.FC = () => {
               <div className="flex items-center gap-1 flex-shrink-0">
                 <button
                   onClick={() => handleBlacklist(rec)}
-                  title="Никогда не включать"
+                  title={t('Never Play This', 'Никогда не включать')}
                   className="p-1 rounded-md text-cat-subtext0 hover:text-cat-red hover:bg-cat-surface1 transition-colors"
                 >
                   <Ban className="w-3.5 h-3.5" />
