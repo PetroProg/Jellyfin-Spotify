@@ -19,7 +19,7 @@ export const CATEGORY_DEFINITIONS: Record<string, CategoryConfig> = {
     accentColor: 'sapphire',
     keywords: [
       'phonk', 'drift phonk', 'brazilian phonk', 'aggressive phonk',
-      'chill phonk', 'wave', 'hardwave', 'memphis', 'cowbell', 'фонк'
+      'chill phonk', 'wave', 'hardwave', 'memphis', 'cowbell', 'фонк', 'jumpstyle'
     ]
   },
   electronic: {
@@ -38,14 +38,26 @@ export const CATEGORY_DEFINITIONS: Record<string, CategoryConfig> = {
   rock: {
     key: 'rock',
     title: 'Рок и Альтернатива',
-    badge: 'ROCK & ALTERNATIVE',
+    badge: 'MODERN ROCK & METAL',
     accentColor: 'red',
     keywords: [
-      'rock', 'metal', 'alternative rock', 'alt-rock', 'alternative', 'punk', 'post-punk', 'grunge',
-      'post-grunge', 'indie rock', 'hard rock', 'heavy metal', 'nu metal', 'metalcore',
-      'deathcore', 'pop punk', 'emo', 'shoegaze', 'classic rock', 'garage rock',
-      'psychedelic rock', 'progressive rock', 'post-hardcore', 'russian rock',
-      'рок', 'панк', 'метал', 'пост-панк', 'альтернатива'
+      'alternative metal', 'nu metal', 'metalcore', 'deathcore', 'post-hardcore',
+      'post-grunge', 'modern rock', 'electronic rock', 'hard rock', 'heavy metal',
+      'alternative rock', 'alt-rock', 'pop punk', 'emo', 'industrial metal',
+      'symphonic metal', 'rap metal', 'rap rock', 'grunge', 'punk', 'post-punk',
+      'индастриал', 'металкор', 'пост-гранж', 'альтернативный рок', 'альт-метал'
+    ]
+  },
+  classic_rock: {
+    key: 'classic_rock',
+    title: 'Классический Рок',
+    badge: 'CLASSIC ROCK',
+    accentColor: 'peach',
+    keywords: [
+      'classic rock', 'arena rock', 'album rock', 'soft rock', 'glam metal',
+      'southern rock', 'heartland rock', 'yacht rock', 'psychedelic rock',
+      'progressive rock', 'blues rock', 'folk rock', 'art rock', 'roots rock',
+      'rock & roll', 'rockabilly', 'british invasion', 'классический рок', 'русский рок'
     ]
   },
   hiphop_ru: {
@@ -65,7 +77,7 @@ export const CATEGORY_DEFINITIONS: Record<string, CategoryConfig> = {
     badge: 'HIP-HOP & TRAP',
     accentColor: 'mauve',
     keywords: [
-      'hip hop', 'hip-hop', 'rap', 'trap', 'drill', 'grime', 'boom bap',
+      'hip hop', 'hip-hop', 'hip-hop/rap', 'rap', 'trap', 'drill', 'grime', 'boom bap',
       'cloud rap', 'rage', 'melodic rap', 'atl hip hop', 'chicago rap',
       'gangsta rap', 'west coast rap', 'east coast hip hop', 'southern hip hop',
       'underground hip hop', 'dirty south', 'рэп', 'хип-хоп', 'трэп'
@@ -78,7 +90,7 @@ export const CATEGORY_DEFINITIONS: Record<string, CategoryConfig> = {
     accentColor: 'pink',
     keywords: [
       'pop', 'dance pop', 'synth-pop', 'synthpop', 'electropop', 'teen pop', 'k-pop',
-      'j-pop', 'europop', 'estrada', 'r&b', 'rnb', 'soul', 'neo soul',
+      'j-pop', 'europop', 'estrada', 'r&b', 'rnb', 'r&b/soul', 'soul', 'neo soul',
       'funk', 'disco', 'contemporary r&b', 'art pop', 'latin pop',
       'new wave', 'new romantic', '80s', 'russian pop', 'поп', 'соул'
     ]
@@ -95,6 +107,83 @@ export const CATEGORY_DEFINITIONS: Record<string, CategoryConfig> = {
     ]
   }
 };
+
+/**
+ * Curated anchor sets to disambiguate Modern Rock / Alt-Metal / Metalcore vs Classic / Arena / Soft Rock
+ * when external APIs return generic tags like "Rock" or "Hard Rock".
+ */
+const MODERN_ROCK_ANCHORS = new Set<string>([
+  'starset', 'skillet', 'bad omens', 'bring me the horizon', 'motionless in white',
+  'asking alexandria', 'thousand foot krutch', 'three days grace', 'breaking benjamin',
+  'red', 'until i wake', 'the veer union', 'project vela', 'solence', 'caskets',
+  'our last night', 'falling in reverse', 'i prevail', 'papa roach', 'shinedown',
+  'from ashes to new', 'smash into pieces', 'citizen soldier', 'onlap', 'fame on fire',
+  'written by wolves', 'the plot in you', 'the word alive', 'memphis may fire',
+  'escape the fate', 'black veil brides', 'we came as romans', 'beartooth',
+  'a day to remember', 'architects', 'sleep token', 'spiritbox', 'dayseeker',
+  'imminence', 'catch your breath', 'point north', 'rain city drive', 'normandie',
+  'hands like houses', '10 years', 'evans blue', 'my darkest days', 'theory of a deadman',
+  'seether', 'staind', 'disturbed', 'godsmack', 'five finger death punch',
+  'avenged sevenfold', 'bullet for my valentine', 'trivium', 'slipknot', 'korn',
+  'system of a down', 'deftones', 'linkin park', 'evanescence', 'halestorm',
+  'the pretty reckless', 'amaranthe', 'within temptation', 'nightwish', 'renegade five',
+  'silent theory', 'ashes remain', 'manafest', 'dangerkids', 'hollywood undead',
+  'cult to follow', 'blacklite district', 'throw the fight', 'villain of the story',
+  'like a storm', 'nothing more', 'palisades', 'too close to touch', 'crown the empire',
+  'wage war', 'fit for a king', 'ice nine kills', 'pierce the veil', 'sleeping with sirens',
+  'all time low', 'fall out boy', 'panic! at the disco', 'my chemical romance',
+  'paramore', 'sum 41', 'the offspring', 'rise against', 'billy talent', 'silverstein',
+  'underneath', 'blessthefall', 'of mice & men', 'atreyu', 'killswitch engage',
+  'parkway drive', 'while she sleeps', 'bury tomorrow', 'polaris', 'currents',
+  'erra', 'northlane', 'landmvrks', 'wage war', 'zero 9:36', 'poorstacy',
+  'grandson', ' Barns Courtney', 'royal blood', 'highly suspect', 'cleopatrick',
+  'badflower', 'dead poet society', 'yonaka', 'pvrIS', 'new years day', 'in this moment',
+  'lacuna coil', 'epica', 'delain', 'beast in black', 'battle beast', 'sabaton',
+  'powerwolf', 'alestorm', 'wind rose', 'daughtry', 'nickelback', 'hinder',
+  'default', 'saliva', 'trapt', 'puddle of mudd', 'chevelle', 'flyleaf',
+  'sick puppies', 'adelitas way', 'pop evil', 'devour the day', 'saint asonia',
+  'starbenders', 'self deception', 'dead by april', 'amaranthe', 'smash into pieces'
+].map(s => s.toLowerCase().trim()));
+
+const CLASSIC_ROCK_ANCHORS = new Set<string>([
+  'scorpions', 'foreigner', 'bon jovi', 'aerosmith', 'bryan adams', 'journey',
+  'deep purple', 'the rolling stones', 'the beatles', 'the animals', 'kiss',
+  'kansas', 'the police', 'guns n\' roses', 'guns n roses', 'ac/dc', 'queen',
+  'def leppard', 'whitesnake', 'van halen', 'toto', 'reo speedwagon', 'europe',
+  'rod stewart', 'elton john', 'styx', 'asia', 'pat benatar', 'alice cooper',
+  'metallica', 'led zeppelin', 'pink floyd', 'black sabbath', 'iron maiden',
+  'judas priest', 'mötley crüe', 'motley crue', 'poison', 'skid row',
+  'twisted sister', 'zz top', 'creedence clearwater revival', 'dire straits',
+  'eagles', 'fleetwood mac', 'heart', 'boston', 'chicago', 'supertramp',
+  'genesis', 'phil collins', 'billy idol', 'billy joel', 'bruce springsteen',
+  'tom petty', 'u2', 'r.e.m.', 'oasis', 'blur', 'the verve', 'the cranberries',
+  'roxette', 'richard marx', 'bonnie tyler', 'chris rea', 'status quo',
+  'rainbow', 'uriah heep', 'nazareth', 'golden earring', 'slade', 'sweet',
+  'smokie', 'shocking blue', 'the mamas & the papas', 'steppenwolf', 'the doors',
+  'jimi hendrix', 'cream', 'eric clapton', 'santana', 'lynyrd skynyrd',
+  'blue öyster cult', 'cheap trick', 'joan jett', 'blondie', 'talking heads',
+  'the cure', 'depeche mode', 'tears for fears', 'simple minds', 'inxs',
+  'midnight oil', 'men at work', 'crowded house', 'john lennon', 'paul mccartney',
+  'george harrison', 'ozzy osbourne', 'dio', 'accept', 'helloween', 'saxon',
+  'motorhead', 'motörhead', 'thin lizzy', 'ufo', 'bad company', 'free',
+  'grand funk railroad', 'bobby hebb', 'the who', 'the kinks', 'yardbirds',
+  'yes', 'emerson, lake & palmer', 'jethro tull', 'king crimson', 'rush',
+  'marillion', 'alan parsons project', 'electric light orchestra', 'elo',
+  'supertramp', '10cc', 'the moody blues', 'procol harum', 't. rex',
+  'david bowie', 'iggy pop', 'lou reed', 'velvet underground', 'ramones',
+  'the clash', 'sex pistols', 'bobby mcferrin', 'sting', 'peter gabriel',
+  'mike oldfield', 'gary moore', 'jeff beck', 'rory gallagher', 'stevie ray vaughan',
+  'bb king', 'b.b. king', 'johnny cash', 'bob dylan', 'neil young',
+  'simon & garfunkel', 'cat stevens', 'don mclean', 'america', 'bread',
+  'air supply', 'christopher cross', 'michael bolton', 'meat loaf', 'mr. big',
+  'extreme', 'warrant', 'cinderella', 'ratt', 'dokken', 'quiet riot',
+  'great white', 'tesla', 'winger', 'firehouse', 'steelheart', 'damn yankees',
+  'bad english', 'night ranger', 'survivor', 'loverboy', 'starship',
+  'jefferson airplane', 'jefferson starship', 'the doobie brothers',
+  'steve miller band', 'bob seger', 'john mellencamp', 'huey lewis & the news',
+  'the cars', 'pretenders', 'the bangles', 'the go-go\'s', 'cyndi lauper',
+  'kim wilde', 'nena', 'opus', '3 doors down', 'the calling'
+].map(s => s.toLowerCase().trim()));
 
 interface ArtistMetadataRecord {
   artist_name: string;
@@ -124,6 +213,7 @@ export function isNameMatch(candidateName: string, targetName: string): boolean 
 export function extractPrimaryArtist(artistStr: string): string {
   if (!artistStr) return 'Unknown Artist';
   const cleaned = artistStr
+    .replace(/\u00A0/g, ' ')
     .split(/\s*(?:,|feat\.|ft\.|&|;|\/|\bx\b|\bпри уч\.)\s*/i)[0]
     .trim();
   return cleaned || artistStr.trim();
@@ -194,16 +284,19 @@ function isCisArtist(
 }
 
 /**
- * Classifies a list of genre strings + artist/track context into a strict category key.
+ * Classifies a list of genre strings + artist/track context + related_artists graph into a strict category key.
  */
 export function classifyGenresToCategory(
   genres: string[],
   artistName: string,
   sampleTitle?: string,
-  isRuHint = false
+  isRuHint = false,
+  relatedNames: string[] = []
 ): string | null {
+  const cleanArtist = extractPrimaryArtist(artistName).toLowerCase().trim();
   const gList = genres.map(g => g.toLowerCase().trim()).filter(Boolean);
   const joined = gList.join(' | ');
+  const relLower = relatedNames.map(r => r.toLowerCase().trim()).filter(Boolean);
 
   const isRu = isRuHint ||
     hasCyrillic(artistName) ||
@@ -213,39 +306,95 @@ export function classifyGenresToCategory(
     joined.includes('kazakh') ||
     joined.includes('belarusian');
 
-  // 1. Phonk first (distinct subgenre)
-  if (CATEGORY_DEFINITIONS.phonk.keywords.some(kw => joined.includes(kw))) {
+  // 0. Check direct anchor membership or strong related_artists graph overlap for Modern vs Classic Rock
+  if (MODERN_ROCK_ANCHORS.has(cleanArtist)) {
+    return 'rock';
+  }
+  if (CLASSIC_ROCK_ANCHORS.has(cleanArtist)) {
+    return 'classic_rock';
+  }
+
+  let modernRockRelCount = 0;
+  let classicRockRelCount = 0;
+  for (const rName of relLower) {
+    if (MODERN_ROCK_ANCHORS.has(rName)) modernRockRelCount++;
+    if (CLASSIC_ROCK_ANCHORS.has(rName)) classicRockRelCount++;
+  }
+
+  if (modernRockRelCount >= 2 && modernRockRelCount >= classicRockRelCount) {
+    return 'rock';
+  }
+  if (classicRockRelCount >= 2 && classicRockRelCount > modernRockRelCount) {
+    return 'classic_rock';
+  }
+
+  // 1. Phonk first (distinct subgenre, also check sample track title for "funk"/"montagem"/"slowed")
+  if (
+    CATEGORY_DEFINITIONS.phonk.keywords.some(kw => joined.includes(kw)) ||
+    /\b(phonk|montagem|jumpstyle)\b/i.test(sampleTitle || '')
+  ) {
     return 'phonk';
   }
 
-  // 2. Rock / Metal / Alternative / Post-Grunge / Punk
-  // Checked BEFORE hip-hop so rock bands with rap features or alternative tags are classified as rock
-  const hasRockGenre = CATEGORY_DEFINITIONS.rock.keywords.some(kw =>
+  // 2. Check specific Classic Rock vs Modern Rock genre tags
+  const hasClassicRockTag = CATEGORY_DEFINITIONS.classic_rock.keywords.some(kw =>
     gList.some(g => g === kw || g.includes(kw))
   );
 
-  // 3. Hip-Hop / Rap / Trap
+  // Exclude non-rock "alternative" tags like "alternative folk", "alternative r&b", "alternative country"
+  const isNonRockAlternative = gList.some(g =>
+    /alternative (folk|r&b|country|hip-hop|rap|pop)/i.test(g)
+  );
+
+  const hasModernRockTag = CATEGORY_DEFINITIONS.rock.keywords.some(kw =>
+    gList.some(g => g === kw || g.includes(kw))
+  ) || (!isNonRockAlternative && gList.some(g => g === 'rock' || g === 'metal' || g === 'alternative'));
+
+  // 3. Hip-Hop / Rap / Trap (including iTunes "hip-hop/rap")
   const hiphopKws = [
-    'hip hop', 'hip-hop', 'rap', 'trap', 'drill', 'grime', 'boom bap',
+    'hip hop', 'hip-hop', 'hip-hop/rap', 'rap', 'trap', 'drill', 'grime', 'boom bap',
     'cloud rap', 'rage', 'melodic rap', 'gangsta rap', 'рэп', 'хип-хоп', 'трэп'
   ];
   const hasHipHopGenre = gList.some(g =>
-    hiphopKws.some(kw => g === kw || g.startsWith(kw + ' ') || g.endsWith(' ' + kw) || g.includes(' ' + kw + ' '))
+    hiphopKws.some(kw =>
+      g === kw ||
+      g.split(/[\s/]+/).includes(kw) ||
+      g.includes(kw)
+    )
   );
 
-  if (hasRockGenre && hasHipHopGenre) {
-    // Artist has both rock and hip-hop (e.g. My Darkest Days feat Ludacris, Linkin Park) -> classify as rock
+  // 4. Electronic / Dance / EDM
+  const hasElectronicGenre = CATEGORY_DEFINITIONS.electronic.keywords.some(kw =>
+    gList.some(g => g === kw || g.includes(kw))
+  );
+
+  // Resolve Rock vs Classic Rock using related graph tie-breaker
+  if (hasClassicRockTag && modernRockRelCount === 0) {
+    return 'classic_rock';
+  }
+
+  if (hasModernRockTag) {
+    // If related artists lean Classic Rock (e.g. Journey, Foreigner, Scorpions), classify as classic_rock
+    if (classicRockRelCount >= 1 && modernRockRelCount === 0) {
+      return 'classic_rock';
+    }
+    if (modernRockRelCount >= 1) {
+      return 'rock';
+    }
+    // If artist has both Electronic/Hip-Hop AND generic "rock" from iTunes without rock related artists,
+    // check whether Electronic or Hip-Hop is primary (e.g. French rap or EDM with one rock collab)
+    if ((hasHipHopGenre || hasElectronicGenre) && gList[0] !== 'rock' && gList[0] !== 'hard rock' && gList[0] !== 'metal') {
+      if (hasHipHopGenre) return isRu ? 'hiphop_ru' : 'hiphop_intl';
+      if (hasElectronicGenre) return 'electronic';
+    }
     return 'rock';
   }
-  if (hasRockGenre) {
-    return 'rock';
-  }
+
   if (hasHipHopGenre) {
     return isRu ? 'hiphop_ru' : 'hiphop_intl';
   }
 
-  // 4. Electronic / Dance / EDM
-  if (CATEGORY_DEFINITIONS.electronic.keywords.some(kw => gList.some(g => g === kw || g.includes(kw)))) {
+  if (hasElectronicGenre) {
     return 'electronic';
   }
 
@@ -254,7 +403,7 @@ export function classifyGenresToCategory(
     return 'pop';
   }
 
-  // 6. Chill / Lo-Fi / Acoustic (only if truly chill, NOT just any movie soundtrack)
+  // 6. Chill / Lo-Fi / Acoustic
   if (CATEGORY_DEFINITIONS.chill.keywords.some(kw => gList.some(g => g === kw || g.includes(kw)))) {
     return 'chill';
   }
@@ -273,13 +422,24 @@ export async function resolveArtistMetadata(artistName: string, sampleTrackTitle
     const cached: any = db.prepare('SELECT * FROM artist_metadata WHERE artist_name = ?').get(key);
     if (cached && cached.category && cached.deezer_id) {
       const rels = JSON.parse(cached.related_artists || '[]');
+      const cachedGenres = JSON.parse(cached.genres || '[]');
       if (rels.length > 0) {
+        const relNames = rels.map((r: any) => r.name || '');
+        const isRu = isCisArtist(primary, sampleTrackTitle, cachedGenres, relNames);
+        // Re-evaluate category dynamically using current graph + anchor rules so stale categories never persist
+        const freshCategory = classifyGenresToCategory(cachedGenres, primary, sampleTrackTitle, isRu, relNames) || cached.category;
+        if (freshCategory !== cached.category) {
+          try {
+            db.prepare('UPDATE artist_metadata SET category = ?, updated_at = CURRENT_TIMESTAMP WHERE artist_name = ?')
+              .run(freshCategory, key);
+          } catch (_) {}
+        }
         return {
           artist_name: key,
           spotify_id: cached.spotify_id,
           deezer_id: cached.deezer_id,
-          genres: JSON.parse(cached.genres || '[]'),
-          category: cached.category,
+          genres: cachedGenres,
+          category: freshCategory,
           related_artists: rels,
           cover_url: cached.cover_url
         };
@@ -324,7 +484,6 @@ export async function resolveArtistMetadata(artistName: string, sampleTrackTitle
         const data: any = await itSongRes.json();
         for (const item of data.results || []) {
           const itemArtist = extractPrimaryArtist(item.artistName || '').toLowerCase();
-          // STRICT check: do NOT take genres of songs by other artists (e.g. Jelly Roll - Save Me)
           if (itemArtist === key || itemArtist.includes(key) || key.includes(itemArtist)) {
             if (item.primaryGenreName && item.primaryGenreName !== 'Music') {
               const g = String(item.primaryGenreName).toLowerCase();
@@ -397,15 +556,9 @@ export async function resolveArtistMetadata(artistName: string, sampleTrackTitle
     }
   } catch (_) {}
 
-  // Check if artist is Russian / CIS music
-  const isRu = isCisArtist(
-    primary,
-    sampleTrackTitle,
-    genres,
-    relatedArtists.map(r => r.name)
-  );
-
-  const category = classifyGenresToCategory(genres, primary, sampleTrackTitle, isRu);
+  const relNames = relatedArtists.map(r => r.name);
+  const isRu = isCisArtist(primary, sampleTrackTitle, genres, relNames);
+  const category = classifyGenresToCategory(genres, primary, sampleTrackTitle, isRu, relNames);
 
   const record: ArtistMetadataRecord = {
     artist_name: key,
@@ -521,7 +674,7 @@ async function fetchArtistCandidateTracks(
 }
 
 /**
- * Fallback to Deezer charts or curated genre searches to ensure exactly 25 tracks per mix.
+ * Fallback to curated genre searches to ensure exactly 25 tracks per mix without cross-genre pollution.
  */
 async function fetchGenreFallbackTracks(categoryKey: string): Promise<SpotifyTrack[]> {
   const results: SpotifyTrack[] = [];
@@ -530,6 +683,9 @@ async function fetchGenreFallbackTracks(categoryKey: string): Promise<SpotifyTra
     if (categoryKey === 'pop') {
       url = 'https://api.deezer.com/chart/132/tracks?limit=40';
     } else if (categoryKey === 'rock') {
+      // Modern Rock / Alt-Metal / Post-Grunge search instead of generic 70s/80s Rock chart
+      url = `https://api.deezer.com/search?q=${encodeURIComponent('Breaking Benjamin Three Days Grace Starset')}&limit=40`;
+    } else if (categoryKey === 'classic_rock') {
       url = 'https://api.deezer.com/chart/152/tracks?limit=40';
     } else if (categoryKey === 'electronic') {
       url = 'https://api.deezer.com/chart/113/tracks?limit=40';
@@ -664,10 +820,26 @@ function enrichDailyMixRow(row: any) {
   };
 }
 
+/**
+ * Playlist name heuristics to separate user-curated "Old/Retro/Classic" playlists from "Gym/Modern/Workout" playlists.
+ */
+function isRetroPlaylistName(name?: string | null): boolean {
+  if (!name) return false;
+  return /\b(old|retro|classic|70s|80s|90s|vintage|gold|старые|ретро|классика)\b/i.test(name);
+}
+
+function isModernWorkoutPlaylistName(name?: string | null): boolean {
+  if (!name) return false;
+  return /\b(gym|workout|fitness|phonk|sport|rage|hard|зал|тренировка|фонк)\b/i.test(name);
+}
+
 async function generateDailyMixesInternal(userId: number, today: string): Promise<any[]> {
-  // 1. Gather all user tracks from permanent playlists and liked_tracks
+  // 1. Gather all user tracks from permanent playlists and liked_tracks, including source playlist name
   const userTracks: any[] = db.prepare(`
-    SELECT DISTINCT t.id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, t.spotify_id, p.id as source_playlist_id
+    SELECT DISTINCT
+      t.id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, t.spotify_id,
+      p.id as source_playlist_id,
+      p.name as source_playlist_name
     FROM tracks t
     LEFT JOIN playlist_tracks pt ON pt.track_id = t.id
     LEFT JOIN playlists p ON p.id = pt.playlist_id AND COALESCE(p.is_daily_mix, 0) = 0
@@ -705,13 +877,14 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     if (ut.spotify_id) ownedSpotifyIds.add(ut.spotify_id);
   }
 
-  // 3. Extract unique primary artists and count frequency
+  // 3. Extract unique primary artists, count frequency, and track source playlists
   const artistMap = new Map<string, {
     displayName: string;
     count: number;
     sampleTitle: string;
     tracks: any[];
     playlistIds: Set<number>;
+    playlistNames: Set<string>;
   }>();
 
   for (const ut of userTracks) {
@@ -724,23 +897,27 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
         count: 0,
         sampleTitle: ut.title,
         tracks: [],
-        playlistIds: new Set()
+        playlistIds: new Set(),
+        playlistNames: new Set()
       });
     }
     const entry = artistMap.get(key)!;
-    entry.count++;
     if (!entry.tracks.some(t => t.id === ut.id)) {
       entry.tracks.push(ut);
+      entry.count++;
     }
     if (ut.source_playlist_id) {
       entry.playlistIds.add(ut.source_playlist_id);
     }
+    if (ut.source_playlist_name) {
+      entry.playlistNames.add(ut.source_playlist_name);
+    }
   }
 
-  // Sort artists by track count descending, take top 50
+  // Sort artists by track count descending, take top 65 so all playlists are well-represented
   const sortedArtists = Array.from(artistMap.entries())
     .sort((a, b) => b[1].count - a[1].count)
-    .slice(0, 50);
+    .slice(0, 65);
 
   // Resolve artist metadata in batches of 4 with pauses to prevent Deezer 429
   const metadataByArtist = new Map<string, ArtistMetadataRecord>();
@@ -758,9 +935,19 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     }
   }
 
-  // Group artists & their user tracks into categories
+  // 4. Group artists & their user tracks into categories, accounting for source playlist context
+  type ClusterArtist = {
+    key: string;
+    displayName: string;
+    count: number;
+    playlistIds: Set<number>;
+    playlistNames: Set<string>;
+    meta: ArtistMetadataRecord;
+    graphDegree?: number;
+  };
+
   const rawClusters = new Map<string, {
-    artists: { key: string; displayName: string; count: number; meta: ArtistMetadataRecord }[];
+    artists: ClusterArtist[];
     userTracks: any[];
   }>();
 
@@ -780,11 +967,32 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       cat = isRu ? 'hiphop_ru' : 'pop';
     }
 
+    // Apply Source Playlist Context (Improvement #2):
+    // If an artist is in a Retro/Old playlist (e.g. "Old songs") and NOT in a Gym/Workout playlist,
+    // prevent them from polluting Modern Rock ('rock') unless they are an explicit Modern Rock anchor.
+    const pNames = Array.from(info.playlistNames);
+    const inRetroPlaylist = pNames.some(isRetroPlaylistName);
+    const inModernWorkoutPlaylist = pNames.some(isModernWorkoutPlaylistName);
+
+    if (cat === 'rock' && inRetroPlaylist && !inModernWorkoutPlaylist) {
+      const relLower = (meta?.related_artists || []).map(r => r.name.toLowerCase().trim());
+      const modernOverlap = relLower.filter(r => MODERN_ROCK_ANCHORS.has(r)).length;
+      if (!MODERN_ROCK_ANCHORS.has(artistKey) && modernOverlap < 2) {
+        cat = 'classic_rock';
+      }
+    } else if (cat === 'classic_rock' && inModernWorkoutPlaylist && !inRetroPlaylist) {
+      if (!CLASSIC_ROCK_ANCHORS.has(artistKey)) {
+        cat = 'rock';
+      }
+    }
+
     const cluster = ensureCluster(cat);
     cluster.artists.push({
       key: artistKey,
       displayName: info.displayName,
       count: info.count,
+      playlistIds: info.playlistIds,
+      playlistNames: info.playlistNames,
       meta: meta || {
         artist_name: artistKey,
         spotify_id: null,
@@ -803,8 +1011,73 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     }
   }
 
+  // 5. Graph Overlap & Co-occurrence Filtering within each cluster (Improvement #4):
+  // Prune accidental genre-tag outliers (e.g., an artist whose related_artists graph has 0 overlap
+  // with every other artist in the cluster).
+  for (const [catKey, cluster] of rawClusters.entries()) {
+    if (cluster.artists.length < 4) continue;
+
+    // Build related set for each artist in the cluster
+    const relSets = new Map<string, Set<string>>();
+    for (const a of cluster.artists) {
+      const s = new Set<string>();
+      for (const r of a.meta.related_artists || []) {
+        if (r.name) s.add(r.name.toLowerCase().trim());
+      }
+      relSets.set(a.key, s);
+    }
+
+    // Compute graphDegree: how many other artists in this cluster share a direct link or common related artist
+    let connectedArtistsCount = 0;
+    for (const a of cluster.artists) {
+      const aRels = relSets.get(a.key)!;
+      let degree = 0;
+      for (const b of cluster.artists) {
+        if (a.key === b.key) continue;
+        const bRels = relSets.get(b.key)!;
+        const directLink = aRels.has(b.key) || bRels.has(a.key);
+        let sharedNeighbor = false;
+        if (!directLink) {
+          for (const nr of aRels) {
+            if (bRels.has(nr)) {
+              sharedNeighbor = true;
+              break;
+            }
+          }
+        }
+        if (directLink || sharedNeighbor) {
+          degree++;
+        }
+      }
+      a.graphDegree = degree;
+      if (degree >= 1) connectedArtistsCount++;
+    }
+
+    // If the cluster has a well-connected core (>= 3 connected artists), remove isolated outliers (graphDegree === 0)
+    // unless they are explicit category anchors.
+    if (connectedArtistsCount >= 3) {
+      const isAnchorForCat = (artistKey: string): boolean => {
+        if (catKey === 'rock') return MODERN_ROCK_ANCHORS.has(artistKey);
+        if (catKey === 'classic_rock') return CLASSIC_ROCK_ANCHORS.has(artistKey);
+        return false;
+      };
+
+      const filteredArtists = cluster.artists.filter(
+        a => (a.graphDegree || 0) >= 1 || isAnchorForCat(a.key)
+      );
+
+      if (filteredArtists.length >= 3) {
+        const allowedKeys = new Set(filteredArtists.map(a => a.key));
+        cluster.artists = filteredArtists;
+        cluster.userTracks = cluster.userTracks.filter(t =>
+          allowedKeys.has(extractPrimaryArtist(t.artist).toLowerCase())
+        );
+      }
+    }
+  }
+
   // Only merge closely-related sub-branches if one has < 2 tracks (e.g. phonk into electronic)
-  // NEVER merge rock with hip-hop, or Russian hip-hop with foreign genres!
+  // NEVER merge classic_rock with modern rock, or rock with hip-hop!
   const mergeClusterInto = (fromKey: string, intoKey: string) => {
     const fromC = rawClusters.get(fromKey);
     if (!fromC) return;
@@ -858,8 +1131,20 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       keywords: []
     };
 
+    // Sort cluster artists by connectivity + track count so the most representative core artists lead the mix
+    const rankedClusterArtists = [...cluster.artists].sort((a, b) => {
+      const scoreA = a.count * 2 + (a.graphDegree || 0) * 1.5 + Math.random() * 1.5;
+      const scoreB = b.count * 2 + (b.graphDegree || 0) * 1.5 + Math.random() * 1.5;
+      return scoreB - scoreA;
+    });
+
+    const coreArtistKeys = new Set(rankedClusterArtists.map(a => a.key));
+
     // 1. Pick 15-20% familiar tracks (up to 5) from user's library in this cluster
-    const shuffledUserTracks = [...cluster.userTracks].sort(() => Math.random() - 0.5);
+    const shuffledUserTracks = [...cluster.userTracks]
+      .filter(ut => coreArtistKeys.has(extractPrimaryArtist(ut.artist).toLowerCase()))
+      .sort(() => Math.random() - 0.5);
+
     const familiarTracks: any[] = [];
     const familiarArtistsUsed = new Set<string>();
 
@@ -872,7 +1157,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       }
     }
     for (const ut of shuffledUserTracks) {
-      if (familiarTracks.length >= Math.min(5, cluster.userTracks.length)) break;
+      if (familiarTracks.length >= Math.min(5, shuffledUserTracks.length)) break;
       if (!familiarTracks.some(f => f.id === ut.id)) {
         familiarTracks.push(ut);
       }
@@ -894,11 +1179,15 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
 
     const canAddCandidate = (cand: SpotifyTrack): boolean => {
       if (!cand.title || !cand.artist) return false;
+      const pa = extractPrimaryArtist(cand.artist).toLowerCase();
+      // Never allow a Classic Rock anchor in Modern Rock mix or vice versa
+      if (catKey === 'rock' && CLASSIC_ROCK_ANCHORS.has(pa)) return false;
+      if (catKey === 'classic_rock' && MODERN_ROCK_ANCHORS.has(pa)) return false;
+
       const tKey = normalizeTrackKey(cand.artist, cand.title);
       if (usedTrackKeys.has(tKey)) return false;
       if (cand.id && ownedSpotifyIds.has(cand.id)) return false;
       if (isBlacklisted(cand.artist, cand.title, cand.id)) return false;
-      const pa = extractPrimaryArtist(cand.artist).toLowerCase();
       if ((artistCountInMix.get(pa) || 0) >= maxTracksPerArtist) return false;
       return true;
     };
@@ -912,9 +1201,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     };
 
     // Stage A: Unheard tracks from seed artists in this category
-    const seedArtistsPool = [...cluster.artists]
-      .sort((a, b) => (b.count + Math.random() * 2) - (a.count + Math.random() * 2))
-      .slice(0, 10);
+    const seedArtistsPool = rankedClusterArtists.slice(0, 10);
 
     const seedTrackLists = await Promise.all(
       seedArtistsPool.map(sa => fetchArtistCandidateTracks(sa.displayName, sa.meta.deezer_id))
@@ -932,8 +1219,20 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       }
     }
 
-    // Stage B: Tracks from Related Artists strictly verified for the same category
-    const relatedPool: { name: string; deezer_id?: number; cover_url?: string }[] = [];
+    // Stage B: Tracks from Related Artists verified by BOTH Category AND Graph Overlap
+    // Count how many cluster artists recommend each related artist (co-recommendation weight)
+    const relatedRecommendationCount = new Map<string, number>();
+    const clusterNeighborhood = new Set<string>(cluster.artists.map(a => a.key));
+
+    for (const ca of cluster.artists) {
+      for (const rel of ca.meta.related_artists || []) {
+        const rKey = rel.name.toLowerCase().trim();
+        clusterNeighborhood.add(rKey);
+        relatedRecommendationCount.set(rKey, (relatedRecommendationCount.get(rKey) || 0) + 1);
+      }
+    }
+
+    const relatedPool: { name: string; deezer_id?: number; cover_url?: string; recCount: number }[] = [];
     const seenRelated = new Set<string>(cluster.artists.map(a => a.key));
 
     for (const sa of seedArtistsPool) {
@@ -941,24 +1240,49 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
         const rKey = rel.name.toLowerCase().trim();
         if (!seenRelated.has(rKey)) {
           seenRelated.add(rKey);
-          relatedPool.push(rel);
+          relatedPool.push({
+            ...rel,
+            recCount: relatedRecommendationCount.get(rKey) || 1
+          });
         }
       }
     }
 
-    const shuffledRelated = relatedPool.sort(() => Math.random() - 0.5).slice(0, 25);
+    // Prioritize related artists that are shared by multiple seed artists in your playlist!
+    const sortedRelated = relatedPool
+      .sort((a, b) => (b.recCount + Math.random() * 0.8) - (a.recCount + Math.random() * 0.8))
+      .slice(0, 28);
 
-    for (let rIdx = 0; rIdx < shuffledRelated.length; rIdx += 5) {
+    for (let rIdx = 0; rIdx < sortedRelated.length; rIdx += 5) {
       if (newCandidates.length >= TARGET_NEW_COUNT) break;
-      const rBatch = shuffledRelated.slice(rIdx, rIdx + 5);
+      const rBatch = sortedRelated.slice(rIdx, rIdx + 5);
 
       const batchResults = await Promise.all(
         rBatch.map(async (rel) => {
+          const relKey = rel.name.toLowerCase().trim();
+          if (catKey === 'rock' && CLASSIC_ROCK_ANCHORS.has(relKey)) return [];
+          if (catKey === 'classic_rock' && MODERN_ROCK_ANCHORS.has(relKey)) return [];
+
           const relMeta = await resolveArtistMetadata(rel.name);
-          // STRICT CHECK: Reject any artist whose category does not match this mix's category!
+          // 1. STRICT CATEGORY CHECK: Reject any artist whose category does not match this mix's category
           if (relMeta.category !== catKey) {
             return [];
           }
+
+          // 2. GRAPH OVERLAP CHECK: Verify that this candidate artist's own related_artists
+          // intersect with the cluster's neighborhood (so tangential/mismatched artists are rejected)
+          const candNeighbors = (relMeta.related_artists || []).map(r => r.name.toLowerCase().trim());
+          let graphOverlap = 0;
+          for (const cn of candNeighbors) {
+            if (clusterNeighborhood.has(cn)) {
+              graphOverlap++;
+            }
+          }
+
+          if (graphOverlap === 0 && rel.recCount < 2 && cluster.artists.length >= 2) {
+            return [];
+          }
+
           return await fetchArtistCandidateTracks(rel.name, rel.deezer_id || relMeta.deezer_id);
         })
       );
@@ -989,7 +1313,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       }
     }
 
-    // Stage D: If STILL below TARGET_NEW_COUNT, fetch genre fallback tracks from Deezer charts / search
+    // Stage D: If STILL below TARGET_NEW_COUNT, fetch genre fallback tracks
     if (newCandidates.length < TARGET_NEW_COUNT) {
       maxTracksPerArtist = 4;
       const fallbackTracks = await fetchGenreFallbackTracks(catKey);

@@ -20,6 +20,7 @@ const CATEGORY_MAP_RU_TO_EN: Record<string, string> = {
   'Фонк и Wave': 'Phonk & Wave',
   'Электроника и Дэнс': 'Electronic & Dance',
   'Рок и Альтернатива': 'Rock & Alternative',
+  'Классический Рок': 'Classic Rock',
   'Русский Рэп и Хип-Хоп': 'RU Rap & Hip-Hop',
   'Зарубежный Хип-Хоп': 'Hip-Hop & Trap',
   'Поп и Ретро': 'Pop & Retro',
