@@ -28,6 +28,13 @@ export async function apiRequest<T = any>(endpoint: string, options: RequestInit
     headers['Authorization'] = `Bearer ${token}`;
   }
 
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz) {
+      headers['X-Timezone'] = tz;
+    }
+  } catch {}
+
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     const offlineErr: any = new Error(tr('No network connection', 'Отсутствует подключение к сети'));
     offlineErr.isNetworkError = true;

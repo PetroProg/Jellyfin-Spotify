@@ -32,6 +32,7 @@ import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
 import { setupWebSocketSync } from './sync';
 import { getOrGenerateDailyMixes, saveDailyMixAsPlaylist } from './dailyMix';
+import { startNightlyScheduler, getNightlySchedulerStatus, updateNightlySchedule } from './nightlyScheduler';
 
 dotenv.config();
 
@@ -285,7 +286,13 @@ server.get('/api/stream/:trackId', async (req: any, reply: any) => {
 // ----------------- DAILY MIXES -----------------
 server.get('/api/daily-mixes', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   try {
-    const mixes = await getOrGenerateDailyMixes(req.user.id, false);
+    const clientTz = typeof req.headers['x-timezone'] === 'string' ? req.headers['x-timezone'] : undefined;
+    if (clientTz) {
+      try {
+        db.prepare('UPDATE users SET timezone = ? WHERE id = ? AND (timezone IS NULL OR timezone != ?)').run(clientTz, req.user.id, clientTz);
+      } catch (_) {}
+    }
+    const mixes = await getOrGenerateDailyMixes(req.user.id, false, clientTz);
     return { mixes };
   } catch (err: any) {
     console.error('[Daily Mixes Error]:', err);
@@ -293,9 +300,19 @@ server.get('/api/daily-mixes', { preHandler: [(server as any).authenticate] }, a
   }
 });
 
+server.get('/api/daily-mixes/schedule', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+  return getNightlySchedulerStatus(req.user.id);
+});
+
+server.put('/api/daily-mixes/schedule', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+  const body = req.body || {};
+  return updateNightlySchedule(req.user.id, body);
+});
+
 server.post('/api/daily-mixes/refresh', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   try {
-    const mixes = await getOrGenerateDailyMixes(req.user.id, true);
+    const clientTz = typeof req.headers['x-timezone'] === 'string' ? req.headers['x-timezone'] : undefined;
+    const mixes = await getOrGenerateDailyMixes(req.user.id, true, clientTz);
     return { mixes };
   } catch (err: any) {
     console.error('[Daily Mixes Refresh Error]:', err);
@@ -1116,4 +1133,6 @@ server.listen({ port: PORT, host: '0.0.0.0' }, async (err, address) => {
   console.log(`[Jellyfin-Spotify] Server running at ${address}`);
   // Automatically resume any downloads that were interrupted
   await resumePendingDownloads();
+  // Start automated nightly mix background generator & pre-downloader
+  startNightlyScheduler();
 });

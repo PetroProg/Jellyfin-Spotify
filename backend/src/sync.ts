@@ -463,3 +463,14 @@ export function setupWebSocketSync(server: FastifyInstance) {
 
   console.log('[WebSocket Sync] Real-time multi-device synchronization initialized on /api/ws');
 }
+
+export function isUserOnline(userId: number): boolean {
+  const clients = userClients.get(userId);
+  return !!(clients && clients.size > 0);
+}
+
+export function isUserPlayingMusic(userId: number): boolean {
+  const playback = userPlayback.get(userId);
+  return !!(playback && playback.isPlaying);
+}
+

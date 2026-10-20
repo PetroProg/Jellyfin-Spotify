@@ -753,15 +753,29 @@ export function cleanupOrphanDailyMixTracks() {
   }
 }
 
-function getTodayDateKey(): string {
-  return new Date().toISOString().slice(0, 10);
+export function getUserTimezone(userId: number): string {
+  try {
+    const row = db.prepare('SELECT timezone FROM users WHERE id = ?').get(userId) as any;
+    if (row && row.timezone) return row.timezone;
+  } catch (_) {}
+  return process.env.TIMEZONE || 'Europe/Kyiv';
+}
+
+export function getTodayDateKey(timeZone?: string): string {
+  try {
+    const tz = timeZone || process.env.TIMEZONE || 'Europe/Kyiv';
+    return new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
+  } catch (_) {
+    return new Date().toISOString().slice(0, 10);
+  }
 }
 
 /**
  * Returns existing Daily Mixes for today, or generates new ones if none exist for today (or if forceRefresh = true).
  */
-export async function getOrGenerateDailyMixes(userId: number, forceRefresh = false): Promise<any[]> {
-  const today = getTodayDateKey();
+export async function getOrGenerateDailyMixes(userId: number, forceRefresh = false, timeZone?: string): Promise<any[]> {
+  const resolvedTz = timeZone || getUserTimezone(userId);
+  const today = getTodayDateKey(resolvedTz);
 
   if (!forceRefresh) {
     const existingMixes: any[] = db.prepare(`

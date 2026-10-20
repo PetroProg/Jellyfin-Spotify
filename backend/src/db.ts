@@ -129,6 +129,15 @@ try {
   db.exec('ALTER TABLE users ADD COLUMN spotify_display_name TEXT;');
 } catch (_) {}
 try {
+  db.exec("ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT 'Europe/Kyiv';");
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE users ADD COLUMN nightly_mix_enabled INTEGER DEFAULT 1;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE users ADD COLUMN nightly_mix_hour INTEGER DEFAULT 3;');
+} catch (_) {}
+try {
   db.exec('ALTER TABLE playlists ADD COLUMN is_daily_mix INTEGER DEFAULT 0;');
 } catch (_) {}
 try {

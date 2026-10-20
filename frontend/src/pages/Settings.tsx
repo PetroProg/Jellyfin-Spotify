@@ -22,7 +22,10 @@ import {
   HelpCircle,
   Heart,
   Download,
-  Globe
+  Globe,
+  Moon,
+  Clock,
+  Sparkles
 } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { useOfflineStore } from '../store/offlineStore';
@@ -42,6 +45,20 @@ interface SpotifyOAuthStatus {
   updatedAt: string | null;
   clientId: string;
   redirectUri: string;
+}
+
+interface DailyMixSchedule {
+  enabled: boolean;
+  hour: number;
+  timezone: string;
+  currentTime: string;
+  currentDate: string;
+  isGeneratedToday: boolean;
+  isDownloading: boolean;
+  mixCount: number;
+  totalTracks: number;
+  isOnline: boolean;
+  isPlaying: boolean;
 }
 
 export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
@@ -78,6 +95,12 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const [importingPlaylists, setImportingPlaylists] = useState(false);
   const [likedJob, setLikedJob] = useState<DownloadJob | null>(null);
 
+  // Daily Mix Schedule State
+  const [mixSchedule, setMixSchedule] = useState<DailyMixSchedule | null>(null);
+  const [loadingSchedule, setLoadingSchedule] = useState(false);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [manualGenerating, setManualGenerating] = useState(false);
+
   // Account Deletion Modal
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deletePassword, setDeletePassword] = useState('');
@@ -98,10 +121,54 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     }
   };
 
+  const loadMixSchedule = async () => {
+    try {
+      setLoadingSchedule(true);
+      const data = await apiRequest<DailyMixSchedule>('/daily-mixes/schedule');
+      setMixSchedule(data);
+    } catch (e) {
+      console.warn('Could not fetch Daily Mix schedule:', e);
+    } finally {
+      setLoadingSchedule(false);
+    }
+  };
+
+  const handleUpdateSchedule = async (updates: Partial<{ enabled: boolean; hour: number }>) => {
+    try {
+      setSavingSchedule(true);
+      const updated = await apiRequest<DailyMixSchedule>('/daily-mixes/schedule', {
+        method: 'PUT',
+        body: JSON.stringify(updates)
+      });
+      setMixSchedule(updated);
+      toast.success(t('Schedule settings updated', 'Настройки расписания обновлены'));
+    } catch (e: any) {
+      toast.error(e.message || t('Failed to update schedule', 'Ошибка обновления расписания'));
+    } finally {
+      setSavingSchedule(false);
+    }
+  };
+
+  const handleManualGenerateMixes = async () => {
+    try {
+      setManualGenerating(true);
+      await apiRequest('/daily-mixes/refresh', { method: 'POST' });
+      toast.success(
+        t('Daily mixes generated! Downloads started in background.', 'Миксы дня созданы! Скачивание запущено в фоне.')
+      );
+      await loadMixSchedule();
+    } catch (e: any) {
+      toast.error(e.message || t('Failed to generate daily mixes', 'Ошибка генерации миксов'));
+    } finally {
+      setManualGenerating(false);
+    }
+  };
+
   useEffect(() => {
     getOfflineStorageUsage().then(setCacheSize);
     loadBlacklist();
     loadSpotifyStatus();
+    loadMixSchedule();
 
     const params = new URLSearchParams(window.location.search);
     const spSuccess = params.get('spotify_connected');
@@ -761,6 +828,146 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
               )}
             </div>
           </form>
+        </section>
+
+        {/* 2.5 Daily Mixes Nightly Auto-Update */}
+        <section className="bg-cat-mantle p-6 rounded-3xl border border-cat-mauve/30 shadow-lg">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-xl bg-cat-mauve/20 text-cat-mauve">
+                <Moon className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="font-bold text-base text-cat-text">
+                    {t('Daily Mixes (Nightly Update)', 'Миксы дня (Ночное обновление)')}
+                  </h2>
+                  {mixSchedule?.isDownloading ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-cat-blue/20 text-cat-blue border border-cat-blue/30">
+                      <Loader2 className="w-3 h-3 animate-spin" /> {t('Downloading to server...', 'Качается на сервер...')}
+                    </span>
+                  ) : mixSchedule?.isGeneratedToday ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-cat-green/20 text-cat-green border border-cat-green/30">
+                      <CheckCircle2 className="w-3 h-3" /> {t(`Ready for today (${mixSchedule.totalTracks} tracks)`, `Готовы на сегодня (${mixSchedule.totalTracks} треков)`)}
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-cat-surface0 text-cat-subtext0">
+                      <Clock className="w-3 h-3 text-cat-mauve" /> {t(`Scheduled at 0${mixSchedule?.hour || 3}:00`, `Запланировано на 0${mixSchedule?.hour || 3}:00`)}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-cat-subtext0 mt-0.5">
+                  {t(
+                    'Pre-downloads mixes to the server at 2–3 AM while you sleep, so they play instantly with 0s latency in the morning.',
+                    'Предзагружает миксы на сервер в 2–3 ночи пока вы спите, чтобы утром они играли моментально без задержек.'
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleManualGenerateMixes}
+              disabled={manualGenerating || mixSchedule?.isDownloading}
+              className="px-3.5 py-2 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-text text-xs font-semibold flex items-center gap-2 border border-cat-surface1/60 active:scale-95 transition-all self-start sm:self-center disabled:opacity-40 cursor-pointer shrink-0"
+              title={t('Generate fresh mixes now', 'Обновить миксы прямо сейчас')}
+            >
+              {manualGenerating || mixSchedule?.isDownloading ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-cat-mauve" />
+              ) : (
+                <Sparkles className="w-3.5 h-3.5 text-cat-mauve" />
+              )}
+              <span>{t('Refresh Now', 'Обновить сейчас')}</span>
+            </button>
+          </div>
+
+          <div className="space-y-4 pt-2">
+            {/* Toggle enabled / disabled */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-cat-surface0/40 border border-cat-surface1/30">
+              <div>
+                <h4 className="text-xs font-bold text-cat-text">
+                  {t('Enable Nightly Auto-Update', 'Включить ночное автообновление')}
+                </h4>
+                <p className="text-[11px] text-cat-subtext0 mt-0.5">
+                  {t(
+                    'Generates new mixes daily during sleep hours without requiring you to wait.',
+                    'Ежедневно создает свежие миксы в часы сна, избавляя от ожидания загрузки.'
+                  )}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => handleUpdateSchedule({ enabled: !mixSchedule?.enabled })}
+                disabled={savingSchedule}
+                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                  mixSchedule?.enabled ? 'bg-cat-mauve' : 'bg-cat-surface1'
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-cat-base shadow ring-0 transition duration-200 ease-in-out ${
+                    mixSchedule?.enabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {/* Preferred Nightly Hour */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-cat-surface0/40 border border-cat-surface1/30">
+              <div>
+                <h4 className="text-xs font-bold text-cat-text">
+                  {t('Update Time Window', 'Время ночного обновления')}
+                </h4>
+                <p className="text-[11px] text-cat-subtext0 mt-0.5">
+                  {t(
+                    'Generation will start at this hour if you are offline and not listening to music.',
+                    'Генерация начнется в этот час, если вы не в сети и не слушаете музыку.'
+                  )}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-1.5 bg-cat-surface0 p-1 rounded-2xl border border-cat-surface1/40">
+                {[
+                  { hour: 2, label: '02:00' },
+                  { hour: 3, label: '03:00' },
+                  { hour: 4, label: '04:00' },
+                  { hour: 5, label: '05:00' },
+                ].map((item) => (
+                  <button
+                    key={item.hour}
+                    type="button"
+                    onClick={() => handleUpdateSchedule({ hour: item.hour })}
+                    disabled={savingSchedule}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition-all cursor-pointer ${
+                      (mixSchedule?.hour || 3) === item.hour
+                        ? 'bg-cat-mauve text-cat-base shadow-sm'
+                        : 'text-cat-subtext0 hover:text-cat-text'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Smart Offline Detection & Timezone info */}
+            <div className="p-3.5 rounded-2xl bg-cat-surface0/20 border border-cat-surface1/20 flex items-start gap-2.5 text-xs text-cat-subtext0 leading-relaxed">
+              <Clock className="w-4 h-4 text-cat-mauve shrink-0 mt-0.5" />
+              <div>
+                <span>
+                  {t('Your local time: ', 'Ваше местное время: ')}
+                  <strong className="text-cat-text font-mono">
+                    {mixSchedule?.currentTime || '--:--'}
+                  </strong>{' '}
+                  ({mixSchedule?.timezone || 'Europe/Kyiv'}).{' '}
+                  {t(
+                    'Update strictly waits until you stop listening and go offline, so your evening listening is never interrupted.',
+                    'Обновление строго ждет, пока вы перестанете слушать музыку и выйдете из сети, поэтому вечернее прослушивание никогда не прерывается.'
+                  )}
+                </span>
+              </div>
+            </div>
+          </div>
         </section>
 
         {/* 3. Change Password */}
