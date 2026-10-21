@@ -25,6 +25,8 @@ export const EqualizerModal: React.FC = () => {
     resetEqualizer,
   } = usePlayerStore();
 
+  const isBitPerfectDirect = eqPreset === 'flat' && !isNormalizerEnabled && eqBands.every((b) => b === 0);
+
   if (!isEqualizerOpen) return null;
 
   return (
@@ -50,16 +52,33 @@ export const EqualizerModal: React.FC = () => {
         </div>
 
         {/* Quality Engine Badge */}
-        <div className="bg-cat-surface0/50 border border-cat-surface1/30 rounded-2xl p-3 mb-5 flex items-center justify-between gap-3">
+        <div className={`border rounded-2xl p-3 mb-5 flex items-center justify-between gap-3 transition-all ${
+          isBitPerfectDirect ? 'bg-cat-green/10 border-cat-green/30' : 'bg-cat-surface0/50 border-cat-surface1/30'
+        }`}>
           <div className="flex items-center gap-2.5">
-            <Sparkles className="w-4 h-4 text-cat-yellow flex-shrink-0" />
+            <Sparkles className={`w-4 h-4 flex-shrink-0 ${isBitPerfectDirect ? 'text-cat-green' : 'text-cat-yellow'}`} />
             <div>
-              <p className="text-xs font-bold text-cat-text">320 kbps Studio Master Engine</p>
-              <p className="text-[10px] text-cat-subtext0">{t('High-definition 44.1 kHz audio stream', 'Аудиопоток высокой четкости 44.1 kHz')}</p>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <p className="text-xs font-bold text-cat-text">
+                  {isBitPerfectDirect ? 'Pure Hi-Fi (Bit-Perfect Direct)' : 'Studio 320k DSP Engine'}
+                </p>
+                {isBitPerfectDirect && (
+                  <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-cat-green/20 text-cat-green font-bold">
+                    Bose Direct
+                  </span>
+                )}
+              </div>
+              <p className="text-[10px] text-cat-subtext0">
+                {isBitPerfectDirect
+                  ? t('Direct hardware output to Bose headphones with 0 DSP compression', 'Прямой вывод в наушники без искажений, сжатия и задержек')
+                  : t('Active frequency shaping & software sound processing', 'Активная эквализация и частотная окраска звука')}
+              </p>
             </div>
           </div>
-          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-cat-green/20 text-cat-green font-semibold">
-            Hi-Fi 320k
+          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-semibold shrink-0 ${
+            isBitPerfectDirect ? 'bg-cat-green/20 text-cat-green' : 'bg-cat-mauve/20 text-cat-mauve'
+          }`}>
+            {isBitPerfectDirect ? 'Bit-Perfect' : 'EQ Active'}
           </span>
         </div>
 
@@ -69,8 +88,11 @@ export const EqualizerModal: React.FC = () => {
             <Volume2 className="w-5 h-5 text-cat-mauve flex-shrink-0" />
             <div>
               <p className="text-xs font-bold text-cat-text">{t('Loudness Normalization', 'Нормализация громкости')}</p>
-              <p className="text-[11px] text-cat-subtext0 mt-0.5">
-                {t('Balances volume across tracks (like Spotify) and tightens bass', 'Выравнивает уровень треков (как в Spotify), делает бас плотнее')}
+              <p className="text-[11px] text-cat-subtext0 mt-0.5 leading-relaxed">
+                {t(
+                  'Gentle volume leveling. For maximum dynamic range and drum punch in Bose headphones, keep OFF.',
+                  'Мягкое выравнивание уровня. Для максимального панча и широкой динамики в наушниках Bose рекомендуется держать ВЫКЛ.'
+                )}
               </p>
             </div>
           </div>

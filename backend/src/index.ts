@@ -199,6 +199,14 @@ server.delete('/api/auth/account', { preHandler: [(server as any).authenticate] 
 
 // ----------------- AUDIO STREAMING (High-Performance WAN Stream & Caching) -----------------
 server.get('/api/stream/:trackId', async (req: any, reply: any) => {
+  // Optimize TCP socket for real-time low-latency audio transmission over WAN
+  if (req.raw.socket) {
+    try {
+      req.raw.socket.setNoDelay(true); // Disable Nagle's algorithm for instant chunk transmission
+      req.raw.socket.setKeepAlive(true, 30000);
+    } catch (_) {}
+  }
+
   const trackId = parseInt(req.params.trackId, 10) || req.params.trackId;
   const track: any = db.prepare('SELECT file_path FROM tracks WHERE id = ?').get(trackId);
   if (!track || !fs.existsSync(track.file_path)) {
@@ -230,12 +238,15 @@ server.get('/api/stream/:trackId', async (req: any, reply: any) => {
     'Cache-Control': 'public, max-age=31536000, immutable',
     'ETag': etag,
     'Last-Modified': lastModified,
+    'Connection': 'keep-alive',
+    'Timing-Allow-Origin': '*',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Range, Content-Range, Accept-Ranges, Cache-Control',
     'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges, ETag, Cache-Control',
   };
 
-  const HIGH_WATER_MARK = 256 * 1024; // 256 KB buffer for high-throughput streaming over WAN
+  // 1 MB high-water mark for high-throughput burst delivery over WAN (eliminates buffer starvation on high-ping networks)
+  const HIGH_WATER_MARK = 1024 * 1024;
 
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');

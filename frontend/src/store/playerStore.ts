@@ -115,7 +115,8 @@ const loadSavedEqPreset = (): string => {
 
 const loadSavedNormalizer = (): boolean => {
   const val = localStorage.getItem(STORAGE_KEY_NORMALIZER);
-  return val === null ? true : val === 'true';
+  // Default to false: Pure Bit-Perfect Direct Stream for high-end headphones (Bose, etc.)
+  return val === null ? false : val === 'true';
 };
 
 // Global Audio Instance
@@ -125,19 +126,84 @@ audio.crossOrigin = 'anonymous';
 const initialVolume = loadSavedVolume();
 audio.volume = initialVolume;
 
-// Web Audio API Graph
+// Web Audio API Graph (Lazy initialized only when EQ or DSP is explicitly engaged)
 let audioCtx: AudioContext | null = null;
 let sourceNode: MediaElementAudioSourceNode | null = null;
 let compressorNode: DynamicsCompressorNode | null = null;
 let eqFilters: BiquadFilterNode[] = [];
+let isAudioGraphAttached = false;
 
-function ensureAudioGraph() {
-  if (audioCtx) return;
+function shouldEngageAudioDsp(): boolean {
+  const isNorm = loadSavedNormalizer();
+  const preset = loadSavedEqPreset();
+  const bands = loadSavedEqBands();
+  const hasActiveEq = preset !== 'flat' || bands.some((b) => b !== 0);
+  return isNorm || hasActiveEq;
+}
+
+function updateAudioGraphRouting() {
+  if (!audioCtx || !sourceNode) return;
+
+  const isNorm = loadSavedNormalizer();
+  const bands = loadSavedEqBands();
+  const preset = loadSavedEqPreset();
+  const hasActiveEq = preset !== 'flat' || bands.some((b) => b !== 0);
+
+  // Pure Bit-Perfect Direct Output (bypass filters & compressor completely)
+  if (!isNorm && !hasActiveEq) {
+    try {
+      sourceNode.disconnect();
+      sourceNode.connect(audioCtx.destination);
+    } catch (_) {}
+    return;
+  }
+
+  try {
+    sourceNode.disconnect();
+    let lastNode: AudioNode = sourceNode;
+    for (const filter of eqFilters) {
+      lastNode.connect(filter);
+      lastNode = filter;
+    }
+    if (compressorNode) {
+      if (isNorm) {
+        compressorNode.threshold.value = -6; // Gentle threshold to preserve drum punch on Bose
+        compressorNode.ratio.value = 1.5;   // Gentle ratio to avoid squashing dynamics
+        compressorNode.knee.value = 10;
+        compressorNode.attack.value = 0.05;
+        compressorNode.release.value = 0.25;
+      } else {
+        compressorNode.threshold.value = 0;
+        compressorNode.ratio.value = 1;
+      }
+      lastNode.connect(compressorNode);
+      try { compressorNode.disconnect(); } catch (_) {}
+      compressorNode.connect(audioCtx.destination);
+    } else {
+      lastNode.connect(audioCtx.destination);
+    }
+  } catch (err) {
+    console.warn('[Audio Routing Update Error]:', err);
+  }
+}
+
+function ensureAudioGraph(forceAttach = false) {
+  if (!forceAttach && !shouldEngageAudioDsp() && !isAudioGraphAttached) {
+    // Pure Bit-Perfect mode: Keep <audio> on native OS/hardware output directly without Web Audio API!
+    return;
+  }
+
+  if (isAudioGraphAttached && audioCtx) {
+    updateAudioGraphRouting();
+    return;
+  }
+
   try {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     if (!AudioContextClass) return;
     audioCtx = new AudioContextClass();
     sourceNode = audioCtx.createMediaElementSource(audio);
+    isAudioGraphAttached = true;
 
     // 5-Band Equalizer filters
     eqFilters = EQ_FREQUENCIES.map((freq, idx) => {
@@ -155,22 +221,13 @@ function ensureAudioGraph() {
       return filter;
     });
 
-    // Dynamics Compressor (Spotify-like Loudness Normalizer - transparent gentle leveling)
+    // Gentle mastering dynamics compressor
     compressorNode = audioCtx.createDynamicsCompressor();
-    compressorNode.threshold.value = -12;
-    compressorNode.knee.value = 30;
-    compressorNode.ratio.value = 3;
-    compressorNode.attack.value = 0.015;
-    compressorNode.release.value = 0.20;
-
-    // Connect audio chain: source -> eqFilters[0..4] -> compressor -> destination
-    let lastNode: AudioNode = sourceNode;
-    for (const filter of eqFilters) {
-      lastNode.connect(filter);
-      lastNode = filter;
-    }
-    lastNode.connect(compressorNode);
-    compressorNode.connect(audioCtx.destination);
+    compressorNode.threshold.value = -6;
+    compressorNode.knee.value = 10;
+    compressorNode.ratio.value = 1.5;
+    compressorNode.attack.value = 0.05;
+    compressorNode.release.value = 0.25;
 
     // Apply saved bands
     const savedBands = loadSavedEqBands();
@@ -178,12 +235,7 @@ function ensureAudioGraph() {
       if (eqFilters[i]) eqFilters[i].gain.value = gain;
     });
 
-    // Apply saved normalizer state
-    const isNorm = loadSavedNormalizer();
-    if (!isNorm) {
-      compressorNode.threshold.value = 0;
-      compressorNode.ratio.value = 1;
-    }
+    updateAudioGraphRouting();
   } catch (err) {
     console.warn('[Web Audio API Init Error]:', err);
   }
@@ -192,8 +244,7 @@ function ensureAudioGraph() {
 // Proactive user-gesture unlock and background/interruption recovery
 if (typeof window !== 'undefined') {
   const unlockAudio = () => {
-    ensureAudioGraph();
-    if (audioCtx && audioCtx.state === 'suspended') {
+    if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
       audioCtx.resume().catch(() => {});
     }
   };
@@ -569,11 +620,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         if (nextTrack) {
           const cached = await isTrackCached(nextTrack.id);
           if (!cached) {
-            cacheTrackOffline(nextTrack).catch(() => {});
+            await cacheTrackOffline(nextTrack);
           }
+          // Pre-load in-memory blob URL so next track transition is 100% gapless with 0ms network latency
+          getCachedTrackUrl(nextTrack.id).catch(() => {});
         }
       } catch (_) {}
-    }, 7000);
+    }, 2000);
   };
 
   let isPrefetchingRecommendations = false;
@@ -1301,7 +1354,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     setEqGain: (bandIndex: number, gain: number) => {
-      ensureAudioGraph();
+      ensureAudioGraph(true);
       const bands = [...get().eqBands];
       bands[bandIndex] = gain;
       if (eqFilters[bandIndex] && audioCtx) {
@@ -1309,12 +1362,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
       localStorage.setItem(STORAGE_KEY_EQ_BANDS, JSON.stringify(bands));
       set({ eqBands: bands, eqPreset: 'custom' });
+      updateAudioGraphRouting();
     },
 
     setEqPreset: (presetId: string) => {
-      ensureAudioGraph();
       const preset = EQ_PRESETS[presetId];
       if (!preset) return;
+
+      const isFlat = presetId === 'flat';
+      if (!isFlat) {
+        ensureAudioGraph(true);
+      }
+
       const bands = [...preset.bands];
       bands.forEach((g, i) => {
         if (eqFilters[i] && audioCtx) {
@@ -1324,23 +1383,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       localStorage.setItem(STORAGE_KEY_EQ_BANDS, JSON.stringify(bands));
       localStorage.setItem(STORAGE_KEY_EQ_PRESET, presetId);
       set({ eqBands: bands, eqPreset: presetId });
+      updateAudioGraphRouting();
     },
 
     toggleNormalizer: () => {
-      ensureAudioGraph();
       const current = get().isNormalizerEnabled;
       const next = !current;
-      if (compressorNode && audioCtx) {
-        if (next) {
-          compressorNode.threshold.setValueAtTime(-12, audioCtx.currentTime);
-          compressorNode.ratio.setValueAtTime(3, audioCtx.currentTime);
-        } else {
-          compressorNode.threshold.setValueAtTime(0, audioCtx.currentTime);
-          compressorNode.ratio.setValueAtTime(1, audioCtx.currentTime);
-        }
+      if (next) {
+        ensureAudioGraph(true);
       }
       localStorage.setItem(STORAGE_KEY_NORMALIZER, String(next));
       set({ isNormalizerEnabled: next });
+      updateAudioGraphRouting();
     },
 
     resetEqualizer: () => {
