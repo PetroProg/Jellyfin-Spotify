@@ -4,6 +4,7 @@ import fastifyStatic from '@fastify/static';
 import jwt from '@fastify/jwt';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import { db } from './db';
@@ -39,8 +40,67 @@ dotenv.config();
 const server = Fastify({ logger: false });
 
 const PORT = Number(process.env.PORT) || 5050;
-const JWT_SECRET = process.env.JWT_SECRET || 'catppuccin-jellyfin-spotify-secret-key';
+
+// Security: Generate a persistent random secret if not provided in environment
+function getOrGenerateJwtSecret(): string {
+  const envSecret = process.env.JWT_SECRET;
+  if (envSecret && !envSecret.includes('catppuccin-jellyfin-spotify-secret-key')) {
+    return envSecret;
+  }
+  const secretFile = path.join(process.cwd(), 'data', '.jwt_secret');
+  try {
+    if (fs.existsSync(secretFile)) {
+      const saved = fs.readFileSync(secretFile, 'utf-8').trim();
+      if (saved.length >= 32) return saved;
+    }
+    const generated = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(secretFile, generated, { encoding: 'utf-8' });
+    return generated;
+  } catch (_) {
+    return envSecret || crypto.randomBytes(32).toString('hex');
+  }
+}
+const JWT_SECRET = getOrGenerateJwtSecret();
 const MUSIC_DIR = process.env.MUSIC_DIR || path.join(process.cwd(), 'music');
+
+// Security: In-memory sliding-window IP rate limiter to block password brute-force
+interface RateLimitEntry {
+  count: number;
+  blockedUntil: number;
+}
+const authAttempts = new Map<string, RateLimitEntry>();
+
+function checkRateLimit(ip: string, maxAttempts = 5): { blocked: boolean; retryAfterSec?: number } {
+  const now = Date.now();
+  const entry = authAttempts.get(ip);
+  if (entry) {
+    if (entry.blockedUntil > now) {
+      return { blocked: true, retryAfterSec: Math.ceil((entry.blockedUntil - now) / 1000) };
+    }
+  }
+  return { blocked: false };
+}
+
+function recordFailedAuth(ip: string, maxAttempts = 5, windowMs = 60000, blockDurationMs = 300000) {
+  const now = Date.now();
+  const entry = authAttempts.get(ip) || { count: 0, blockedUntil: 0 };
+  entry.count++;
+  if (entry.count >= maxAttempts) {
+    entry.blockedUntil = now + blockDurationMs;
+  }
+  authAttempts.set(ip, entry);
+  setTimeout(() => {
+    const cur = authAttempts.get(ip);
+    if (cur && cur.count > 0 && cur.blockedUntil <= Date.now()) {
+      cur.count--;
+      if (cur.count <= 0) authAttempts.delete(ip);
+    }
+  }, windowMs);
+}
+
+function resetAuthLimit(ip: string) {
+  authAttempts.delete(ip);
+}
 
 // Register Plugins
 server.register(cors, { origin: true });
@@ -94,6 +154,12 @@ server.decorate('authenticate', async (request: any, reply: any) => {
 
 // ----------------- AUTH ROUTES -----------------
 server.post('/api/auth/register', async (req: any, reply: any) => {
+  const clientIp = req.ip || req.raw.socket.remoteAddress || 'unknown';
+  const limitCheck = checkRateLimit(clientIp, 10);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const body = req.body || {};
   const { username, password, confirm_password, display_name, email } = body;
   if (!username || !password) {
@@ -118,7 +184,8 @@ server.post('/api/auth/register', async (req: any, reply: any) => {
     return reply.status(400).send({ error: 'Пользователь с таким логином или email уже существует' });
   }
 
-  const passwordHash = bcrypt.hashSync(password, 10);
+  // Non-blocking async bcrypt hash (protects Node.js Event Loop from audio stutter)
+  const passwordHash = await bcrypt.hash(password, 10);
   const info = db.prepare(`
     INSERT INTO users (username, password_hash, display_name, email)
     VALUES (?, ?, ?, ?)
@@ -139,13 +206,26 @@ server.post('/api/auth/register', async (req: any, reply: any) => {
 });
 
 server.post('/api/auth/login', async (req: any, reply: any) => {
+  const clientIp = req.ip || req.raw.socket.remoteAddress || 'unknown';
+  const limitCheck = checkRateLimit(clientIp, 5);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({
+      error: `Слишком много неудачных попыток входа. Попробуйте снова через ${limitCheck.retryAfterSec || 60} сек.`
+    });
+  }
+
   const body = req.body || {};
   const { username, password } = body;
   const cleanIdentifier = String(username || '').trim();
   const user: any = db.prepare('SELECT * FROM users WHERE username = ? OR email = ?').get(cleanIdentifier, cleanIdentifier);
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+
+  const isMatch = user && (await bcrypt.compare(password, user.password_hash));
+  if (!isMatch) {
+    recordFailedAuth(clientIp, 5);
     return reply.status(401).send({ error: 'Неверный логин или пароль' });
   }
+
+  resetAuthLimit(clientIp);
 
   const token = server.jwt.sign({ id: user.id, username: user.username });
   return {
@@ -159,42 +239,204 @@ server.get('/api/auth/me', { preHandler: [(server as any).authenticate] }, async
   return { user };
 });
 
-server.put('/api/auth/profile', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+const handleProfileUpdate = async (req: any, reply: any) => {
   const body = req.body || {};
-  const { display_name } = body;
-  if (!display_name) {
+  const displayName = body.display_name || body.displayName;
+  if (!displayName || !String(displayName).trim()) {
     return reply.status(400).send({ error: 'Имя не может быть пустым' });
   }
-  db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(display_name, req.user.id);
-  return { success: true, display_name };
-});
+  const clean = String(displayName).trim();
+  db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(clean, req.user.id);
+  return { success: true, display_name: clean };
+};
 
-server.put('/api/auth/password', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+server.put('/api/auth/profile', { preHandler: [(server as any).authenticate] }, handleProfileUpdate);
+server.put('/api/user/profile', { preHandler: [(server as any).authenticate] }, handleProfileUpdate);
+
+const handlePasswordUpdate = async (req: any, reply: any) => {
   const body = req.body || {};
-  const { current_password, new_password } = body;
+  const currentPassword = body.current_password || body.currentPassword;
+  const newPassword = body.new_password || body.newPassword;
   const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-  if (!user || !bcrypt.compareSync(current_password, user.password_hash)) {
+
+  if (!user || !(await bcrypt.compare(currentPassword, user.password_hash))) {
     return reply.status(400).send({ error: 'Текущий пароль указан неверно' });
   }
-  if (!new_password || new_password.length < 4) {
+  if (!newPassword || newPassword.length < 4) {
     return reply.status(400).send({ error: 'Новый пароль слишком короткий' });
   }
 
-  const newHash = bcrypt.hashSync(new_password, 10);
+  const newHash = await bcrypt.hash(newPassword, 10);
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(newHash, req.user.id);
   return { success: true, message: 'Пароль успешно обновлен' };
-});
+};
 
-server.delete('/api/auth/account', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+server.put('/api/auth/password', { preHandler: [(server as any).authenticate] }, handlePasswordUpdate);
+server.put('/api/user/password', { preHandler: [(server as any).authenticate] }, handlePasswordUpdate);
+
+const handleAccountDelete = async (req: any, reply: any) => {
   const body = req.body || {};
-  const { password } = body;
+  const password = body.password;
   const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
     return reply.status(400).send({ error: 'Неверный пароль. Удаление отменено.' });
   }
 
   db.prepare('DELETE FROM users WHERE id = ?').run(req.user.id);
   return { success: true, message: 'Аккаунт успешно удален' };
+};
+
+server.delete('/api/auth/account', { preHandler: [(server as any).authenticate] }, handleAccountDelete);
+server.delete('/api/user/account', { preHandler: [(server as any).authenticate] }, handleAccountDelete);
+
+// ----------------- BACKUP & RESTORE -----------------
+server.get('/api/user/library/backup', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+  const userId = req.user.id;
+  const user: any = db.prepare('SELECT username, display_name, timezone FROM users WHERE id = ?').get(userId);
+
+  const likedTracks: any[] = db.prepare(`
+    SELECT t.title, t.artist, t.album, t.duration_ms, t.spotify_id, t.cover_url
+    FROM liked_tracks lt
+    JOIN tracks t ON lt.track_id = t.id
+    WHERE lt.user_id = ?
+    ORDER BY lt.created_at ASC
+  `).all(userId);
+
+  const customPlaylists: any[] = db.prepare(`
+    SELECT id, name, description, cover_url, spotify_id, is_daily_mix, daily_mix_date
+    FROM playlists
+    WHERE user_id = ?
+    ORDER BY id ASC
+  `).all(userId);
+
+  const playlistsWithTracks = customPlaylists.map((pl) => {
+    const tracks: any[] = db.prepare(`
+      SELECT t.title, t.artist, t.album, t.duration_ms, t.spotify_id, t.cover_url, pt.position
+      FROM playlist_tracks pt
+      JOIN tracks t ON pt.track_id = t.id
+      WHERE pt.playlist_id = ?
+      ORDER BY pt.position ASC
+    `).all(pl.id);
+    return {
+      name: pl.name,
+      description: pl.description,
+      cover_url: pl.cover_url,
+      spotify_id: pl.spotify_id,
+      is_daily_mix: pl.is_daily_mix,
+      daily_mix_date: pl.daily_mix_date,
+      tracks,
+    };
+  });
+
+  const blacklist: any[] = db.prepare(`
+    SELECT title, artist, spotify_id FROM blacklist WHERE user_id = ?
+  `).all(userId);
+
+  return {
+    version: '1.0',
+    exportedAt: new Date().toISOString(),
+    user: {
+      username: user?.username,
+      display_name: user?.display_name,
+      timezone: user?.timezone,
+    },
+    likedTracks,
+    playlists: playlistsWithTracks,
+    blacklist,
+  };
+});
+
+server.post('/api/user/library/restore', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const userId = req.user.id;
+  const payload = req.body;
+  if (!payload || (!Array.isArray(payload.playlists) && !Array.isArray(payload.likedTracks))) {
+    return reply.status(400).send({ error: 'Неверный формат файла резервной копии' });
+  }
+
+  let restoredLikes = 0;
+  let restoredPlaylists = 0;
+  let restoredTracks = 0;
+
+  // 1. Restore Liked Tracks
+  if (Array.isArray(payload.likedTracks)) {
+    for (const t of payload.likedTracks) {
+      if (!t.title || !t.artist) continue;
+      const trackRow: any = db.prepare(`
+        SELECT id FROM tracks 
+        WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+           OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+        LIMIT 1
+      `).get(t.spotify_id || '', t.title, t.artist);
+
+      if (trackRow) {
+        db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, trackRow.id);
+        restoredLikes++;
+      }
+    }
+  }
+
+  // 2. Restore Playlists
+  if (Array.isArray(payload.playlists)) {
+    for (const pl of payload.playlists) {
+      if (!pl.name) continue;
+      const info = db.prepare(`
+        INSERT INTO playlists (user_id, name, description, cover_url, spotify_id, is_daily_mix, daily_mix_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        userId,
+        pl.name,
+        pl.description || '',
+        pl.cover_url || null,
+        pl.spotify_id || null,
+        pl.is_daily_mix ? 1 : 0,
+        pl.daily_mix_date || null
+      );
+      const newPlaylistId = Number(info.lastInsertRowid);
+      restoredPlaylists++;
+
+      if (Array.isArray(pl.tracks)) {
+        let pos = 0;
+        for (const t of pl.tracks) {
+          if (!t.title || !t.artist) continue;
+          const trackRow: any = db.prepare(`
+            SELECT id FROM tracks 
+            WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+               OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+            LIMIT 1
+          `).get(t.spotify_id || '', t.title, t.artist);
+
+          if (trackRow) {
+            db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)').run(
+              newPlaylistId,
+              trackRow.id,
+              pos++
+            );
+            restoredTracks++;
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Restore Blacklist
+  if (Array.isArray(payload.blacklist)) {
+    for (const b of payload.blacklist) {
+      if (b.title && b.artist) {
+        db.prepare('INSERT OR IGNORE INTO blacklist (user_id, title, artist, spotify_id) VALUES (?, ?, ?, ?)').run(
+          userId,
+          b.title,
+          b.artist,
+          b.spotify_id || null
+        );
+      }
+    }
+  }
+
+  return {
+    success: true,
+    message: `Успешно восстановлено: ${restoredLikes} лайков, ${restoredPlaylists} плейлистов (${restoredTracks} треков)`,
+    stats: { restoredLikes, restoredPlaylists, restoredTracks }
+  };
 });
 
 // ----------------- AUDIO STREAMING (High-Performance WAN Stream & Caching) -----------------
@@ -214,6 +456,11 @@ server.get('/api/stream/:trackId', async (req: any, reply: any) => {
   }
 
   const filePath = track.file_path;
+  const resolvedPath = path.resolve(filePath);
+  const resolvedMusicDir = path.resolve(MUSIC_DIR);
+  if (!resolvedPath.startsWith(resolvedMusicDir + path.sep) && resolvedPath !== resolvedMusicDir) {
+    return reply.status(403).send({ error: 'Доступ запрещен: путь к файлу недопустим' });
+  }
   const stat = fs.statSync(filePath);
   const total = stat.size;
   const range = req.headers.range;

@@ -39,6 +39,7 @@ interface PlayerState {
   eqBands: number[];
   eqPreset: string;
   isNormalizerEnabled: boolean;
+  crossfade: number;
 
   playTrack: (track: Track, newQueue?: Track[], index?: number, playlistId?: number | null) => void;
   playTrackLocally: (track: Track, newQueue?: Track[], index?: number, startTime?: number, autoPlay?: boolean, playlistId?: number | null) => void;
@@ -68,6 +69,7 @@ interface PlayerState {
   toggleNormalizer: () => void;
   setEqualizerOpen: (open: boolean) => void;
   resetEqualizer: () => void;
+  setCrossfade: (seconds: number) => void;
 }
 
 const STORAGE_KEY_VOLUME = 'jellyfy_player_volume';
@@ -75,6 +77,20 @@ const STORAGE_KEY_EQ_BANDS = 'jellyfy_eq_bands';
 const STORAGE_KEY_EQ_PRESET = 'jellyfy_eq_preset';
 const STORAGE_KEY_NORMALIZER = 'jellyfy_normalizer_enabled';
 const STORAGE_KEY_LIKED_IDS = 'jellyfy_cached_liked_ids';
+const STORAGE_KEY_CROSSFADE = 'jellyfy_crossfade';
+
+const loadSavedCrossfade = (): number => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY_CROSSFADE);
+    if (saved !== null) {
+      const parsed = parseFloat(saved);
+      if (!isNaN(parsed) && parsed >= 0 && parsed <= 12) {
+        return parsed;
+      }
+    }
+  } catch (_) {}
+  return 0;
+};
 
 const loadSavedLikedIds = (): number[] => {
   try {
@@ -125,6 +141,54 @@ audio.preload = 'auto';
 audio.crossOrigin = 'anonymous';
 const initialVolume = loadSavedVolume();
 audio.volume = initialVolume;
+
+// Crossfade fade controller
+let fadeInterval: any = null;
+let isFadingIn = false;
+let isFadingOut = false;
+
+function cancelFade() {
+  if (fadeInterval) {
+    clearInterval(fadeInterval);
+    fadeInterval = null;
+  }
+  isFadingIn = false;
+  isFadingOut = false;
+}
+
+function restoreTargetVolume() {
+  cancelFade();
+  const target = usePlayerStore.getState().volume;
+  audio.volume = target;
+}
+
+function startFadeIn(durationSec: number) {
+  cancelFade();
+  const target = usePlayerStore.getState().volume;
+  if (target <= 0.01 || durationSec <= 0) {
+    audio.volume = target;
+    return;
+  }
+
+  isFadingIn = true;
+  audio.volume = 0;
+  const startTime = performance.now();
+  const fadeMs = durationSec * 1000;
+
+  fadeInterval = setInterval(() => {
+    const elapsed = performance.now() - startTime;
+    const progress = Math.min(1, elapsed / fadeMs);
+    const currentVol = target * progress;
+    audio.volume = Math.max(0, Math.min(1, currentVol));
+
+    if (progress >= 1) {
+      clearInterval(fadeInterval);
+      fadeInterval = null;
+      isFadingIn = false;
+      audio.volume = target;
+    }
+  }, 40);
+}
 
 // Web Audio API Graph (Lazy initialized only when EQ or DSP is explicitly engaged)
 let audioCtx: AudioContext | null = null;
@@ -532,6 +596,31 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     set(update);
 
+    const crossfade = get().crossfade;
+    const effectiveDur = update.duration || get().duration;
+
+    // Crossfade handling at end of track
+    if (crossfade > 0 && effectiveDur > 0 && isFinite(effectiveDur) && isFinite(cur) && !isFadingIn) {
+      const remaining = effectiveDur - cur;
+      if (remaining <= crossfade && remaining > 0.25) {
+        isFadingOut = true;
+        const progress = Math.max(0, Math.min(1, remaining / crossfade));
+        const targetVol = get().volume;
+        audio.volume = Math.max(0, Math.min(targetVol, targetVol * progress));
+      } else if (remaining <= 0.25 && isFadingOut) {
+        isFadingOut = false;
+        const { repeat } = get();
+        if (repeat === 'one') {
+          audio.currentTime = 0;
+          restoreTargetVolume();
+          audio.play().catch(() => {});
+        } else {
+          get().nextTrack();
+        }
+        return;
+      }
+    }
+
     const now = Date.now();
     if (now - lastSyncTime > 1500) {
       lastSyncTime = now;
@@ -547,6 +636,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   audio.oncanplay = handleAudioDuration;
 
   audio.onended = () => {
+    cancelFade();
+    restoreTargetVolume();
     const { repeat, nextTrack } = get();
     if (repeat === 'one') {
       audio.currentTime = 0;
@@ -683,6 +774,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     eqBands: loadSavedEqBands(),
     eqPreset: loadSavedEqPreset(),
     isNormalizerEnabled: loadSavedNormalizer(),
+    crossfade: loadSavedCrossfade(),
 
     updateQueueIfCurrent: (playlistId: number, newTracks: Track[]) => {
       const { currentPlaylistId, currentTrack, queue } = get();
@@ -745,6 +837,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audio.src = targetSrc;
       }
       audio.currentTime = 0;
+
+      if (get().crossfade > 0) {
+        startFadeIn(Math.min(get().crossfade, 2.5));
+      } else {
+        restoreTargetVolume();
+      }
 
       const playPromise = audio.play();
       if (playPromise !== undefined) {
@@ -831,6 +929,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
 
       if (autoPlay) {
+        if ((!startTime || startTime <= 0.1) && get().crossfade > 0) {
+          startFadeIn(Math.min(get().crossfade, 2.5));
+        } else {
+          restoreTargetVolume();
+        }
         const p = audio.play();
         if (p !== undefined) {
           p.catch((err) => {
@@ -922,6 +1025,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
       audio.currentTime = 0;
 
+      if (get().crossfade > 0) {
+        startFadeIn(Math.min(get().crossfade, 2.5));
+      } else {
+        restoreTargetVolume();
+      }
+
       const p = audio.play();
       if (p !== undefined) {
         p.catch((err) => console.warn('[Audio play interrupted]:', err));
@@ -990,6 +1099,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     pause: () => {
+      cancelFade();
       const isLocal = useSyncStore.getState().isLocalActive;
       if (!isLocal) {
         useSyncStore.getState().sendRemoteCommand('pause');
@@ -1035,6 +1145,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     nextTrack: async () => {
+      cancelFade();
       const isLocal = useSyncStore.getState().isLocalActive;
       if (!isLocal) {
         useSyncStore.getState().sendRemoteCommand('next');
@@ -1103,6 +1214,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     prevTrack: () => {
+      cancelFade();
       const isLocal = useSyncStore.getState().isLocalActive;
       if (!isLocal) {
         useSyncStore.getState().sendRemoteCommand('prev');
@@ -1127,6 +1239,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     seek: (seconds: number) => {
+      restoreTargetVolume();
       const isLocal = useSyncStore.getState().isLocalActive;
       if (!isLocal) {
         useSyncStore.getState().sendRemoteCommand('seek', seconds);
@@ -1148,7 +1261,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     setVolume: (val: number) => {
       const clamped = Math.max(0, Math.min(1, val));
-      audio.volume = clamped;
+      if (!isFadingIn && !isFadingOut) {
+        audio.volume = clamped;
+      }
       localStorage.setItem(STORAGE_KEY_VOLUME, clamped.toString());
       set({ volume: clamped });
     },
@@ -1399,6 +1514,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     resetEqualizer: () => {
       get().setEqPreset('flat');
+    },
+
+    setCrossfade: (seconds: number) => {
+      const clamped = Math.max(0, Math.min(12, seconds));
+      localStorage.setItem(STORAGE_KEY_CROSSFADE, clamped.toString());
+      set({ crossfade: clamped });
     },
   };
 });

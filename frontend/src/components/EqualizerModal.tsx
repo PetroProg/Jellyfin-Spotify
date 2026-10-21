@@ -23,6 +23,8 @@ export const EqualizerModal: React.FC = () => {
     isNormalizerEnabled,
     toggleNormalizer,
     resetEqualizer,
+    crossfade,
+    setCrossfade,
   } = usePlayerStore();
 
   const isBitPerfectDirect = eqPreset === 'flat' && !isNormalizerEnabled && eqBands.every((b) => b === 0);
@@ -132,7 +134,35 @@ export const EqualizerModal: React.FC = () => {
           </div>
         </div>
 
-        {/* Section 3: 5-Band Equalizer Sliders */}
+        {/* Section 3: Crossfade */}
+        <div className="mb-5 bg-cat-surface0/30 border border-cat-surface1/20 rounded-2xl p-3.5">
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider">
+              {t('Crossfade (Smooth Transition)', 'Кроссфейд (Плавный переход)')}
+            </label>
+            <span className="text-xs font-mono font-bold text-cat-mauve">
+              {crossfade === 0 ? t('Off', 'Выкл') : `${crossfade} ${t('sec', 'сек')}`}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {[0, 1, 2, 3, 5, 8].map((sec) => (
+              <button
+                key={sec}
+                type="button"
+                onClick={() => setCrossfade(sec)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                  crossfade === sec
+                    ? 'bg-cat-mauve text-cat-base shadow-sm'
+                    : 'bg-cat-surface0/60 hover:bg-cat-surface0 text-cat-text hover:text-cat-mauve border border-cat-surface1/30'
+                }`}
+              >
+                {sec === 0 ? t('Off', 'Выкл') : `${sec}s`}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Section 4: 5-Band Equalizer Sliders */}
         <div className="mb-5 bg-cat-surface0/30 border border-cat-surface1/20 rounded-2xl p-4">
           <div className="flex items-center justify-between mb-3 px-1">
             <label className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider">

@@ -360,8 +360,9 @@ async function runWorkerLoop() {
 
 export async function findBestStudioAudioSource(artist: string, title: string, durationMs?: number): Promise<string> {
   const targetSec = durationMs ? Math.round(durationMs / 1000) : 0;
-  const cleanArtist = (artist || '').replace(/[\\/:*?"<>|]/g, ' ').trim();
-  const cleanTitle = (title || '').replace(/[\\/:*?"<>|]/g, ' ').trim();
+  // Security: strip leading dashes/flags to prevent argument injection
+  const cleanArtist = (artist || '').replace(/^[- \t]+/, '').replace(/[\\/:*?"<>|]/g, ' ').trim();
+  const cleanTitle = (title || '').replace(/^[- \t]+/, '').replace(/[\\/:*?"<>|]/g, ' ').trim();
   const searchQuery = `ytsearch10:${cleanArtist} ${cleanTitle}`;
 
   try {
@@ -370,6 +371,7 @@ export async function findBestStudioAudioSource(artist: string, title: string, d
         '--dump-json',
         '--flat-playlist',
         '--default-search', 'ytsearch10',
+        '--',
         searchQuery
       ]);
       let stdout = '';
@@ -559,6 +561,7 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       '--embed-thumbnail',
       '--add-metadata',
       '-o', outputTemplate,
+      '--',
       audioSourceUrl
     ]);
 
@@ -796,6 +799,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
         '--embed-thumbnail',
         '--add-metadata',
         '-o', outputTemplate,
+        '--',
         audioSourceUrl
       ]);
 
@@ -977,6 +981,7 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
             '--embed-thumbnail',
             '--add-metadata',
             '-o', tempOutputTemplate,
+            '--',
             audioSourceUrl
           ]);
 

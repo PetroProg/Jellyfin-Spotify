@@ -25,9 +25,13 @@ import {
   Globe,
   Moon,
   Clock,
-  Sparkles
+  Sparkles,
+  Upload,
+  Database,
+  Sliders
 } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
+import { usePlayerStore } from '../store/playerStore';
 import { useOfflineStore } from '../store/offlineStore';
 import { apiRequest } from '../api/client';
 import { getOfflineStorageUsage, clearAllOfflineCache } from '../utils/offline';
@@ -108,6 +112,80 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const [deleting, setDeleting] = useState(false);
   const [showScrollTop, setShowScrollTop] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Crossfade & Library Backup/Restore
+  const { crossfade, setCrossfade } = usePlayerStore();
+  const [exportingBackup, setExportingBackup] = useState(false);
+  const [importingBackup, setImportingBackup] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleExportBackup = async () => {
+    try {
+      setExportingBackup(true);
+      const data = await apiRequest<any>('/user/library/backup');
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const dateStr = new Date().toISOString().split('T')[0];
+      a.download = `jellyfy-backup-${user?.username || 'user'}-${dateStr}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast.success(t('Library backup successfully exported!', 'Резервная копия медиатеки успешно экспортирована!'));
+    } catch (err: any) {
+      toast.error(err.message || t('Failed to export backup', 'Не удалось экспортировать резервную копию'));
+    } finally {
+      setExportingBackup(false);
+    }
+  };
+
+  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+
+    try {
+      const text = await file.text();
+      const json = JSON.parse(text);
+
+      if (!json || (!Array.isArray(json.playlists) && !Array.isArray(json.likedTracks))) {
+        toast.error(t('Invalid backup file format', 'Неверный формат файла резервной копии'));
+        return;
+      }
+
+      const confirmed = await confirmDialog({
+        title: t('Restore Library?', 'Восстановить медиатеку?'),
+        message: t(
+          `File contains ${json.likedTracks?.length || 0} liked tracks and ${json.playlists?.length || 0} playlists. Do you want to restore them to your account?`,
+          `В файле обнаружено ${json.likedTracks?.length || 0} любимых треков и ${json.playlists?.length || 0} плейлистов. Восстановить их в ваш аккаунт?`
+        ),
+        confirmText: t('Restore', 'Восстановить'),
+        cancelText: t('Cancel', 'Отмена'),
+      });
+
+      if (!confirmed) return;
+
+      setImportingBackup(true);
+      const result = await apiRequest<any>('/user/library/restore', {
+        method: 'POST',
+        body: JSON.stringify(json),
+      });
+
+      toast.success(
+        t(
+          `Restored: ${result.restoredLikes || 0} likes, ${result.restoredPlaylists || 0} playlists (${result.restoredTracks || 0} tracks)`,
+          `Восстановлено: ${result.restoredLikes || 0} лайков, ${result.restoredPlaylists || 0} плейлистов (${result.restoredTracks || 0} треков)`
+        )
+      );
+      usePlayerStore.getState().loadLikes();
+    } catch (err: any) {
+      toast.error(err.message || t('Error importing backup', 'Ошибка при восстановлении из резервной копии'));
+    } finally {
+      setImportingBackup(false);
+    }
+  };
 
   const loadSpotifyStatus = async () => {
     try {
@@ -486,6 +564,57 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
               >
                 Русский
               </button>
+            </div>
+          </div>
+        </section>
+
+        {/* 0.5 Crossfade & Smooth Transitions */}
+        <section className="bg-cat-mantle p-6 rounded-3xl border border-cat-surface0/60">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-xl bg-cat-mauve/20 text-cat-mauve">
+                <Sliders className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="font-bold text-base text-cat-text">
+                    {t('Crossfade (Smooth Transitions)', 'Кроссфейд (Плавный переход)')}
+                  </h2>
+                  <span className="text-xs font-mono font-bold text-cat-mauve">
+                    {crossfade === 0 ? t('Off', 'Выкл') : `${crossfade} ${t('sec', 'сек')}`}
+                  </span>
+                </div>
+                <p className="text-xs text-cat-subtext0 mt-0.5">
+                  {t(
+                    'Smoothly fades out song ends and fades in new tracks, eliminating gaps and clicks',
+                    'Плавное затухание в конце и нарастание в начале следующего трека без пауз и щелчков'
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center bg-cat-surface0 p-1 rounded-2xl border border-cat-surface1/40 flex-wrap gap-1 self-start sm:self-auto">
+              {[0, 1, 2, 3, 5, 8].map((sec) => (
+                <button
+                  key={sec}
+                  type="button"
+                  onClick={() => {
+                    setCrossfade(sec);
+                    if (sec === 0) {
+                      toast.info(t('Crossfade disabled', 'Кроссфейд отключен'));
+                    } else {
+                      toast.success(t(`Crossfade set to ${sec}s`, `Кроссфейд: ${sec} сек`));
+                    }
+                  }}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    crossfade === sec
+                      ? 'bg-cat-mauve text-cat-base shadow-md'
+                      : 'text-cat-subtext0 hover:text-cat-text'
+                  }`}
+                >
+                  {sec === 0 ? t('Off', 'Выкл') : `${sec}s`}
+                </button>
+              ))}
             </div>
           </div>
         </section>
@@ -1055,6 +1184,64 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           >
             {clearingCache ? t('Clearing...', 'Очистка...') : t('Clear Offline Cache', 'Очистить оффлайн-кеш')}
           </button>
+        </section>
+
+        {/* 4.5 Library Backup & Restore */}
+        <section className="bg-cat-mantle p-6 rounded-3xl border border-cat-surface0/60 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-xl bg-cat-blue/20 text-cat-blue">
+              <Database className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="font-bold text-base text-cat-text">
+                {t('Library Backup & Restore', 'Резервное копирование медиатеки')}
+              </h2>
+              <p className="text-xs text-cat-subtext0 mt-0.5">
+                {t(
+                  'Export your likes, playlists, and blacklist to JSON, or restore them anytime',
+                  'Экспортируйте ваши лайки, плейлисты и черный список в JSON или восстановите их'
+                )}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={handleExportBackup}
+              disabled={exportingBackup}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-text font-semibold text-xs transition-colors cursor-pointer disabled:opacity-50"
+            >
+              {exportingBackup ? (
+                <Loader2 className="w-4 h-4 animate-spin text-cat-mauve" />
+              ) : (
+                <Download className="w-4 h-4 text-cat-mauve" />
+              )}
+              <span>{t('Export to JSON', 'Экспорт в JSON')}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={importingBackup}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-cat-mauve hover:opacity-95 text-cat-base font-bold text-xs transition-all cursor-pointer shadow-md disabled:opacity-50"
+            >
+              {importingBackup ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Upload className="w-4 h-4" />
+              )}
+              <span>{t('Restore from File', 'Восстановить из файла')}</span>
+            </button>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={handleFileSelected}
+              className="hidden"
+            />
+          </div>
         </section>
 
         {/* 5. Blacklist Management */}

@@ -12,10 +12,14 @@ if (!fs.existsSync(dbDir)) {
 
 export const db = new Database(dbPath);
 
+// Performance & concurrency pragmas
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+db.pragma('busy_timeout = 10000');
+db.pragma('synchronous = NORMAL');
+
 // Initialize tables
 db.exec(`
-  PRAGMA journal_mode = WAL;
-
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
