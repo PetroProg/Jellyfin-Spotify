@@ -162,9 +162,71 @@ function restoreTargetVolume() {
   audio.volume = target;
 }
 
+// Inaudible looping silent audio element to keep Android/Samsung One UI OS audio session permanently alive
+let keepAliveAudio: HTMLAudioElement | null = null;
+
+function ensureAudioKeepalive() {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!keepAliveAudio) {
+      const silentWav = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+      keepAliveAudio = new Audio(silentWav);
+      keepAliveAudio.loop = true;
+      keepAliveAudio.volume = 0.001;
+    }
+    if (keepAliveAudio.paused) {
+      keepAliveAudio.play().catch(() => {});
+    }
+  } catch (_) {}
+}
+
+function releaseAudioKeepalive() {
+  if (keepAliveAudio && !keepAliveAudio.paused) {
+    try {
+      keepAliveAudio.pause();
+    } catch (_) {}
+  }
+}
+
+// Screen WakeLock to prevent mobile OS from aggressively terminating playback
+let wakeLockSentinel: any = null;
+
+async function requestScreenWakeLock() {
+  if (typeof navigator !== 'undefined' && 'wakeLock' in navigator) {
+    try {
+      if (!wakeLockSentinel) {
+        wakeLockSentinel = await (navigator as any).wakeLock.request('screen');
+        wakeLockSentinel.addEventListener('release', () => {
+          wakeLockSentinel = null;
+        });
+      }
+    } catch (_) {}
+  }
+}
+
+function releaseScreenWakeLock() {
+  if (wakeLockSentinel) {
+    try {
+      wakeLockSentinel.release();
+    } catch (_) {}
+    wakeLockSentinel = null;
+  }
+}
+
+// Track interruptions by external apps (like Instagram, TikTok, phone calls)
+let isUserInitiatedPause = false;
+let wasInterruptedByExternalApp = false;
+
 function startFadeIn(durationSec: number) {
   cancelFade();
   const target = usePlayerStore.getState().volume;
+
+  // If in background, immediately set target volume without waiting for throttled setInterval!
+  if (typeof document !== 'undefined' && document.hidden) {
+    audio.volume = target;
+    return;
+  }
+
   if (target <= 0.01 || durationSec <= 0) {
     audio.volume = target;
     return;
@@ -176,6 +238,15 @@ function startFadeIn(durationSec: number) {
   const fadeMs = durationSec * 1000;
 
   fadeInterval = setInterval(() => {
+    // If app becomes hidden during fade, finish immediately
+    if (typeof document !== 'undefined' && document.hidden) {
+      clearInterval(fadeInterval);
+      fadeInterval = null;
+      isFadingIn = false;
+      audio.volume = target;
+      return;
+    }
+
     const elapsed = performance.now() - startTime;
     const progress = Math.min(1, elapsed / fadeMs);
     const currentVol = target * progress;
@@ -465,6 +536,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   };
 
   audio.onplay = () => {
+    isUserInitiatedPause = false;
+    wasInterruptedByExternalApp = false;
+    ensureAudioKeepalive();
+    requestScreenWakeLock();
     set({ isPlaying: true });
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'playing';
@@ -477,6 +552,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   };
 
   audio.onpause = () => {
+    releaseScreenWakeLock();
+    if (!isUserInitiatedPause && get().currentTrack) {
+      wasInterruptedByExternalApp = true;
+      console.log('[Audio] External interruption detected (Instagram/phone call/system)');
+    } else {
+      releaseAudioKeepalive();
+    }
     set({ isPlaying: false });
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'paused';
@@ -598,26 +680,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     const crossfade = get().crossfade;
     const effectiveDur = update.duration || get().duration;
+    const isAppVisible = typeof document !== 'undefined' && !document.hidden;
 
-    // Crossfade handling at end of track
-    if (crossfade > 0 && effectiveDur > 0 && isFinite(effectiveDur) && isFinite(cur) && !isFadingIn) {
+    // Crossfade handling at end of track (only active when foreground/visible to avoid background volume drops)
+    if (isAppVisible && crossfade > 0 && effectiveDur > 0 && isFinite(effectiveDur) && isFinite(cur) && !isFadingIn) {
       const remaining = effectiveDur - cur;
-      if (remaining <= crossfade && remaining > 0.25) {
+      if (remaining <= crossfade && remaining > 0.3) {
         isFadingOut = true;
         const progress = Math.max(0, Math.min(1, remaining / crossfade));
         const targetVol = get().volume;
         audio.volume = Math.max(0, Math.min(targetVol, targetVol * progress));
-      } else if (remaining <= 0.25 && isFadingOut) {
-        isFadingOut = false;
-        const { repeat } = get();
-        if (repeat === 'one') {
-          audio.currentTime = 0;
-          restoreTargetVolume();
-          audio.play().catch(() => {});
-        } else {
-          get().nextTrack();
-        }
-        return;
       }
     }
 
@@ -635,9 +707,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   audio.ondurationchange = handleAudioDuration;
   audio.oncanplay = handleAudioDuration;
 
+  let isTransitioningTrack = false;
+
   audio.onended = () => {
+    if (isTransitioningTrack) return;
+    isTransitioningTrack = true;
+
     cancelFade();
     restoreTargetVolume();
+
     const { repeat, nextTrack } = get();
     if (repeat === 'one') {
       audio.currentTime = 0;
@@ -645,8 +723,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (useSyncStore.getState().isLocalActive) {
         useSyncStore.getState().sendPlaybackState({ currentTime: 0, isPlaying: true });
       }
+      isTransitioningTrack = false;
     } else {
       nextTrack();
+      setTimeout(() => {
+        isTransitioningTrack = false;
+      }, 600);
     }
   };
 
@@ -654,10 +736,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   if (typeof window !== 'undefined') {
     const handleAppVisibility = () => {
       if (document.visibilityState === 'visible') {
-        if (audioCtx && audioCtx.state === 'suspended') {
+        if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
           audioCtx.resume().catch(() => {});
         }
-        if (get().currentTrack) {
+
+        // Auto-resume after closing Instagram or other audio-stealing apps
+        if (wasInterruptedByExternalApp && get().currentTrack) {
+          console.log('[Audio] Returning from Instagram/external app. Restoring playback automatically...');
+          wasInterruptedByExternalApp = false;
+          isUserInitiatedPause = false;
+          get().resume();
+        } else if (get().currentTrack) {
           const actuallyPaused = audio.paused;
           if (get().isPlaying !== !actuallyPaused) {
             set({ isPlaying: !actuallyPaused });
@@ -717,7 +806,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           getCachedTrackUrl(nextTrack.id).catch(() => {});
         }
       } catch (_) {}
-    }, 2000);
+    }, 12000);
   };
 
   let isPrefetchingRecommendations = false;
@@ -844,6 +933,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         restoreTargetVolume();
       }
 
+      isUserInitiatedPause = false;
+      wasInterruptedByExternalApp = false;
+      ensureAudioKeepalive();
+      requestScreenWakeLock();
+
       const playPromise = audio.play();
       if (playPromise !== undefined) {
         playPromise.catch((err) => {
@@ -861,19 +955,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       if (!syncBlobUrl) {
         getCachedTrackUrl(track.id).catch(() => {});
-
-        // Pre-cache currently playing track in background so if network drops, playback continues seamlessly
-        if (typeof navigator !== 'undefined' && navigator.onLine) {
-          isTrackCached(track.id).then((cached) => {
-            if (!cached) {
-              cacheTrackOffline(track).then((ok) => {
-                if (ok) {
-                  getCachedTrackUrl(track.id).catch(() => {});
-                }
-              }).catch(() => {});
-            }
-          }).catch(() => {});
-        }
       }
     },
 
@@ -929,6 +1010,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
 
       if (autoPlay) {
+        isUserInitiatedPause = false;
+        wasInterruptedByExternalApp = false;
+        ensureAudioKeepalive();
+        requestScreenWakeLock();
+
         if ((!startTime || startTime <= 0.1) && get().crossfade > 0) {
           startFadeIn(Math.min(get().crossfade, 2.5));
         } else {
@@ -954,19 +1040,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       if (!syncBlobUrl) {
         getCachedTrackUrl(track.id).catch(() => {});
-
-        // Pre-cache currently playing track in background so if network drops, playback continues seamlessly
-        if (typeof navigator !== 'undefined' && navigator.onLine) {
-          isTrackCached(track.id).then((cached) => {
-            if (!cached) {
-              cacheTrackOffline(track).then((ok) => {
-                if (ok) {
-                  getCachedTrackUrl(track.id).catch(() => {});
-                }
-              }).catch(() => {});
-            }
-          }).catch(() => {});
-        }
       }
     },
 
@@ -1031,6 +1104,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         restoreTargetVolume();
       }
 
+      isUserInitiatedPause = false;
+      wasInterruptedByExternalApp = false;
+      ensureAudioKeepalive();
+      requestScreenWakeLock();
+
       const p = audio.play();
       if (p !== undefined) {
         p.catch((err) => console.warn('[Audio play interrupted]:', err));
@@ -1042,18 +1120,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       if (!syncBlobUrl) {
         getCachedTrackUrl(chosenTrack.id).catch(() => {});
-
-        if (typeof navigator !== 'undefined' && navigator.onLine) {
-          isTrackCached(chosenTrack.id).then((cached) => {
-            if (!cached) {
-              cacheTrackOffline(chosenTrack).then((ok) => {
-                if (ok) {
-                  getCachedTrackUrl(chosenTrack.id).catch(() => {});
-                }
-              }).catch(() => {});
-            }
-          }).catch(() => {});
-        }
       }
     },
 
@@ -1069,10 +1135,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
 
       if (isPlaying) {
+        isUserInitiatedPause = true;
+        wasInterruptedByExternalApp = false;
+        releaseAudioKeepalive();
+        releaseScreenWakeLock();
         audio.pause();
         set({ isPlaying: false });
         useSyncStore.getState().sendPlaybackState({ isPlaying: false });
       } else {
+        isUserInitiatedPause = false;
+        wasInterruptedByExternalApp = false;
+        ensureAudioKeepalive();
+        requestScreenWakeLock();
+
         ensureAudioGraph();
         if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
           audioCtx.resume().catch(() => {});
@@ -1100,6 +1175,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     pause: () => {
       cancelFade();
+      isUserInitiatedPause = true;
+      wasInterruptedByExternalApp = false;
+      releaseAudioKeepalive();
+      releaseScreenWakeLock();
+
       const isLocal = useSyncStore.getState().isLocalActive;
       if (!isLocal) {
         useSyncStore.getState().sendRemoteCommand('pause');
@@ -1113,6 +1193,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     resume: () => {
       const { currentTrack } = get();
       if (!currentTrack) return;
+
+      isUserInitiatedPause = false;
+      wasInterruptedByExternalApp = false;
+      ensureAudioKeepalive();
+      requestScreenWakeLock();
 
       const isLocal = useSyncStore.getState().isLocalActive;
       if (!isLocal) {
@@ -1146,6 +1231,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     nextTrack: async () => {
       cancelFade();
+      restoreTargetVolume();
+
       const isLocal = useSyncStore.getState().isLocalActive;
       if (!isLocal) {
         useSyncStore.getState().sendRemoteCommand('next');
@@ -1157,60 +1244,66 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       let nextIndex = currentIndex + 1;
 
-      if (nextIndex >= queue.length) {
-        // 1. If currently playing a playlist (e.g. Daily Mix or Import in progress), check if new tracks downloaded on server
-        if (currentPlaylistId && currentPlaylistId > 0) {
-          try {
-            const data = await apiRequest<{ tracks: Track[] }>(`/playlists/${currentPlaylistId}`, { timeoutMs: 3000 });
-            if (data.tracks && data.tracks.length > queue.length) {
-              const currentId = queue[currentIndex]?.id;
-              const newIdx = data.tracks.findIndex((t) => t.id === currentId);
-              if (newIdx !== -1 && newIdx + 1 < data.tracks.length) {
-                set({ queue: data.tracks, currentIndex: newIdx });
-                playTrack(data.tracks[newIdx + 1], data.tracks, newIdx + 1, currentPlaylistId);
-                return;
-              }
-            }
-          } catch (_) {}
-        }
+      // 1. Fast instant track change without network blocking!
+      if (nextIndex < queue.length) {
+        playTrack(queue[nextIndex], queue, nextIndex, currentPlaylistId);
+        return;
+      }
 
-        // 2. Smart shuffle fallback if recommendations weren't already pre-fetched
-        if (smartShuffle) {
-          try {
-            const current = queue[currentIndex];
-            const data = await apiRequest<{ recommendations: any[] }>(
-              `/recommendations?artists=${encodeURIComponent(current?.artist || '')}`,
-              { timeoutMs: 4000 }
-            );
-            if (data.recommendations && data.recommendations.length > 0) {
-              const newTracks = data.recommendations.map((r) => ({
-                id: r.id,
-                title: r.title,
-                artist: r.artist,
-                album: r.album,
-                duration_ms: r.duration_ms,
-                cover_url: r.cover_url,
-              }));
-              const updatedQueue = [...queue, ...newTracks];
-              set({ queue: updatedQueue });
-              playTrack(newTracks[0], updatedQueue, nextIndex, null);
+      // 2. Queue ended: loop back if repeat all
+      if (repeat === 'all') {
+        playTrack(queue[0], queue, 0, currentPlaylistId);
+        return;
+      }
+
+      // 3. If currently playing a playlist, check if new tracks finished downloading on server
+      if (currentPlaylistId && currentPlaylistId > 0) {
+        try {
+          const data = await apiRequest<{ tracks: Track[] }>(`/playlists/${currentPlaylistId}`, { timeoutMs: 3000 });
+          if (data.tracks && data.tracks.length > queue.length) {
+            const currentId = queue[currentIndex]?.id;
+            const newIdx = data.tracks.findIndex((t) => t.id === currentId);
+            if (newIdx !== -1 && newIdx + 1 < data.tracks.length) {
+              set({ queue: data.tracks, currentIndex: newIdx });
+              playTrack(data.tracks[newIdx + 1], data.tracks, newIdx + 1, currentPlaylistId);
               return;
             }
-          } catch (e) {
-            console.warn('[Smart shuffle error]:', e);
           }
-        }
+        } catch (_) {}
+      }
 
-        if (repeat === 'all') {
-          nextIndex = 0;
-        } else {
-          set({ isPlaying: false });
-          useSyncStore.getState().sendPlaybackState({ isPlaying: false });
-          return;
+      // 4. Smart shuffle fallback if recommendations weren't already pre-fetched
+      if (smartShuffle) {
+        try {
+          const current = queue[currentIndex];
+          const data = await apiRequest<{ recommendations: any[] }>(
+            `/recommendations?artists=${encodeURIComponent(current?.artist || '')}`,
+            { timeoutMs: 4000 }
+          );
+          if (data.recommendations && data.recommendations.length > 0) {
+            const newTracks = data.recommendations.map((r) => ({
+              id: r.id,
+              title: r.title,
+              artist: r.artist,
+              album: r.album,
+              duration_ms: r.duration_ms,
+              cover_url: r.cover_url,
+            }));
+            const updatedQueue = [...queue, ...newTracks];
+            set({ queue: updatedQueue });
+            playTrack(newTracks[0], updatedQueue, nextIndex, null);
+            return;
+          }
+        } catch (e) {
+          console.warn('[Smart shuffle error]:', e);
         }
       }
 
-      playTrack(queue[nextIndex], queue, nextIndex, currentPlaylistId);
+      // End of playback
+      set({ isPlaying: false });
+      releaseAudioKeepalive();
+      releaseScreenWakeLock();
+      useSyncStore.getState().sendPlaybackState({ isPlaying: false });
     },
 
     prevTrack: () => {

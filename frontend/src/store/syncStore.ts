@@ -124,6 +124,8 @@ export const useSyncStore = create<SyncState>((set, get) => {
         ws.onopen = () => {
           set({ isConnected: true });
           const { deviceId, deviceName, deviceType } = get();
+          const player = usePlayerStore.getState();
+          const hasActivePlayback = Boolean(player.currentTrack && player.isPlaying);
 
           ws.send(
             JSON.stringify({
@@ -131,6 +133,7 @@ export const useSyncStore = create<SyncState>((set, get) => {
               deviceId,
               deviceName,
               deviceType,
+              hasActivePlayback,
             })
           );
 
@@ -150,20 +153,26 @@ export const useSyncStore = create<SyncState>((set, get) => {
             switch (data.type) {
               case 'SYNC_INIT': {
                 const { activeDeviceId, activeDeviceName, devices, playback } = data;
-                const isLocal = !activeDeviceId || activeDeviceId === deviceId;
+                const player = usePlayerStore.getState();
+                const isLocallyPlaying = Boolean(player.isPlaying && player.currentTrack);
+
+                // If this device is physically playing sound, it maintains local audio sovereignty
+                const isLocal = isLocallyPlaying || (!activeDeviceId || activeDeviceId === deviceId);
 
                 set({
-                  activeDeviceId: activeDeviceId || deviceId,
-                  activeDeviceName: activeDeviceName || get().deviceName,
+                  activeDeviceId: isLocal ? deviceId : (activeDeviceId || deviceId),
+                  activeDeviceName: isLocal ? get().deviceName : (activeDeviceName || get().deviceName),
                   isLocalActive: isLocal,
                   devices: devices || [],
                 });
 
-                // Mirror active playback state into local playerStore
-                if (playback && playback.track) {
+                if (isLocal && isLocallyPlaying) {
+                  // Confirm to server our active playback state
+                  setTimeout(() => get().sendPlaybackState(), 100);
+                } else if (playback && playback.track) {
                   const currentLocal = usePlayerStore.getState().currentTrack;
-                  if (!isLocal) {
-                    // Another device is actively playing: mirror its state onto this device
+                  if (!isLocal && !currentLocal) {
+                    // Another device is actively playing: mirror its state onto this passive device
                     usePlayerStore.setState({
                       currentTrack: playback.track,
                       isPlaying: Boolean(playback.isPlaying),
@@ -175,53 +184,39 @@ export const useSyncStore = create<SyncState>((set, get) => {
                       shuffle: Boolean(playback.shuffle),
                       repeat: playback.repeat || 'off',
                     });
-                  } else if (!currentLocal) {
-                    // This device is active, but currently has no track loaded (cold app start)
-                    usePlayerStore.setState({
-                      currentTrack: playback.track,
-                      isPlaying: false,
-                      currentTime: playback.currentTime || 0,
-                      duration: playback.duration || 0,
-                      queue: playback.queue || [playback.track],
-                      originalQueue: playback.originalQueue || [playback.track],
-                      currentIndex: playback.currentIndex !== undefined ? playback.currentIndex : 0,
-                      shuffle: Boolean(playback.shuffle),
-                      repeat: playback.repeat || 'off',
-                    });
                   }
-                  // If isLocal and currentLocal already exists, do NOT clobber active playback on reconnection!
                 }
                 break;
               }
 
               case 'DEVICES_CHANGED': {
                 const { activeDeviceId, activeDeviceName, devices } = data;
+                const player = usePlayerStore.getState();
+                const isLocallyPlaying = Boolean(player.isPlaying && player.currentTrack);
+                const isLocal = isLocallyPlaying || (activeDeviceId ? activeDeviceId === deviceId : true);
+
                 set({
                   devices: devices || [],
-                  activeDeviceId: activeDeviceId || get().activeDeviceId,
-                  activeDeviceName: activeDeviceName || get().activeDeviceName,
-                  isLocalActive: activeDeviceId ? activeDeviceId === deviceId : true,
+                  activeDeviceId: isLocal ? deviceId : (activeDeviceId || get().activeDeviceId),
+                  activeDeviceName: isLocal ? get().deviceName : (activeDeviceName || get().activeDeviceName),
+                  isLocalActive: isLocal,
                 });
                 break;
               }
 
               case 'PLAYBACK_UPDATE': {
                 const { activeDeviceId, activeDeviceName, state } = data;
-                const wasLocal = get().isLocalActive;
-                const isLocal = activeDeviceId === deviceId;
+                const player = usePlayerStore.getState();
+                const isLocallyPlaying = Boolean(player.isPlaying && player.currentTrack);
+                const isLocal = isLocallyPlaying || activeDeviceId === deviceId;
 
                 set({
-                  activeDeviceId,
-                  activeDeviceName,
+                  activeDeviceId: isLocal ? deviceId : activeDeviceId,
+                  activeDeviceName: isLocal ? get().deviceName : activeDeviceName,
                   isLocalActive: isLocal,
                 });
 
-                if (wasLocal && !isLocal) {
-                  // We were active, but another device took over! Stop our local audio.
-                  usePlayerStore.getState().stopLocalPlayback();
-                }
-
-                if (!isLocal && state) {
+                if (!isLocal && state && !isLocallyPlaying) {
                   // Mirror playback onto passive UI without playing local sound
                   usePlayerStore.setState({
                     currentTrack: state.track ?? null,

@@ -69,7 +69,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
   const loadData = async (silent = false) => {
     try {
       if (!silent && !playlist) setLoading(true);
-      const data = await apiRequest<{ playlist: Playlist; tracks: Track[]; activeJob?: any }>(`/playlists/${playlistId}`, { timeoutMs: 5000 });
+      const data = await apiRequest<{ playlist: Playlist; tracks: Track[]; activeJob?: any }>(`/playlists/${playlistId}`);
       setPlaylist(data.playlist);
       setTracks(data.tracks || []);
       setActiveJob(data.activeJob || null);

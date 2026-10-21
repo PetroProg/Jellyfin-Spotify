@@ -69,7 +69,7 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
 
   const loadLikes = async () => {
     try {
-      const data = await apiRequest<{ tracks: Track[] }>('/likes', { timeoutMs: 5000 });
+      const data = await apiRequest<{ tracks: Track[] }>('/likes');
       const loadedTracks = data.tracks || [];
       setTracks(loadedTracks);
       localStorage.setItem(CACHED_LIKED_TRACKS_KEY, JSON.stringify(loadedTracks));

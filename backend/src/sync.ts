@@ -176,7 +176,7 @@ export function setupWebSocketSync(server: FastifyInstance) {
 
         switch (data.type) {
           case 'REGISTER': {
-            const { deviceId, deviceName, deviceType } = data;
+            const { deviceId, deviceName, deviceType, hasActivePlayback } = data;
             if (!deviceId) return;
 
             session.deviceId = deviceId;
@@ -191,12 +191,14 @@ export function setupWebSocketSync(server: FastifyInstance) {
             clients.set(deviceId, session);
 
             // Cancel any pending disconnect timer for this user if this was active device
-            if (playback.activeDeviceId === deviceId) {
+            if (playback.activeDeviceId === deviceId || hasActivePlayback) {
               const timer = disconnectTimers.get(userId);
               if (timer) {
                 clearTimeout(timer);
                 disconnectTimers.delete(userId);
               }
+              playback.activeDeviceId = deviceId;
+              playback.activeDeviceName = session.deviceName;
             }
 
             // If no active device currently, make this device the active candidate
@@ -391,7 +393,7 @@ export function setupWebSocketSync(server: FastifyInstance) {
 
       const playback = getOrCreatePlayback(userId);
       if (playback.activeDeviceId === session.deviceId) {
-        // Active device went offline. Give 6 seconds grace in case of page refresh/reconnect
+        // Active device went offline. Give 45 seconds grace in case of mobile network switch / cell tower handover
         const timer = setTimeout(() => {
           disconnectTimers.delete(userId);
           const currentClients = userClients.get(userId);
@@ -420,7 +422,7 @@ export function setupWebSocketSync(server: FastifyInstance) {
               state: playback,
             });
           }
-        }, 6000);
+        }, 45000);
         disconnectTimers.set(userId, timer);
       }
 
