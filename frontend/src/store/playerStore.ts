@@ -202,25 +202,141 @@ if (typeof window !== 'undefined') {
   window.addEventListener('keydown', unlockAudio, { passive: true });
 }
 
+// MediaSession position sync helper
+const updateMediaPositionState = (cur?: number, dur?: number) => {
+  if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession) {
+    const c = cur ?? audio.currentTime;
+    const d = dur ?? usePlayerStore.getState().duration;
+    if (d > 0 && isFinite(d) && c >= 0 && isFinite(c)) {
+      try {
+        navigator.mediaSession.setPositionState({
+          duration: Math.max(d, c),
+          playbackRate: audio.playbackRate || 1,
+          position: Math.min(c, d)
+        });
+      } catch (_) {}
+    }
+  }
+};
+
+let networkRetryCount = 0;
+let isRecoveringStream = false;
+let errorRecoveryTimeout: any = null;
+let stallTimeout: any = null;
+let waitingTimeout: any = null;
+
+/**
+ * Resilient stream recovery when network drops, switches from Wi-Fi to LTE,
+ * or when the HTMLMediaElement encounters an error state.
+ */
+async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true): Promise<void> {
+  if (isRecoveringStream) return;
+  isRecoveringStream = true;
+
+  try {
+    const store = usePlayerStore.getState();
+    const track = store.currentTrack;
+    if (!track) return;
+
+    let targetTime = 0;
+    if (resumeTime !== undefined && resumeTime >= 0 && isFinite(resumeTime)) {
+      targetTime = resumeTime;
+    } else if (audio.currentTime > 0 && isFinite(audio.currentTime)) {
+      targetTime = audio.currentTime;
+    } else if (store.currentTime > 0 && isFinite(store.currentTime)) {
+      targetTime = store.currentTime;
+    }
+
+    console.log(`[Audio Recovery] Reconnecting stream for "${track.title}" at ${targetTime.toFixed(1)}s (autoPlay: ${autoPlay})`);
+
+    // 1. Check local offline cache first for instant 0ms playback without internet
+    let targetSrc = getSynchronousBlobUrl(track.id);
+    if (!targetSrc) {
+      try {
+        targetSrc = await getCachedTrackUrl(track.id);
+      } catch (_) {}
+    }
+
+    // 2. If not in cache, use remote stream URL with query timestamp to force a new TCP connection on active network
+    if (!targetSrc) {
+      targetSrc = `/api/stream/${track.id}?reconnect=${Date.now()}`;
+    }
+
+    // 3. Reset HTMLMediaElement cleanly to wipe any MediaError state
+    try {
+      audio.pause();
+    } catch (_) {}
+
+    audio.removeAttribute('src');
+    audio.load(); // W3C spec: resets media error to null, networkState to NETWORK_EMPTY
+    audio.src = targetSrc;
+    audio.load();
+
+    // 4. Wait for metadata or canplay before restoring playback position
+    await new Promise<void>((resolve) => {
+      let resolved = false;
+      const done = () => {
+        if (!resolved) {
+          resolved = true;
+          resolve();
+        }
+      };
+
+      const fallbackTimer = setTimeout(done, 3000);
+
+      const onCanPlay = () => {
+        clearTimeout(fallbackTimer);
+        if (targetTime > 0 && isFinite(targetTime)) {
+          try {
+            audio.currentTime = Math.min(targetTime, audio.duration || targetTime);
+          } catch (e) {
+            console.warn('[Seek on recover]:', e);
+          }
+        }
+        done();
+      };
+
+      if (audio.readyState >= 1) {
+        onCanPlay();
+      } else {
+        audio.addEventListener('loadedmetadata', onCanPlay, { once: true });
+        audio.addEventListener('canplay', onCanPlay, { once: true });
+      }
+    });
+
+    if (autoPlay) {
+      ensureAudioGraph();
+      if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
+        audioCtx.resume().catch(() => {});
+      }
+
+      try {
+        await audio.play();
+        usePlayerStore.setState({ isPlaying: true });
+        if ('mediaSession' in navigator) {
+          navigator.mediaSession.playbackState = 'playing';
+        }
+        networkRetryCount = 0;
+      } catch (playErr: any) {
+        console.warn('[Play after recovery failed]:', playErr);
+        if (playErr.name === 'NotAllowedError') {
+          usePlayerStore.setState({ isPlaying: false });
+          if ('mediaSession' in navigator) {
+            navigator.mediaSession.playbackState = 'paused';
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Audio Recovery Exception]:', err);
+  } finally {
+    isRecoveringStream = false;
+  }
+}
+
 export const usePlayerStore = create<PlayerState>((set, get) => {
   // Sync Audio Events
   let lastSyncTime = 0;
-
-  const updateMediaPositionState = (cur?: number, dur?: number) => {
-    if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession) {
-      const c = cur ?? audio.currentTime;
-      const d = dur ?? get().duration;
-      if (d > 0 && isFinite(d) && c >= 0 && isFinite(c)) {
-        try {
-          navigator.mediaSession.setPositionState({
-            duration: Math.max(d, c),
-            playbackRate: audio.playbackRate || 1,
-            position: Math.min(c, d)
-          });
-        } catch (_) {}
-      }
-    }
-  };
 
   const handleAudioDuration = () => {
     const dur = audio.duration;
@@ -255,26 +371,49 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   };
 
   let consecutiveErrors = 0;
-  let errorRecoveryTimeout: any = null;
-  let stallTimeout: any = null;
 
   audio.onerror = () => {
     const err = audio.error;
-    const { currentTrack } = get();
-    console.warn('[Audio Error Event]:', err?.code, err?.message, currentTrack?.title);
+    const { currentTrack, isPlaying } = get();
+    console.warn('[Audio Error Event]: code =', err?.code, 'message =', err?.message, 'track =', currentTrack?.title);
 
+    if (!currentTrack) return;
+
+    // Check if offline or network stream failure:
+    // MediaError.MEDIA_ERR_NETWORK (2)
+    // MediaError.MEDIA_ERR_DECODE (3 - abruptly severed stream causes decode error at EOF)
+    // MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED (4 - 504 / network fetch failure)
+    const isNetworkErr = (typeof navigator !== 'undefined' && !navigator.onLine) ||
+      err?.code === 2 || err?.code === 3 || err?.code === 4;
+
+    const savedPos = audio.currentTime > 0 ? audio.currentTime : get().currentTime;
+
+    if (isNetworkErr && networkRetryCount < 5) {
+      networkRetryCount++;
+      console.warn(`[Audio Error] Network stream interrupted. Attempting auto-reconnect ${networkRetryCount}/5 at ${savedPos.toFixed(1)}s...`);
+
+      if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
+      const delay = Math.min(3000, 400 + networkRetryCount * 600);
+      errorRecoveryTimeout = setTimeout(() => {
+        recoverAudioStream(savedPos, isPlaying);
+      }, delay);
+      return;
+    }
+
+    // If persistent non-network error or retries exhausted
     consecutiveErrors++;
     if (consecutiveErrors >= 3) {
       consecutiveErrors = 0;
+      networkRetryCount = 0;
       set({ isPlaying: false });
       if ('mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'paused';
       }
-      toast.error('Не удалось загрузить аудио (ошибка сети или файл недоступен)');
+      toast.error(tr('Playback error: network connection lost', 'Ошибка воспроизведения: потеряно подключение к сети'));
       return;
     }
 
-    toast.warning(`Пропуск «${currentTrack?.title || 'трека'}» (ошибка воспроизведения)`);
+    toast.warning(tr(`Skipping «${currentTrack.title}»`, `Пропуск «${currentTrack.title}» (файл недоступен)`));
     if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
     errorRecoveryTimeout = setTimeout(() => {
       get().nextTrack();
@@ -283,8 +422,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
   audio.onplaying = () => {
     consecutiveErrors = 0;
+    networkRetryCount = 0;
     if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
     if (stallTimeout) clearTimeout(stallTimeout);
+    if (waitingTimeout) clearTimeout(waitingTimeout);
     set({ isPlaying: true });
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'playing';
@@ -296,6 +437,14 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     if (get().isPlaying && 'mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'playing';
     }
+    // If waiting for buffer for >3.5 seconds during active playback, auto-reconnect
+    if (waitingTimeout) clearTimeout(waitingTimeout);
+    waitingTimeout = setTimeout(() => {
+      if (get().isPlaying && audio.readyState < 3) {
+        console.warn('[Audio Waiting]: Stalled waiting for buffer for >3.5s, reconnecting stream...');
+        recoverAudioStream(audio.currentTime || get().currentTime, true);
+      }
+    }, 3500);
   };
 
   audio.onstalled = () => {
@@ -303,15 +452,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     if (stallTimeout) clearTimeout(stallTimeout);
     stallTimeout = setTimeout(() => {
       if (get().isPlaying && audio.readyState < 3) {
-        console.warn('[Audio Stalled]: Stream stalled for >10s, reloading buffer');
-        const curTime = audio.currentTime;
-        audio.load();
-        try {
-          audio.currentTime = curTime;
-        } catch (_) {}
-        audio.play().catch(() => get().nextTrack());
+        console.warn('[Audio Stalled]: Stream stalled for >3s, reconnecting stream...');
+        recoverAudioStream(audio.currentTime || get().currentTime, true);
       }
-    }, 10000);
+    }, 3000);
   };
 
   audio.onprogress = () => {
@@ -566,6 +710,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       if (!syncBlobUrl) {
         getCachedTrackUrl(track.id).catch(() => {});
+
+        // Pre-cache currently playing track in background so if network drops, playback continues seamlessly
+        if (typeof navigator !== 'undefined' && navigator.onLine) {
+          isTrackCached(track.id).then((cached) => {
+            if (!cached) {
+              cacheTrackOffline(track).then((ok) => {
+                if (ok) {
+                  getCachedTrackUrl(track.id).catch(() => {});
+                }
+              }).catch(() => {});
+            }
+          }).catch(() => {});
+        }
       }
     },
 
@@ -641,6 +798,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       if (!syncBlobUrl) {
         getCachedTrackUrl(track.id).catch(() => {});
+
+        // Pre-cache currently playing track in background so if network drops, playback continues seamlessly
+        if (typeof navigator !== 'undefined' && navigator.onLine) {
+          isTrackCached(track.id).then((cached) => {
+            if (!cached) {
+              cacheTrackOffline(track).then((ok) => {
+                if (ok) {
+                  getCachedTrackUrl(track.id).catch(() => {});
+                }
+              }).catch(() => {});
+            }
+          }).catch(() => {});
+        }
       }
     },
 
@@ -710,6 +880,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       if (!syncBlobUrl) {
         getCachedTrackUrl(chosenTrack.id).catch(() => {});
+
+        if (typeof navigator !== 'undefined' && navigator.onLine) {
+          isTrackCached(chosenTrack.id).then((cached) => {
+            if (!cached) {
+              cacheTrackOffline(chosenTrack).then((ok) => {
+                if (ok) {
+                  getCachedTrackUrl(chosenTrack.id).catch(() => {});
+                }
+              }).catch(() => {});
+            }
+          }).catch(() => {});
+        }
       }
     },
 
@@ -730,12 +912,27 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         useSyncStore.getState().sendPlaybackState({ isPlaying: false });
       } else {
         ensureAudioGraph();
-        if (audioCtx && audioCtx.state === 'suspended') {
+        if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
           audioCtx.resume().catch(() => {});
         }
-        audio.play().catch(() => {});
-        set({ isPlaying: true });
-        useSyncStore.getState().sendPlaybackState({ isPlaying: true });
+
+        // If audio element is errored, stalled or in empty network state from dropped connection
+        const isBroken = audio.error !== null ||
+          audio.networkState === HTMLMediaElement.NETWORK_NO_SOURCE ||
+          (audio.readyState === 0 && Boolean(audio.src));
+
+        if (isBroken) {
+          console.log('[togglePlay] Audio element is in error/stalled state, running recoverAudioStream...');
+          recoverAudioStream(audio.currentTime > 0 ? audio.currentTime : get().currentTime, true);
+        } else {
+          audio.play().then(() => {
+            set({ isPlaying: true });
+            useSyncStore.getState().sendPlaybackState({ isPlaying: true });
+          }).catch((err) => {
+            console.warn('[togglePlay play failed, attempting recovery]:', err);
+            recoverAudioStream(audio.currentTime > 0 ? audio.currentTime : get().currentTime, true);
+          });
+        }
       }
     },
 
@@ -751,19 +948,36 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     resume: () => {
-      if (get().currentTrack) {
-        const isLocal = useSyncStore.getState().isLocalActive;
-        if (!isLocal) {
-          useSyncStore.getState().sendRemoteCommand('play');
-        } else {
-          ensureAudioGraph();
-          if (audioCtx && audioCtx.state === 'suspended') {
-            audioCtx.resume().catch(() => {});
-          }
-          audio.play().catch(() => {});
-        }
+      const { currentTrack } = get();
+      if (!currentTrack) return;
+
+      const isLocal = useSyncStore.getState().isLocalActive;
+      if (!isLocal) {
+        useSyncStore.getState().sendRemoteCommand('play');
         set({ isPlaying: true });
-        useSyncStore.getState().sendPlaybackState({ isPlaying: true });
+        return;
+      }
+
+      ensureAudioGraph();
+      if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
+        audioCtx.resume().catch(() => {});
+      }
+
+      const isBroken = audio.error !== null ||
+        audio.networkState === HTMLMediaElement.NETWORK_NO_SOURCE ||
+        (audio.readyState === 0 && Boolean(audio.src));
+
+      if (isBroken) {
+        console.log('[resume] Audio element is in error/stalled state, running recoverAudioStream...');
+        recoverAudioStream(audio.currentTime > 0 ? audio.currentTime : get().currentTime, true);
+      } else {
+        audio.play().then(() => {
+          set({ isPlaying: true });
+          useSyncStore.getState().sendPlaybackState({ isPlaying: true });
+        }).catch((err) => {
+          console.warn('[resume play failed, attempting recovery]:', err);
+          recoverAudioStream(audio.currentTime > 0 ? audio.currentTime : get().currentTime, true);
+        });
       }
     },
 
@@ -864,9 +1078,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (!isLocal) {
         useSyncStore.getState().sendRemoteCommand('seek', seconds);
       } else {
-        audio.currentTime = seconds;
+        if (audio.error !== null || audio.networkState === HTMLMediaElement.NETWORK_NO_SOURCE) {
+          recoverAudioStream(seconds, get().isPlaying);
+        } else {
+          try {
+            audio.currentTime = seconds;
+          } catch (_) {
+            recoverAudioStream(seconds, get().isPlaying);
+          }
+        }
       }
       set({ currentTime: seconds });
+      updateMediaPositionState(seconds, get().duration);
       useSyncStore.getState().sendPlaybackState({ currentTime: seconds });
     },
 
@@ -1125,3 +1348,42 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
   };
 });
+
+// Global network change listeners for automatic stream recovery & offline resilience
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    console.log('[Player] Network connection restored (online event)');
+    const state = usePlayerStore.getState();
+    if (state.currentTrack) {
+      const isBroken = audio.error !== null ||
+        audio.networkState === HTMLMediaElement.NETWORK_NO_SOURCE ||
+        audio.readyState < 2;
+
+      if (isBroken || state.isPlaying) {
+        console.log('[Player] Triggering automatic stream recovery on network restore...');
+        recoverAudioStream(audio.currentTime > 0 ? audio.currentTime : state.currentTime, state.isPlaying);
+      }
+    }
+  });
+
+  window.addEventListener('offline', () => {
+    console.warn('[Player] Network connection lost (offline event)');
+    const state = usePlayerStore.getState();
+    if (state.currentTrack && !audio.src.startsWith('blob:')) {
+      // Seamlessly switch to offline cached blob if available
+      getCachedTrackUrl(state.currentTrack.id).then((blobUrl) => {
+        if (blobUrl) {
+          console.log('[Player] Switching to local offline blob URL during network loss');
+          const curTime = audio.currentTime;
+          audio.src = blobUrl;
+          const applySeek = () => {
+            try { audio.currentTime = curTime; } catch (_) {}
+            if (state.isPlaying) audio.play().catch(() => {});
+          };
+          if (audio.readyState >= 1) applySeek();
+          else audio.addEventListener('loadedmetadata', applySeek, { once: true });
+        }
+      }).catch(() => {});
+    }
+  });
+}

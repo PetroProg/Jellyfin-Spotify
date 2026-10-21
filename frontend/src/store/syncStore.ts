@@ -161,17 +161,35 @@ export const useSyncStore = create<SyncState>((set, get) => {
 
                 // Mirror active playback state into local playerStore
                 if (playback && playback.track) {
-                  usePlayerStore.setState({
-                    currentTrack: playback.track,
-                    isPlaying: isLocal ? false : Boolean(playback.isPlaying),
-                    currentTime: playback.currentTime || 0,
-                    duration: playback.duration || 0,
-                    queue: playback.queue || [playback.track],
-                    originalQueue: playback.originalQueue || [playback.track],
-                    currentIndex: playback.currentIndex !== undefined ? playback.currentIndex : 0,
-                    shuffle: Boolean(playback.shuffle),
-                    repeat: playback.repeat || 'off',
-                  });
+                  const currentLocal = usePlayerStore.getState().currentTrack;
+                  if (!isLocal) {
+                    // Another device is actively playing: mirror its state onto this device
+                    usePlayerStore.setState({
+                      currentTrack: playback.track,
+                      isPlaying: Boolean(playback.isPlaying),
+                      currentTime: playback.currentTime || 0,
+                      duration: playback.duration || 0,
+                      queue: playback.queue || [playback.track],
+                      originalQueue: playback.originalQueue || [playback.track],
+                      currentIndex: playback.currentIndex !== undefined ? playback.currentIndex : 0,
+                      shuffle: Boolean(playback.shuffle),
+                      repeat: playback.repeat || 'off',
+                    });
+                  } else if (!currentLocal) {
+                    // This device is active, but currently has no track loaded (cold app start)
+                    usePlayerStore.setState({
+                      currentTrack: playback.track,
+                      isPlaying: false,
+                      currentTime: playback.currentTime || 0,
+                      duration: playback.duration || 0,
+                      queue: playback.queue || [playback.track],
+                      originalQueue: playback.originalQueue || [playback.track],
+                      currentIndex: playback.currentIndex !== undefined ? playback.currentIndex : 0,
+                      shuffle: Boolean(playback.shuffle),
+                      repeat: playback.repeat || 'off',
+                    });
+                  }
+                  // If isLocal and currentLocal already exists, do NOT clobber active playback on reconnection!
                 }
                 break;
               }
@@ -477,3 +495,11 @@ export const useSyncStore = create<SyncState>((set, get) => {
     },
   };
 });
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    if (useAuthStore.getState().isAuthenticated) {
+      useSyncStore.getState().initSync();
+    }
+  });
+}

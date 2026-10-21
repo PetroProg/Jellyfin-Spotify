@@ -199,7 +199,7 @@ server.delete('/api/auth/account', { preHandler: [(server as any).authenticate] 
 
 // ----------------- AUDIO STREAMING (High-Performance WAN Stream & Caching) -----------------
 server.get('/api/stream/:trackId', async (req: any, reply: any) => {
-  const trackId = req.params.trackId;
+  const trackId = parseInt(req.params.trackId, 10) || req.params.trackId;
   const track: any = db.prepare('SELECT file_path FROM tracks WHERE id = ?').get(trackId);
   if (!track || !fs.existsSync(track.file_path)) {
     return reply.status(404).send({ error: 'Аудиофайл не найден' });
