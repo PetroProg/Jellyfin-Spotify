@@ -233,6 +233,13 @@ export const useSyncStore = create<SyncState>((set, get) => {
                 break;
               }
 
+              case 'SETTINGS_UPDATED': {
+                if (data.settings) {
+                  usePlayerStore.getState().applyAccountSettings(data.settings);
+                }
+                break;
+              }
+
               case 'STOP_LOCAL_PLAYBACK': {
                 set({ isLocalActive: false });
                 usePlayerStore.getState().stopLocalPlayback();

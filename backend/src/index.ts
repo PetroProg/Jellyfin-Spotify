@@ -31,7 +31,7 @@ import {
 } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
-import { setupWebSocketSync } from './sync';
+import { setupWebSocketSync, broadcastToUser } from './sync';
 import { getOrGenerateDailyMixes, saveDailyMixAsPlaylist } from './dailyMix';
 import { startNightlyScheduler, getNightlySchedulerStatus, updateNightlySchedule } from './nightlyScheduler';
 
@@ -228,15 +228,70 @@ server.post('/api/auth/login', async (req: any, reply: any) => {
   resetAuthLimit(clientIp);
 
   const token = server.jwt.sign({ id: user.id, username: user.username });
+  const settings = getUserSettings(user.id);
   return {
     token,
-    user: { id: user.id, username: user.username, display_name: user.display_name, email: user.email }
+    user: { id: user.id, username: user.username, display_name: user.display_name, email: user.email, settings }
   };
 });
 
+function getUserSettings(userId: number): Record<string, string> {
+  try {
+    const rows: any[] = db.prepare('SELECT key, value FROM user_settings WHERE user_id = ?').all(userId);
+    const settings: Record<string, string> = {};
+    for (const r of rows) settings[r.key] = r.value;
+    return settings;
+  } catch (_) {
+    return {};
+  }
+}
+
 server.get('/api/auth/me', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const user: any = db.prepare('SELECT id, username, display_name, created_at FROM users WHERE id = ?').get(req.user.id);
-  return { user };
+  if (!user) return { user: null };
+  const settings = getUserSettings(req.user.id);
+  return { user: { ...user, settings } };
+});
+
+server.get('/api/user/settings', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+  const settings = getUserSettings(req.user.id);
+  return { settings };
+});
+
+server.put('/api/user/settings', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+  const userId = req.user.id;
+  const body = req.body || {};
+  const upsert = db.prepare(`
+    INSERT INTO user_settings (user_id, key, value, updated_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+  `);
+
+  const saveItem = (k: string, v: any) => {
+    if (typeof k === 'string' && k.length > 0 && k.length <= 64) {
+      const valStr = typeof v === 'string' ? v : JSON.stringify(v);
+      upsert.run(userId, k, valStr);
+    }
+  };
+
+  if (body.key !== undefined && body.value !== undefined) {
+    saveItem(body.key, body.value);
+  } else if (body.settings && typeof body.settings === 'object') {
+    for (const [k, v] of Object.entries(body.settings)) {
+      saveItem(k, v);
+    }
+  } else if (typeof body === 'object') {
+    for (const [k, v] of Object.entries(body)) {
+      saveItem(k, v);
+    }
+  }
+
+  const settings = getUserSettings(userId);
+  try {
+    broadcastToUser(userId, { type: 'SETTINGS_UPDATED', settings });
+  } catch (_) {}
+
+  return { success: true, settings };
 });
 
 const handleProfileUpdate = async (req: any, reply: any) => {

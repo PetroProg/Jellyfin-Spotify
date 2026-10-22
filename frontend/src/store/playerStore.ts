@@ -70,6 +70,7 @@ interface PlayerState {
   setEqualizerOpen: (open: boolean) => void;
   resetEqualizer: () => void;
   setCrossfade: (seconds: number) => void;
+  applyAccountSettings: (settings: Record<string, string>) => void;
 }
 
 const STORAGE_KEY_VOLUME = 'jellyfy_player_volume';
@@ -1713,9 +1714,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (eqFilters[bandIndex] && audioCtx) {
         eqFilters[bandIndex].gain.setValueAtTime(gain, audioCtx.currentTime);
       }
-      localStorage.setItem(STORAGE_KEY_EQ_BANDS, JSON.stringify(bands));
+      try { localStorage.setItem(STORAGE_KEY_EQ_BANDS, JSON.stringify(bands)); } catch (_) {}
       set({ eqBands: bands, eqPreset: 'custom' });
       updateAudioGraphRouting();
+      apiRequest('/user/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ eqPreset: 'custom', eqBands: JSON.stringify(bands) })
+      }).catch(() => {});
     },
 
     setEqPreset: (presetId: string) => {
@@ -1733,10 +1738,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           eqFilters[i].gain.setValueAtTime(g, audioCtx.currentTime);
         }
       });
-      localStorage.setItem(STORAGE_KEY_EQ_BANDS, JSON.stringify(bands));
-      localStorage.setItem(STORAGE_KEY_EQ_PRESET, presetId);
+      try {
+        localStorage.setItem(STORAGE_KEY_EQ_BANDS, JSON.stringify(bands));
+        localStorage.setItem(STORAGE_KEY_EQ_PRESET, presetId);
+      } catch (_) {}
       set({ eqBands: bands, eqPreset: presetId });
       updateAudioGraphRouting();
+      apiRequest('/user/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ eqPreset: presetId, eqBands: JSON.stringify(bands) })
+      }).catch(() => {});
     },
 
     toggleNormalizer: () => {
@@ -1745,9 +1756,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (next) {
         ensureAudioGraph(true);
       }
-      localStorage.setItem(STORAGE_KEY_NORMALIZER, String(next));
+      try { localStorage.setItem(STORAGE_KEY_NORMALIZER, String(next)); } catch (_) {}
       set({ isNormalizerEnabled: next });
       updateAudioGraphRouting();
+      apiRequest('/user/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ isNormalizerEnabled: String(next) })
+      }).catch(() => {});
     },
 
     resetEqualizer: () => {
@@ -1756,8 +1771,57 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     setCrossfade: (seconds: number) => {
       const clamped = Math.max(0, Math.min(12, seconds));
-      localStorage.setItem(STORAGE_KEY_CROSSFADE, clamped.toString());
+      try {
+        localStorage.setItem(STORAGE_KEY_CROSSFADE, clamped.toString());
+      } catch (_) {}
       set({ crossfade: clamped });
+
+      // Save to user account on server so all devices/browsers share the exact same crossfade setting
+      apiRequest('/user/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ crossfade: clamped.toString() })
+      }).catch((err) => {
+        console.warn('[PlayerStore] Failed to sync crossfade to account:', err);
+      });
+    },
+
+    applyAccountSettings: (settings: Record<string, string>) => {
+      if (!settings || typeof settings !== 'object') return;
+      const updates: Partial<PlayerState> = {};
+
+      if (settings.crossfade !== undefined) {
+        const parsed = parseFloat(settings.crossfade);
+        if (!isNaN(parsed) && parsed >= 0 && parsed <= 12) {
+          updates.crossfade = parsed;
+          try { localStorage.setItem(STORAGE_KEY_CROSSFADE, parsed.toString()); } catch (_) {}
+        }
+      }
+
+      if (settings.eqPreset !== undefined && typeof settings.eqPreset === 'string' && EQ_PRESETS[settings.eqPreset]) {
+        updates.eqPreset = settings.eqPreset;
+        try { localStorage.setItem(STORAGE_KEY_EQ_PRESET, settings.eqPreset); } catch (_) {}
+      }
+
+      if (settings.eqBands !== undefined) {
+        try {
+          const bands = typeof settings.eqBands === 'string' ? JSON.parse(settings.eqBands) : settings.eqBands;
+          if (Array.isArray(bands) && bands.length === 5) {
+            updates.eqBands = bands;
+            try { localStorage.setItem(STORAGE_KEY_EQ_BANDS, JSON.stringify(bands)); } catch (_) {}
+          }
+        } catch (_) {}
+      }
+
+      if (settings.isNormalizerEnabled !== undefined) {
+        const isNorm = String(settings.isNormalizerEnabled) === 'true';
+        updates.isNormalizerEnabled = isNorm;
+        try { localStorage.setItem(STORAGE_KEY_NORMALIZER, isNorm.toString()); } catch (_) {}
+      }
+
+      if (Object.keys(updates).length > 0) {
+        set(updates);
+        updateAudioGraphRouting();
+      }
     },
   };
 });

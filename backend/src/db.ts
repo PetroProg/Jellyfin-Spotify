@@ -101,6 +101,15 @@ db.exec(`
     value TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS user_settings (
+    user_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, key),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
   CREATE TABLE IF NOT EXISTS artist_metadata (
     artist_name TEXT PRIMARY KEY,
     spotify_id TEXT,
@@ -158,6 +167,18 @@ try {
 } catch (_) {}
 try {
   db.exec('ALTER TABLE playlists ADD COLUMN daily_mix_tracks_json TEXT;');
+} catch (_) {}
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_settings (
+      user_id INTEGER NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, key),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  `);
 } catch (_) {}
 
 // Automatic deduplication of tracks: merge any duplicate (title + artist) tracks in playlist_tracks and liked_tracks

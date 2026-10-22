@@ -99,7 +99,7 @@ function safeSend(ws: WebSocket, message: any) {
   }
 }
 
-function broadcastToUser(userId: number, message: any, excludeDeviceId?: string) {
+export function broadcastToUser(userId: number, message: any, excludeDeviceId?: string) {
   const clients = userClients.get(userId);
   if (!clients) return;
   for (const [devId, client] of clients.entries()) {

@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { User } from '../types';
 import { apiRequest, setToken, getToken } from '../api/client';
 import { useI18nStore, tr } from './i18nStore';
+import { usePlayerStore } from './playerStore';
 
 const CACHED_USER_KEY = 'jellyfy_cached_user';
 
@@ -38,6 +39,13 @@ export const useAuthStore = create<AuthState>((set, get) => {
   const cachedUser = getCachedUser();
   const token = getToken();
 
+  // If user has cached account settings in storage, apply immediately
+  if (cachedUser?.settings) {
+    try {
+      usePlayerStore.getState().applyAccountSettings(cachedUser.settings);
+    } catch (_) {}
+  }
+
   return {
     user: cachedUser,
     isAuthenticated: Boolean(token),
@@ -47,6 +55,9 @@ export const useAuthStore = create<AuthState>((set, get) => {
       setToken(token);
       setCachedUser(user);
       useI18nStore.getState().initFirstLoginLang(user?.id);
+      if (user?.settings) {
+        usePlayerStore.getState().applyAccountSettings(user.settings);
+      }
       set({ user, isAuthenticated: true, isLoading: false });
     },
 
@@ -74,6 +85,9 @@ export const useAuthStore = create<AuthState>((set, get) => {
       try {
         const data = await apiRequest<{ user: User }>('/auth/me');
         setCachedUser(data.user);
+        if (data.user?.settings) {
+          usePlayerStore.getState().applyAccountSettings(data.user.settings);
+        }
         set({ user: data.user, isAuthenticated: true, isLoading: false });
       } catch (err: any) {
         // Only log out if the backend explicitly rejected the token (HTTP 401)
