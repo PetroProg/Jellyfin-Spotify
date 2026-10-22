@@ -886,24 +886,45 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   };
 
   let prefetchTimeout: any = null;
+  let isPrefetching = false;
+
   const scheduleNextTrackPrefetch = () => {
     if (prefetchTimeout) clearTimeout(prefetchTimeout);
+    // Trigger pre-buffering early (after 2 seconds) so playback is already solid
     prefetchTimeout = setTimeout(async () => {
+      if (isPrefetching) return;
+      isPrefetching = true;
       try {
         if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-        const { queue, currentIndex } = get();
-        if (!queue || currentIndex < 0 || currentIndex + 1 >= queue.length) return;
-        const nextTrack = queue[currentIndex + 1];
-        if (nextTrack) {
+        const { queue, currentIndex, currentTrack } = get();
+        if (!queue || currentIndex < 0) return;
+
+        // 1. Pre-buffer current track to CacheStorage in background (prevents cellular dropouts)
+        if (currentTrack) {
+          const isCurrCached = await isTrackCached(currentTrack.id);
+          if (!isCurrCached) {
+            cacheTrackOffline(currentTrack, 30000).catch(() => {});
+          }
+        }
+
+        // 2. Aggressively prefetch up to 3 upcoming tracks in queue for 0ms instant transition
+        const upcomingLimit = Math.min(queue.length, currentIndex + 4);
+        for (let i = currentIndex + 1; i < upcomingLimit; i++) {
+          const nextTrack = queue[i];
+          if (!nextTrack) continue;
+
           const cached = await isTrackCached(nextTrack.id);
           if (!cached) {
-            await cacheTrackOffline(nextTrack);
+            await cacheTrackOffline(nextTrack, 25000);
           }
-          // Pre-load in-memory blob URL so next track transition is 100% gapless with 0ms network latency
+          // Pre-warm Blob URL in memory
           getCachedTrackUrl(nextTrack.id).catch(() => {});
         }
-      } catch (_) {}
-    }, 12000);
+      } catch (_) {
+      } finally {
+        isPrefetching = false;
+      }
+    }, 2000);
   };
 
   let isPrefetchingRecommendations = false;

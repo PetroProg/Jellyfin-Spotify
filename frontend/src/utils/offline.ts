@@ -239,8 +239,8 @@ export async function getCachedTrackUrl(trackId: number): Promise<string | null>
     if (match) {
       const blob = await match.blob();
       if (blob && blob.size > 1024) {
-        // Keep at most 3 blob URLs active in memory to eliminate GC stutters
-        if (activeBlobUrls.size >= 3) {
+        // Keep up to 6 blob URLs active in memory for seamless queue prebuffering
+        if (activeBlobUrls.size >= 6) {
           const oldestKey = activeBlobUrls.keys().next().value;
           if (oldestKey !== undefined) {
             try {

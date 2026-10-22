@@ -23,12 +23,23 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[\\/:*?"<>|]/g, '_').trim();
 }
 
+export function resolveAudioFilePath(targetDir: string, safeTitle: string): string | null {
+  const extensions = ['.m4a', '.mp3', '.opus', '.webm', '.flac', '.ogg'];
+  for (const ext of extensions) {
+    const candidate = path.join(targetDir, `${safeTitle}${ext}`);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 export function cleanupPartialFiles(targetDir: string, safeTitle: string) {
   try {
     if (!fs.existsSync(targetDir)) return;
     const files = fs.readdirSync(targetDir);
     for (const f of files) {
-      if (f.startsWith(safeTitle) && (f.endsWith('.part') || f.endsWith('.ytdl') || f.endsWith('.temp') || f.endsWith('.mp3'))) {
+      if (f.startsWith(safeTitle) && (f.endsWith('.part') || f.endsWith('.ytdl') || f.endsWith('.temp') || f.endsWith('.mp3') || f.endsWith('.m4a') || f.endsWith('.opus'))) {
         try {
           fs.unlinkSync(path.join(targetDir, f));
         } catch (_) {}
@@ -88,7 +99,11 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
           isTruncated = true;
         }
 
-        const isLowBitrate = bitrateKbps < 240;
+        const ext = path.extname(filePath).toLowerCase();
+        const isLossless = ext === '.flac' || ext === '.wav';
+        const isAacOrOpus = ext === '.m4a' || ext === '.aac' || ext === '.opus' || ext === '.ogg';
+        // AAC 110k+ and Opus 110k+ are transparent broadcast masters; legacy MP3 needs 220k+
+        const isLowBitrate = !isLossless && (isAacOrOpus ? bitrateKbps < 110 : bitrateKbps < 220);
 
         if (isTruncated || isLowBitrate) {
           const reasons: string[] = [];
@@ -545,7 +560,7 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       }
     };
 
-    // Launch yt-dlp with studio 320 kbps audio quality settings
+    // Launch yt-dlp with pristine studio AAC (m4a) audio quality (Direct Bit-Perfect for Bose Bluetooth)
     const ytDlpProcess = spawn('nice', [
       '-n', '19',
       'ionice', '-c', '3',
@@ -555,9 +570,8 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       '--force-overwrites',
       '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
       '--extract-audio',
-      '--audio-format', 'mp3',
-      '--audio-quality', '320k',
-      '--postprocessor-args', 'ExtractAudio:-b:a 320k -q:a 0 -ar 44100',
+      '--audio-format', 'm4a',
+      '--audio-quality', '0',
       '--embed-thumbnail',
       '--add-metadata',
       '-o', outputTemplate,
@@ -582,8 +596,8 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       if (isSettled) return;
 
       if (code === 0) {
-        // Find saved file
-        const finalFile = path.join(targetDir, `${safeTitle}.mp3`);
+        // Find saved file (.m4a preferred, or .mp3 fallback)
+        const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.m4a`);
 
         // Verify audio file validity & duration
         const probe = await probeAudioFile(finalFile, track.duration_ms);
@@ -793,9 +807,8 @@ async function downloadSingleSpotifyTrackDirectInternal(
         '--force-overwrites',
         '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
         '--extract-audio',
-        '--audio-format', 'mp3',
-        '--audio-quality', '320k',
-        '--postprocessor-args', 'ExtractAudio:-b:a 320k -q:a 0 -ar 44100',
+        '--audio-format', 'm4a',
+        '--audio-quality', '0',
         '--embed-thumbnail',
         '--add-metadata',
         '-o', outputTemplate,
@@ -827,7 +840,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
       return { success: false, error: 'Не удалось скачать аудиофайл с YouTube' };
     }
 
-    const finalFile = path.join(targetDir, `${safeTitle}.mp3`);
+    const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.m4a`);
 
     // Verify audio file
     const probe = await probeAudioFile(finalFile, track.duration_ms);
@@ -950,8 +963,6 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
         const safeTitle = sanitizeFilename(tr.title);
         const tempPrefix = `${safeTitle}.upg.${Date.now()}`;
         const tempOutputTemplate = path.join(targetDir, `${tempPrefix}.%(ext)s`);
-        const tempFinalFile = path.join(targetDir, `${tempPrefix}.mp3`);
-        const destinationFile = path.join(targetDir, `${safeTitle}.mp3`);
 
         const audioSourceUrl = await findBestStudioAudioSource(tr.artist, tr.title, tr.duration_ms);
 
@@ -975,9 +986,8 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
             '--no-continue',
             '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
             '--extract-audio',
-            '--audio-format', 'mp3',
-            '--audio-quality', '320k',
-            '--postprocessor-args', 'ExtractAudio:-b:a 320k -q:a 0 -ar 44100',
+            '--audio-format', 'm4a',
+            '--audio-quality', '0',
             '--embed-thumbnail',
             '--add-metadata',
             '-o', tempOutputTemplate,
@@ -992,7 +1002,8 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
           }, 90000);
 
           proc.on('close', code => {
-            if (code === 0 && fs.existsSync(tempFinalFile)) finish(true);
+            const tempFound = resolveAudioFilePath(targetDir, tempPrefix);
+            if (code === 0 && tempFound && fs.existsSync(tempFound)) finish(true);
             else {
               cleanupPartialFiles(targetDir, tempPrefix);
               finish(false);
@@ -1005,19 +1016,28 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
         });
 
         if (ok) {
-          const newProbe = await probeAudioFile(tempFinalFile, tr.duration_ms);
+          const tempFound = resolveAudioFilePath(targetDir, tempPrefix);
+          if (!tempFound) {
+            upgradeProgress.errorCount++;
+            continue;
+          }
+          const newProbe = await probeAudioFile(tempFound, tr.duration_ms);
 
           if (tr.duration_ms > 45000 && newProbe.valid && !newProbe.isHighQuality && newProbe.reason?.includes('Обрезан')) {
             console.warn(`[Upgrade Quality] Downloaded file for "${tr.artist} - ${tr.title}" was truncated (${newProbe.durationSec}s). Keeping existing file.`);
-            try { fs.unlinkSync(tempFinalFile); } catch (_) {}
+            try { fs.unlinkSync(tempFound); } catch (_) {}
             upgradeProgress.errorCount++;
           } else {
             // Safely and atomically replace destination file!
+            const newExt = path.extname(tempFound);
+            const destinationFile = path.join(targetDir, `${safeTitle}${newExt}`);
             try {
-              if (fs.existsSync(destinationFile)) {
+              if (tr.file_path && fs.existsSync(tr.file_path) && tr.file_path !== destinationFile) {
+                fs.unlinkSync(tr.file_path);
+              } else if (fs.existsSync(destinationFile)) {
                 fs.unlinkSync(destinationFile);
               }
-              fs.renameSync(tempFinalFile, destinationFile);
+              fs.renameSync(tempFound, destinationFile);
             } catch (renErr: any) {
               console.warn('[Upgrade Quality Rename Error]', renErr.message);
             }
