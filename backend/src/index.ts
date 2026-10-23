@@ -18,6 +18,7 @@ import {
   handleSpotifyOAuthCallback,
   disconnectSpotify,
   fetchSpotifyLikedSongs,
+  fetchSpotifyUserPlaylists,
   parseTrackListText,
   getUserSpotifyToken
 } from './spotify';
@@ -961,6 +962,41 @@ server.post('/api/playlists/:id/resume', { preHandler: [(server as any).authenti
 });
 
 // ----------------- SPOTIFY OAUTH & ADVANCED IMPORT -----------------
+server.get('/api/spotify/status', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+  const creds = getSpotifyCredentials();
+  const userRow: any = db.prepare('SELECT spotify_access_token, spotify_display_name, spotify_user_id FROM users WHERE id = ?').get(req.user.id);
+  const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
+  const proto = req.headers['x-forwarded-proto'] || (req.raw.socket.encrypted ? 'https' : 'http');
+  const redirectUri = `${proto}://${host}/api/spotify/callback`;
+
+  const hasCredentials = Boolean(creds.clientId && creds.clientSecret);
+  const isConnected = Boolean(userRow?.spotify_access_token);
+
+  return {
+    hasCredentials,
+    isConnected,
+    clientId: creds.clientId || '',
+    redirectUri,
+    spotifyDisplayName: userRow?.spotify_display_name || userRow?.spotify_user_id || null,
+    updatedAt: new Date().toISOString()
+  };
+});
+
+server.post('/api/spotify/credentials', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const body = req.body || {};
+  const clientId = (body.clientId || body.spotify_client_id || '').trim();
+  const clientSecret = (body.clientSecret || body.spotify_client_secret || '').trim();
+
+  if (!clientId || !clientSecret) {
+    return reply.status(400).send({ error: 'Client ID и Client Secret обязательны' });
+  }
+
+  db.prepare(`INSERT INTO app_settings (key, value) VALUES ('spotify_client_id', ?) ON CONFLICT(key) DO UPDATE SET value = ?`).run(clientId, clientId);
+  db.prepare(`INSERT INTO app_settings (key, value) VALUES ('spotify_client_secret', ?) ON CONFLICT(key) DO UPDATE SET value = ?`).run(clientSecret, clientSecret);
+
+  return { success: true, message: 'Ключи Spotify успешно сохранены' };
+});
+
 server.get('/api/spotify/auth-url', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   try {
     const userRow: any = db.prepare('SELECT spotify_access_token, spotify_display_name, spotify_user_id FROM users WHERE id = ?').get(req.user.id);
@@ -982,6 +1018,7 @@ server.get('/api/spotify/auth-url', { preHandler: [(server as any).authenticate]
     return {
       configured: true,
       authUrl,
+      url: authUrl,
       redirectUri,
       isConnected: Boolean(userRow?.spotify_access_token),
       spotifyDisplayName: userRow?.spotify_display_name || userRow?.spotify_user_id || ''
@@ -1138,6 +1175,44 @@ server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenti
     };
   } catch (err: any) {
     return reply.status(500).send({ error: err.message || 'Ошибка импорта любимых треков' });
+  }
+});
+
+server.post('/api/spotify/import-user-playlists', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  try {
+    const spotifyPlaylists = await fetchSpotifyUserPlaylists(req.user.id);
+    if (!spotifyPlaylists || spotifyPlaylists.length === 0) {
+      return { success: true, message: 'В вашем аккаунте Spotify не найдено плейлистов', totalPlaylists: 0, queuedPlaylists: 0 };
+    }
+
+    let queuedCount = 0;
+    for (const sp of spotifyPlaylists) {
+      let existing: any = db.prepare('SELECT id FROM playlists WHERE user_id = ? AND spotify_id = ?').get(req.user.id, sp.id);
+      let playlistId: number;
+
+      if (!existing) {
+        const info = db.prepare(`
+          INSERT INTO playlists (user_id, name, description, cover_url, spotify_id)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(req.user.id, sp.name, sp.description || 'Импортировано из Spotify', sp.cover_url || null, sp.id);
+        playlistId = Number(info.lastInsertRowid);
+      } else {
+        playlistId = existing.id;
+      }
+
+      // Automatically queue playlist for background sync & downloading
+      resumePlaylistDownload(playlistId).catch((err) => console.warn(`[Sync Playlist] Failed to queue ${sp.name}:`, err.message));
+      queuedCount++;
+    }
+
+    return {
+      success: true,
+      message: `Начата синхронизация ${queuedCount} плейлистов из Spotify`,
+      totalPlaylists: spotifyPlaylists.length,
+      queuedPlaylists: queuedCount
+    };
+  } catch (err: any) {
+    return reply.status(500).send({ error: err.message || 'Ошибка импорта плейлистов' });
   }
 });
 

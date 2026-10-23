@@ -503,6 +503,48 @@ export async function fetchSpotifyLikedSongs(userId: number): Promise<SpotifyPla
   };
 }
 
+export interface SpotifyUserPlaylistInfo {
+  id: string;
+  name: string;
+  description: string;
+  cover_url?: string;
+  track_count: number;
+}
+
+export async function fetchSpotifyUserPlaylists(userId: number): Promise<SpotifyUserPlaylistInfo[]> {
+  const token = await getUserSpotifyToken(userId);
+  if (!token) {
+    throw new Error('Требуется подключить аккаунт Spotify в настройках для загрузки плейлистов');
+  }
+
+  const playlists: SpotifyUserPlaylistInfo[] = [];
+  let nextUrl: string | null = 'https://api.spotify.com/v1/me/playlists?limit=50';
+
+  while (nextUrl) {
+    const res = await fetch(nextUrl, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Ошибка загрузки плейлистов Spotify (${res.status}): ${err}`);
+    }
+    const data: any = await res.json();
+    for (const item of data.items || []) {
+      if (!item || !item.id) continue;
+      playlists.push({
+        id: item.id,
+        name: item.name || 'Unnamed Playlist',
+        description: item.description || '',
+        cover_url: item.images?.[0]?.url || '',
+        track_count: item.tracks?.total || 0
+      });
+    }
+    nextUrl = data.next || null;
+  }
+
+  return playlists;
+}
+
 export async function parseTrackListText(text: string, userId?: number): Promise<SpotifyTrack[]> {
   const lines = text
     .split(/\r?\n/)

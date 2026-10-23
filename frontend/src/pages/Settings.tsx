@@ -694,7 +694,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
               </div>
             </div>
 
-            {spotifyStatus?.isConnected && (
+            {spotifyStatus?.isConnected ? (
               <div className="flex items-center gap-2 self-start sm:self-center">
                 <button
                   onClick={handleConnectSpotify}
@@ -712,6 +712,24 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
                   {t('Disconnect', 'Отключить')}
                 </button>
               </div>
+            ) : (
+              spotifyStatus?.hasCredentials && (
+                <div className="self-start sm:self-center">
+                  <button
+                    type="button"
+                    onClick={handleConnectSpotify}
+                    disabled={connectingSpotify}
+                    className="px-4 py-2 rounded-2xl bg-cat-green text-cat-base font-bold text-xs hover:opacity-95 active:scale-95 transition-all shadow-md flex items-center gap-2 cursor-pointer"
+                  >
+                    {connectingSpotify ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <ExternalLink className="w-4 h-4" />
+                    )}
+                    <span>{t('Connect Spotify Account', 'Войти в аккаунт Spotify')}</span>
+                  </button>
+                </div>
+              )
             )}
           </div>
 
