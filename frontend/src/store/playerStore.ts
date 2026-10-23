@@ -5,7 +5,7 @@ import { useSyncStore } from './syncStore';
 import { toast } from './toastStore';
 import { tr } from './i18nStore';
 import { useOfflineStore } from './offlineStore';
-import { getCachedTrackUrl, isTrackCached, cacheTrackOffline, saveOfflinePlaylistData, getSynchronousBlobUrl } from '../utils/offline';
+import { getCachedTrackUrl, isTrackCached, cacheTrackOffline, saveOfflinePlaylistData, getSynchronousBlobUrl, prewarmQueueBlobUrls } from '../utils/offline';
 
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
@@ -148,21 +148,6 @@ let fadeInterval: any = null;
 let isFadingIn = false;
 let isFadingOut = false;
 
-function cancelFade() {
-  if (fadeInterval) {
-    clearInterval(fadeInterval);
-    fadeInterval = null;
-  }
-  isFadingIn = false;
-  isFadingOut = false;
-}
-
-function restoreTargetVolume() {
-  cancelFade();
-  const target = usePlayerStore.getState().volume;
-  audio.volume = target;
-}
-
 let silentAudioUrl: string | null = null;
 
 function getSilentAudioUrl(): string {
@@ -204,7 +189,7 @@ function getSilentAudioUrl(): string {
   }
 }
 
-// Inaudible looping silent audio element to keep Android/Samsung One UI OS audio session permanently alive
+// Inaudible looping silent audio element to keep Android/Samsung One UI OS audio session alive ONLY when paused
 let keepAliveAudio: HTMLAudioElement | null = null;
 let standbyKeepaliveTimer: any = null;
 const STANDBY_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes graceful standby window on pause
@@ -225,12 +210,13 @@ function ensureAudioKeepalive() {
       keepAliveAudio.loop = true;
       keepAliveAudio.volume = 0.001;
       keepAliveAudio.onended = () => {
-        if (usePlayerStore.getState().isPlaying || standbyKeepaliveTimer) {
+        // Never loop silent audio if main music is playing!
+        if (!usePlayerStore.getState().isPlaying && standbyKeepaliveTimer) {
           keepAliveAudio?.play().catch(() => {});
         }
       };
     }
-    if (keepAliveAudio.paused) {
+    if (keepAliveAudio.paused && !usePlayerStore.getState().isPlaying) {
       keepAliveAudio.play().catch(() => {});
     }
   } catch (_) {}
@@ -238,7 +224,7 @@ function ensureAudioKeepalive() {
 
 function scheduleStandbyKeepalive() {
   clearStandbyKeepaliveTimer();
-  // Keep silent audio playing so Android OS maintains active audio focus and lockscreen controls
+  // Keep silent audio playing only during pause so Android OS maintains active audio focus and lockscreen controls
   ensureAudioKeepalive();
   // Hold active for 15 minutes while paused so user can pause in store/conversation without losing headphone resume
   standbyKeepaliveTimer = setTimeout(() => {
@@ -252,6 +238,7 @@ function releaseAudioKeepalive() {
   if (keepAliveAudio && !keepAliveAudio.paused) {
     try {
       keepAliveAudio.pause();
+      keepAliveAudio.currentTime = 0;
     } catch (_) {}
   }
 }
@@ -285,22 +272,70 @@ function releaseScreenWakeLock() {
 let isUserInitiatedPause = false;
 let wasInterruptedByExternalApp = false;
 
+// Web Audio API Graph (Lazy initialized only when EQ or DSP is explicitly engaged)
+let audioCtx: AudioContext | null = null;
+let sourceNode: MediaElementAudioSourceNode | null = null;
+let preAmpGainNode: GainNode | null = null;
+let eqFilters: BiquadFilterNode[] = [];
+let compressorNode: DynamicsCompressorNode | null = null;
+let fadeGainNode: GainNode | null = null;
+let limiterNode: DynamicsCompressorNode | null = null;
+let isAudioGraphAttached = false;
+
+function applyFadeVolume(volFraction: number) {
+  const target = usePlayerStore.getState().volume;
+  const clampedFraction = Math.max(0, Math.min(1, volFraction));
+  if (audioCtx && fadeGainNode) {
+    fadeGainNode.gain.setTargetAtTime(clampedFraction, audioCtx.currentTime, 0.03);
+    audio.volume = target;
+  } else {
+    audio.volume = Math.max(0, Math.min(1, clampedFraction * target));
+  }
+}
+
+function cancelFade() {
+  if (fadeInterval) {
+    clearInterval(fadeInterval);
+    fadeInterval = null;
+  }
+  isFadingIn = false;
+  isFadingOut = false;
+  applyFadeVolume(1.0);
+}
+
+function restoreTargetVolume() {
+  cancelFade();
+  applyFadeVolume(1.0);
+}
+
 function startFadeIn(durationSec: number) {
   cancelFade();
   const target = usePlayerStore.getState().volume;
 
   // If in background, immediately set target volume without waiting for throttled setInterval!
   if (typeof document !== 'undefined' && document.hidden) {
-    audio.volume = target;
+    applyFadeVolume(1.0);
     return;
   }
 
   if (target <= 0.01 || durationSec <= 0) {
-    audio.volume = target;
+    applyFadeVolume(1.0);
     return;
   }
 
   isFadingIn = true;
+
+  if (audioCtx && fadeGainNode) {
+    fadeGainNode.gain.cancelScheduledValues(audioCtx.currentTime);
+    fadeGainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+    fadeGainNode.gain.linearRampToValueAtTime(1.0, audioCtx.currentTime + durationSec);
+    setTimeout(() => {
+      isFadingIn = false;
+      applyFadeVolume(1.0);
+    }, durationSec * 1000);
+    return;
+  }
+
   audio.volume = 0;
   const startTime = performance.now();
   const fadeMs = durationSec * 1000;
@@ -311,30 +346,22 @@ function startFadeIn(durationSec: number) {
       clearInterval(fadeInterval);
       fadeInterval = null;
       isFadingIn = false;
-      audio.volume = target;
+      applyFadeVolume(1.0);
       return;
     }
 
     const elapsed = performance.now() - startTime;
     const progress = Math.min(1, elapsed / fadeMs);
-    const currentVol = target * progress;
-    audio.volume = Math.max(0, Math.min(1, currentVol));
+    applyFadeVolume(progress);
 
     if (progress >= 1) {
       clearInterval(fadeInterval);
       fadeInterval = null;
       isFadingIn = false;
-      audio.volume = target;
+      applyFadeVolume(1.0);
     }
   }, 40);
 }
-
-// Web Audio API Graph (Lazy initialized only when EQ or DSP is explicitly engaged)
-let audioCtx: AudioContext | null = null;
-let sourceNode: MediaElementAudioSourceNode | null = null;
-let compressorNode: DynamicsCompressorNode | null = null;
-let eqFilters: BiquadFilterNode[] = [];
-let isAudioGraphAttached = false;
 
 function shouldEngageAudioDsp(): boolean {
   const isNorm = loadSavedNormalizer();
@@ -356,33 +383,72 @@ function updateAudioGraphRouting() {
   if (!isNorm && !hasActiveEq) {
     try {
       sourceNode.disconnect();
-      sourceNode.connect(audioCtx.destination);
+      if (fadeGainNode) {
+        sourceNode.connect(fadeGainNode);
+        fadeGainNode.disconnect();
+        fadeGainNode.connect(audioCtx.destination);
+      } else {
+        sourceNode.connect(audioCtx.destination);
+      }
     } catch (_) {}
     return;
   }
 
   try {
     sourceNode.disconnect();
-    let lastNode: AudioNode = sourceNode;
-    for (const filter of eqFilters) {
+
+    // 1. Dynamic Headroom Pre-Amplifier:
+    // When boosting EQ (e.g. +6dB bass on Bose), reduce input gain by maxBoost (+ 0.5dB safety margin)
+    // to guarantee 0 dBFS ceiling and 100% prevent digital clipping, crackle, & distortion!
+    const maxBoost = Math.max(0, ...bands);
+    const preAmpLinear = maxBoost > 0 ? Math.pow(10, -(maxBoost + 0.5) / 20) : 1.0;
+    if (preAmpGainNode) {
+      preAmpGainNode.gain.setTargetAtTime(preAmpLinear, audioCtx.currentTime, 0.03);
+    }
+
+    let lastNode: AudioNode = preAmpGainNode ? preAmpGainNode : sourceNode;
+    if (preAmpGainNode) {
+      sourceNode.connect(preAmpGainNode);
+    }
+
+    // 2. 5-Band Studio Equalizer
+    for (let i = 0; i < eqFilters.length; i++) {
+      const filter = eqFilters[i];
+      const targetGain = bands[i] ?? 0;
+      filter.gain.setTargetAtTime(targetGain, audioCtx.currentTime, 0.03);
       lastNode.connect(filter);
       lastNode = filter;
     }
+
+    // 3. Studio Dynamics Compressor (Normalizer)
     if (compressorNode) {
       if (isNorm) {
-        compressorNode.threshold.value = -6; // Gentle threshold to preserve drum punch on Bose
-        compressorNode.ratio.value = 1.5;   // Gentle ratio to avoid squashing dynamics
-        compressorNode.knee.value = 10;
-        compressorNode.attack.value = 0.05;
-        compressorNode.release.value = 0.25;
+        compressorNode.threshold.setTargetAtTime(-8, audioCtx.currentTime, 0.03);
+        compressorNode.knee.setTargetAtTime(8, audioCtx.currentTime, 0.03);
+        compressorNode.ratio.setTargetAtTime(1.8, audioCtx.currentTime, 0.03);
+        compressorNode.attack.setTargetAtTime(0.04, audioCtx.currentTime, 0.03);
+        compressorNode.release.setTargetAtTime(0.25, audioCtx.currentTime, 0.03);
       } else {
-        compressorNode.threshold.value = 0;
-        compressorNode.ratio.value = 1;
+        compressorNode.threshold.setTargetAtTime(0, audioCtx.currentTime, 0.03);
+        compressorNode.ratio.setTargetAtTime(1, audioCtx.currentTime, 0.03);
       }
       lastNode.connect(compressorNode);
-      try { compressorNode.disconnect(); } catch (_) {}
-      compressorNode.connect(audioCtx.destination);
+      lastNode = compressorNode;
+    }
+
+    // 4. Smooth Crossfade Gain Node
+    if (fadeGainNode) {
+      lastNode.connect(fadeGainNode);
+      lastNode = fadeGainNode;
+    }
+
+    // 5. Studio Brickwall Peak Limiter (protects DAC and Bluetooth A2DP against any transient clipping)
+    if (limiterNode) {
+      lastNode.connect(limiterNode);
+      try { limiterNode.disconnect(); } catch (_) {}
+      limiterNode.connect(audioCtx.destination);
     } else {
+      try { lastNode.disconnect(); } catch (_) {}
       lastNode.connect(audioCtx.destination);
     }
   } catch (err) {
@@ -408,6 +474,9 @@ function ensureAudioGraph(forceAttach = false) {
     sourceNode = audioCtx.createMediaElementSource(audio);
     isAudioGraphAttached = true;
 
+    // Pre-amp gain for dynamic headroom
+    preAmpGainNode = audioCtx.createGain();
+
     // 5-Band Equalizer filters
     eqFilters = EQ_FREQUENCIES.map((freq, idx) => {
       const filter = audioCtx!.createBiquadFilter();
@@ -426,17 +495,23 @@ function ensureAudioGraph(forceAttach = false) {
 
     // Gentle mastering dynamics compressor
     compressorNode = audioCtx.createDynamicsCompressor();
-    compressorNode.threshold.value = -6;
-    compressorNode.knee.value = 10;
-    compressorNode.ratio.value = 1.5;
-    compressorNode.attack.value = 0.05;
+    compressorNode.threshold.value = -8;
+    compressorNode.knee.value = 8;
+    compressorNode.ratio.value = 1.8;
+    compressorNode.attack.value = 0.04;
     compressorNode.release.value = 0.25;
 
-    // Apply saved bands
-    const savedBands = loadSavedEqBands();
-    savedBands.forEach((gain, i) => {
-      if (eqFilters[i]) eqFilters[i].gain.value = gain;
-    });
+    // Crossfade gain node
+    fadeGainNode = audioCtx.createGain();
+    fadeGainNode.gain.value = 1.0;
+
+    // Transparent Brickwall Peak Limiter
+    limiterNode = audioCtx.createDynamicsCompressor();
+    limiterNode.threshold.value = -0.3; // -0.3 dBFS ceiling
+    limiterNode.knee.value = 0;          // hard knee
+    limiterNode.ratio.value = 20;        // brickwall limiting
+    limiterNode.attack.value = 0.003;    // 3ms ultra-fast attack
+    limiterNode.release.value = 0.05;    // 50ms fast transparent release
 
     updateAudioGraphRouting();
   } catch (err) {
@@ -593,6 +668,25 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   // Sync Audio Events
   let lastSyncTime = 0;
 
+  // Resilient background prefetch controller with network-priority abort
+  let prefetchTimeout: any = null;
+  let isPrefetching = false;
+  let prefetchAbortController: AbortController | null = null;
+
+  const cancelActivePrefetch = () => {
+    if (prefetchTimeout) {
+      clearTimeout(prefetchTimeout);
+      prefetchTimeout = null;
+    }
+    if (prefetchAbortController) {
+      try {
+        prefetchAbortController.abort();
+      } catch (_) {}
+      prefetchAbortController = null;
+    }
+    isPrefetching = false;
+  };
+
   const handleAudioDuration = () => {
     const dur = audio.duration;
     if (dur && !isNaN(dur) && isFinite(dur) && dur > 0) {
@@ -607,7 +701,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   audio.onplay = () => {
     isUserInitiatedPause = false;
     wasInterruptedByExternalApp = false;
-    ensureAudioKeepalive();
+    // Release silent keepalive during active playback to eliminate Bluetooth mixer stutter & dropouts
+    releaseAudioKeepalive();
     requestScreenWakeLock();
     set({ isPlaying: true });
     if ('mediaSession' in navigator) {
@@ -701,28 +796,30 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   };
 
   audio.onwaiting = () => {
+    cancelActivePrefetch();
     if (get().isPlaying && 'mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'playing';
     }
-    // If waiting for buffer for >3.5 seconds during active playback, auto-reconnect
+    // WAN buffer resilience: give connection up to 10 seconds before force-reconnecting
     if (waitingTimeout) clearTimeout(waitingTimeout);
     waitingTimeout = setTimeout(() => {
       if (get().isPlaying && audio.readyState < 3) {
-        console.warn('[Audio Waiting]: Stalled waiting for buffer for >3.5s, reconnecting stream...');
+        console.warn('[Audio Waiting]: Stalled waiting for buffer for >10s, reconnecting stream...');
         recoverAudioStream(audio.currentTime || get().currentTime, true);
       }
-    }, 3500);
+    }, 10000);
   };
 
   audio.onstalled = () => {
+    cancelActivePrefetch();
     if (!get().isPlaying) return;
     if (stallTimeout) clearTimeout(stallTimeout);
     stallTimeout = setTimeout(() => {
       if (get().isPlaying && audio.readyState < 3) {
-        console.warn('[Audio Stalled]: Stream stalled for >3s, reconnecting stream...');
+        console.warn('[Audio Stalled]: Stream stalled for >12s, reconnecting stream...');
         recoverAudioStream(audio.currentTime || get().currentTime, true);
       }
-    }, 3000);
+    }, 12000);
   };
 
   audio.onprogress = () => {
@@ -758,8 +855,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (remaining <= crossfade && remaining > 0.3) {
         isFadingOut = true;
         const progress = Math.max(0, Math.min(1, remaining / crossfade));
-        const targetVol = get().volume;
-        audio.volume = Math.max(0, Math.min(targetVol, targetVol * progress));
+        applyFadeVolume(progress);
       }
     }
 
@@ -886,46 +982,74 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
   };
 
-  let prefetchTimeout: any = null;
-  let isPrefetching = false;
+  const isBufferSafeForPrefetch = (): boolean => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
+    if (!audio.duration || !isFinite(audio.duration) || audio.duration <= 0) return false;
+
+    const cur = audio.currentTime;
+    // Don't prefetch during the first 8 seconds to give the active track 100% bandwidth
+    if (cur < 8) return false;
+
+    for (let i = 0; i < audio.buffered.length; i++) {
+      if (audio.buffered.start(i) <= cur && cur <= audio.buffered.end(i)) {
+        const bufferedAhead = audio.buffered.end(i) - cur;
+        // Current track must have at least 20 seconds buffered ahead (or reached EOF)
+        return bufferedAhead >= 20 || audio.buffered.end(i) >= (audio.duration - 1);
+      }
+    }
+    return false;
+  };
 
   const scheduleNextTrackPrefetch = () => {
-    if (prefetchTimeout) clearTimeout(prefetchTimeout);
-    // Trigger pre-buffering early (after 2 seconds) so playback is already solid
-    prefetchTimeout = setTimeout(async () => {
+    cancelActivePrefetch();
+
+    let attempts = 0;
+    const maxAttempts = 15;
+
+    const attemptPrefetch = async () => {
       if (isPrefetching) return;
+      const { queue, currentIndex, currentTrack, isPlaying } = get();
+      if (!isPlaying || !currentTrack || !queue || currentIndex < 0) return;
+
+      if (!isBufferSafeForPrefetch()) {
+        attempts++;
+        if (attempts < maxAttempts) {
+          prefetchTimeout = setTimeout(attemptPrefetch, 3000);
+        }
+        return;
+      }
+
+      const nextIndex = currentIndex + 1;
+      if (nextIndex >= queue.length) return;
+      const nextTrack = queue[nextIndex];
+      if (!nextTrack) return;
+
+      const cached = await isTrackCached(nextTrack.id);
+      if (cached) {
+        getCachedTrackUrl(nextTrack.id).catch(() => {});
+        return;
+      }
+
       isPrefetching = true;
+      prefetchAbortController = new AbortController();
+
       try {
-        if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-        const { queue, currentIndex, currentTrack } = get();
-        if (!queue || currentIndex < 0) return;
-
-        // 1. Pre-buffer current track to CacheStorage in background (prevents cellular dropouts)
-        if (currentTrack) {
-          const isCurrCached = await isTrackCached(currentTrack.id);
-          if (!isCurrCached) {
-            cacheTrackOffline(currentTrack, 30000).catch(() => {});
-          }
+        console.log(`[Smart Prefetch] WAN buffer is healthy. Pre-buffering next track: "${nextTrack.title}"`);
+        await cacheTrackOffline(nextTrack, 35000, prefetchAbortController.signal);
+        await getCachedTrackUrl(nextTrack.id);
+        console.log(`[Smart Prefetch] Next track "${nextTrack.title}" ready as local Blob URL`);
+      } catch (err: any) {
+        if (err?.name !== 'AbortError') {
+          console.warn('[Smart Prefetch] Prefetch error:', err);
         }
-
-        // 2. Aggressively prefetch up to 3 upcoming tracks in queue for 0ms instant transition
-        const upcomingLimit = Math.min(queue.length, currentIndex + 4);
-        for (let i = currentIndex + 1; i < upcomingLimit; i++) {
-          const nextTrack = queue[i];
-          if (!nextTrack) continue;
-
-          const cached = await isTrackCached(nextTrack.id);
-          if (!cached) {
-            await cacheTrackOffline(nextTrack, 25000);
-          }
-          // Pre-warm Blob URL in memory
-          getCachedTrackUrl(nextTrack.id).catch(() => {});
-        }
-      } catch (_) {
       } finally {
         isPrefetching = false;
+        prefetchAbortController = null;
       }
-    }, 2000);
+    };
+
+    // First check after 8 seconds of steady playback
+    prefetchTimeout = setTimeout(attemptPrefetch, 8000);
   };
 
   let isPrefetchingRecommendations = false;
@@ -1055,7 +1179,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       isUserInitiatedPause = false;
       wasInterruptedByExternalApp = false;
-      ensureAudioKeepalive();
+      releaseAudioKeepalive();
       requestScreenWakeLock();
 
       const playPromise = audio.play();
@@ -1073,9 +1197,25 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       scheduleNextTrackPrefetch();
       prefetchRecommendationsIfNeeded();
 
+      // Proactive instant promotion to local Blob URL if track is cached in CacheStorage
       if (!syncBlobUrl) {
-        getCachedTrackUrl(track.id).catch(() => {});
+        getCachedTrackUrl(track.id).then((cachedBlob) => {
+          if (cachedBlob && get().currentTrack?.id === track.id) {
+            const cur = audio.currentTime;
+            if (!audio.src.startsWith('blob:') && cur < 8) {
+              console.log(`[Player] Promoting "${track.title}" from WAN stream to local offline Blob URL`);
+              audio.src = cachedBlob;
+              const applySeek = () => {
+                try { audio.currentTime = cur; } catch (_) {}
+                if (get().isPlaying) audio.play().catch(() => {});
+              };
+              if (audio.readyState >= 1) applySeek();
+              else audio.addEventListener('loadedmetadata', applySeek, { once: true });
+            }
+          }
+        }).catch(() => {});
       }
+      prewarmQueueBlobUrls(q, idx + 1, 2);
     },
 
     playTrackLocally: (track, newQueue, index, startTime, autoPlay = true, playlistId) => {
@@ -1133,7 +1273,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (autoPlay) {
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
-        ensureAudioKeepalive();
+        releaseAudioKeepalive();
         requestScreenWakeLock();
 
         if ((!startTime || startTime <= 0.1) && get().crossfade > 0) {
@@ -1160,8 +1300,23 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       prefetchRecommendationsIfNeeded();
 
       if (!syncBlobUrl) {
-        getCachedTrackUrl(track.id).catch(() => {});
+        getCachedTrackUrl(track.id).then((cachedBlob) => {
+          if (cachedBlob && get().currentTrack?.id === track.id) {
+            const cur = audio.currentTime;
+            if (!audio.src.startsWith('blob:') && cur < 8) {
+              console.log(`[Player] Promoting "${track.title}" from WAN stream to local offline Blob URL`);
+              audio.src = cachedBlob;
+              const applySeek = () => {
+                try { audio.currentTime = cur; } catch (_) {}
+                if (get().isPlaying) audio.play().catch(() => {});
+              };
+              if (audio.readyState >= 1) applySeek();
+              else audio.addEventListener('loadedmetadata', applySeek, { once: true });
+            }
+          }
+        }).catch(() => {});
       }
+      prewarmQueueBlobUrls(q, idx + 1, 2);
     },
 
     stopLocalPlayback: () => {
@@ -1230,7 +1385,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       isUserInitiatedPause = false;
       wasInterruptedByExternalApp = false;
-      ensureAudioKeepalive();
+      releaseAudioKeepalive();
       requestScreenWakeLock();
 
       const p = audio.play();
@@ -1243,8 +1398,23 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       prefetchRecommendationsIfNeeded();
 
       if (!syncBlobUrl) {
-        getCachedTrackUrl(chosenTrack.id).catch(() => {});
+        getCachedTrackUrl(chosenTrack.id).then((cachedBlob) => {
+          if (cachedBlob && get().currentTrack?.id === chosenTrack.id) {
+            const cur = audio.currentTime;
+            if (!audio.src.startsWith('blob:') && cur < 8) {
+              console.log(`[Player] Promoting "${chosenTrack.title}" from WAN stream to local offline Blob URL`);
+              audio.src = cachedBlob;
+              const applySeek = () => {
+                try { audio.currentTime = cur; } catch (_) {}
+                if (get().isPlaying) audio.play().catch(() => {});
+              };
+              if (audio.readyState >= 1) applySeek();
+              else audio.addEventListener('loadedmetadata', applySeek, { once: true });
+            }
+          }
+        }).catch(() => {});
       }
+      prewarmQueueBlobUrls(shuffledQueue, 1, 2);
     },
 
     togglePlay: () => {
@@ -1274,7 +1444,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
         clearStandbyKeepaliveTimer();
-        ensureAudioKeepalive();
+        releaseAudioKeepalive();
         requestScreenWakeLock();
 
         ensureAudioGraph();
@@ -1334,7 +1504,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       isUserInitiatedPause = false;
       wasInterruptedByExternalApp = false;
       clearStandbyKeepaliveTimer();
-      ensureAudioKeepalive();
+      releaseAudioKeepalive();
       requestScreenWakeLock();
 
       const isLocal = useSyncStore.getState().isLocalActive;
@@ -1712,7 +1882,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const bands = [...get().eqBands];
       bands[bandIndex] = gain;
       if (eqFilters[bandIndex] && audioCtx) {
-        eqFilters[bandIndex].gain.setValueAtTime(gain, audioCtx.currentTime);
+        eqFilters[bandIndex].gain.setTargetAtTime(gain, audioCtx.currentTime, 0.03);
       }
       try { localStorage.setItem(STORAGE_KEY_EQ_BANDS, JSON.stringify(bands)); } catch (_) {}
       set({ eqBands: bands, eqPreset: 'custom' });
@@ -1735,7 +1905,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const bands = [...preset.bands];
       bands.forEach((g, i) => {
         if (eqFilters[i] && audioCtx) {
-          eqFilters[i].gain.setValueAtTime(g, audioCtx.currentTime);
+          eqFilters[i].gain.setTargetAtTime(g, audioCtx.currentTime, 0.03);
         }
       });
       try {

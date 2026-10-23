@@ -278,9 +278,13 @@ export async function isTrackCached(trackId: number): Promise<boolean> {
 
 /**
  * Downloads a single track cleanly into CacheStorage without partial range errors,
- * with timeout resilience.
+ * with timeout and abort resilience.
  */
-export async function cacheTrackOffline(track: Track, timeoutMs = 25000): Promise<boolean> {
+export async function cacheTrackOffline(
+  track: Track,
+  timeoutMs = 25000,
+  externalSignal?: AbortSignal
+): Promise<boolean> {
   if (typeof window === 'undefined' || !('caches' in window) || !track || !track.id) return false;
 
   const streamUrl = `/api/stream/${track.id}`;
@@ -291,8 +295,21 @@ export async function cacheTrackOffline(track: Track, timeoutMs = 25000): Promis
       return true;
     }
 
+    if (externalSignal && externalSignal.aborted) {
+      return false;
+    }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    const onExternalAbort = () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+
+    if (externalSignal) {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
 
     try {
       // Explicitly request full file without Range headers to obtain clean 200 response
@@ -324,10 +341,29 @@ export async function cacheTrackOffline(track: Track, timeoutMs = 25000): Promis
       return false;
     } finally {
       clearTimeout(timer);
+      if (externalSignal) {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      }
     }
-  } catch (err) {
-    console.warn(`[Offline Cache] Error caching track ${track.title}:`, err);
+  } catch (err: any) {
+    if (err?.name !== 'AbortError') {
+      console.warn(`[Offline Cache] Error caching track ${track.title}:`, err);
+    }
     return false;
+  }
+}
+
+/**
+ * Proactively pre-warms Blob URLs in memory for upcoming tracks in queue
+ */
+export function prewarmQueueBlobUrls(tracks: Track[], startIndex: number, count = 2): void {
+  if (typeof window === 'undefined' || !tracks || tracks.length === 0) return;
+  const end = Math.min(tracks.length, startIndex + count);
+  for (let i = startIndex; i < end; i++) {
+    const t = tracks[i];
+    if (t && t.id) {
+      getCachedTrackUrl(t.id).catch(() => {});
+    }
   }
 }
 
