@@ -678,29 +678,38 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
   });
 }
 
-const inFlightSingleDownloads = new Map<string, Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean }>>();
+const inFlightSingleDownloads = new Map<string, Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean; liked?: boolean }>>();
 
 export async function downloadSingleSpotifyTrackDirect(
   track: SpotifyTrack,
   userId?: number,
-  playlistId?: number
-): Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean }> {
+  playlistId?: number,
+  isLikedOnly?: boolean
+): Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean; liked?: boolean }> {
   const downloadKey = (track.id || `${track.artist}:::${track.title}`).toLowerCase();
   if (inFlightSingleDownloads.has(downloadKey)) {
     const result = await inFlightSingleDownloads.get(downloadKey)!;
-    if (result.success && result.track && playlistId) {
-      const inPl: any = db.prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').get(playlistId, result.track.id);
-      if (!inPl) {
-        const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
-        const nextPos = (maxPosRow?.maxPos !== null && maxPosRow?.maxPos !== undefined) ? maxPosRow.maxPos + 1 : 0;
-        db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)').run(playlistId, result.track.id, nextPos);
+    if (result.success && result.track) {
+      if (isLikedOnly || playlistId === -1) {
+        if (userId) {
+          db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, result.track.id);
+        }
+        return { ...result, liked: true };
       }
-      return { ...result, addedToPlaylist: true };
+      if (playlistId) {
+        const inPl: any = db.prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').get(playlistId, result.track.id);
+        if (!inPl) {
+          const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
+          const nextPos = (maxPosRow?.maxPos !== null && maxPosRow?.maxPos !== undefined) ? maxPosRow.maxPos + 1 : 0;
+          db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)').run(playlistId, result.track.id, nextPos);
+        }
+        return { ...result, addedToPlaylist: true };
+      }
     }
     return result;
   }
 
-  const promise = downloadSingleSpotifyTrackDirectInternal(track, userId, playlistId);
+  const promise = downloadSingleSpotifyTrackDirectInternal(track, userId, playlistId, isLikedOnly);
   inFlightSingleDownloads.set(downloadKey, promise);
   try {
     return await promise;
@@ -712,8 +721,9 @@ export async function downloadSingleSpotifyTrackDirect(
 async function downloadSingleSpotifyTrackDirectInternal(
   track: SpotifyTrack,
   userId?: number,
-  playlistId?: number
-): Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean }> {
+  playlistId?: number,
+  isLikedOnly?: boolean
+): Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean; liked?: boolean }> {
   try {
     // 1. Resolve full details if needed
     if (track.id) {
@@ -744,9 +754,16 @@ async function downloadSingleSpotifyTrackDirectInternal(
       } catch (_) {}
     }
 
-    // Helper to attach to playlist if playlistId is provided
+    // Helper to attach to playlist or liked tracks
     const attachToPlaylist = (trackRecord: any) => {
-      if (!playlistId || !trackRecord?.id) return;
+      if (!trackRecord?.id) return;
+      if (isLikedOnly || playlistId === -1) {
+        if (userId) {
+          db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, trackRecord.id);
+        }
+        return;
+      }
+      if (!playlistId) return;
       const inPl: any = db.prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').get(playlistId, trackRecord.id);
       if (!inPl) {
         const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
@@ -771,7 +788,12 @@ async function downloadSingleSpotifyTrackDirectInternal(
 
     if (existing) {
       attachToPlaylist(existing);
-      return { success: true, track: existing, addedToPlaylist: !!playlistId };
+      return {
+        success: true,
+        track: existing,
+        addedToPlaylist: !!playlistId && playlistId !== -1,
+        liked: Boolean(isLikedOnly || playlistId === -1)
+      };
     }
 
     // 3. Prepare target path
@@ -884,7 +906,12 @@ async function downloadSingleSpotifyTrackDirectInternal(
 
     attachToPlaylist(newTrack);
     await refreshJellyfinLibrary();
-    return { success: true, track: newTrack, addedToPlaylist: !!playlistId };
+    return {
+      success: true,
+      track: newTrack,
+      addedToPlaylist: !!playlistId && playlistId !== -1,
+      liked: Boolean(isLikedOnly || playlistId === -1)
+    };
   } catch (err: any) {
     console.error('[Download Single Track Error]', err);
     return { success: false, error: err.message };

@@ -7,6 +7,9 @@ import {
   cacheTrackOffline,
   syncDownloadedPlaylist,
   saveOfflinePlaylistData,
+  addTrackToOfflinePlaylist,
+  removeTrackFromOfflinePlaylist,
+  shouldTrackBeCachedOffline,
   getDownloadQueue,
   saveDownloadQueue,
   removeDownloadQueueItem,
@@ -36,6 +39,8 @@ interface OfflineStoreState {
   startDownload: (playlistId: number, tracks: Track[], playlist?: Playlist) => Promise<void>;
   removeDownload: (playlistId: number, tracks: Track[]) => Promise<void>;
   cacheTrack: (track: Track) => Promise<boolean>;
+  addTrackToOffline: (playlistId: number, track: Track, playlist?: Playlist) => Promise<boolean>;
+  removeTrackFromOffline: (playlistId: number, trackId: number) => void;
   syncPlaylist: (playlistId: number, tracks: Track[], playlist?: Playlist) => Promise<void>;
   syncAllDownloadedPlaylists: () => Promise<void>;
   resumePendingDownloads: () => Promise<void>;
@@ -196,6 +201,19 @@ export const useOfflineStore = create<OfflineStoreState>((set, get) => ({
   cacheTrack: async (track: Track) => {
     if (!track || !track.id) return false;
     return await cacheTrackOffline(track);
+  },
+
+  addTrackToOffline: async (playlistId: number, track: Track, playlist?: Playlist) => {
+    if (!track || !track.id) return false;
+    addTrackToOfflinePlaylist(playlistId, track, playlist);
+    if (get().isDownloaded(playlistId)) {
+      return await cacheTrackOffline(track);
+    }
+    return false;
+  },
+
+  removeTrackFromOffline: (playlistId: number, trackId: number) => {
+    removeTrackFromOfflinePlaylist(playlistId, trackId);
   },
 
   resumePendingDownloads: async () => {

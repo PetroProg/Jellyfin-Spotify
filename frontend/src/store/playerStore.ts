@@ -5,7 +5,17 @@ import { useSyncStore } from './syncStore';
 import { toast } from './toastStore';
 import { tr } from './i18nStore';
 import { useOfflineStore } from './offlineStore';
-import { getCachedTrackUrl, isTrackCached, cacheTrackOffline, saveOfflinePlaylistData, getSynchronousBlobUrl, prewarmQueueBlobUrls } from '../utils/offline';
+import {
+  getCachedTrackUrl,
+  isTrackCached,
+  cacheTrackOffline,
+  saveOfflinePlaylistData,
+  getSynchronousBlobUrl,
+  prewarmQueueBlobUrls,
+  shouldTrackBeCachedOffline,
+  addTrackToOfflinePlaylist,
+  removeTrackFromOfflinePlaylist
+} from '../utils/offline';
 
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
@@ -61,7 +71,7 @@ interface PlayerState {
   removeFromQueue: (index: number) => void;
   likedTrackIds: number[];
   loadLikes: () => Promise<void>;
-  toggleLikeTrack: (trackId: number) => Promise<boolean>;
+  toggleLikeTrack: (trackId: number, trackObj?: Track) => Promise<boolean>;
   blacklistTrack: (track: Track) => Promise<void>;
 
   setEqGain: (bandIndex: number, gain: number) => void;
@@ -1766,7 +1776,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
     },
 
-    toggleLikeTrack: async (trackId: number) => {
+    toggleLikeTrack: async (trackId: number, trackObj?: Track) => {
       const { likedTrackIds } = get();
       const isCurrentlyLiked = likedTrackIds.includes(trackId);
       const newLiked = isCurrentlyLiked
@@ -1783,12 +1793,20 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         set({ likedTrackIds: updated });
         localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(updated));
 
-        // Auto-cache track if Liked Songs is downloaded offline
-        if (res.liked && useOfflineStore.getState().isDownloaded(-1)) {
-          const currentT = get().currentTrack?.id === trackId ? get().currentTrack : get().queue.find((t) => t.id === trackId);
-          if (currentT) {
-            useOfflineStore.getState().cacheTrack(currentT);
+        const targetTrack = trackObj || (get().currentTrack?.id === trackId ? get().currentTrack : get().queue.find((t) => t.id === trackId));
+
+        if (res.liked) {
+          if (targetTrack) {
+            // Auto-cache track if Liked Songs or any containing playlist is downloaded on this device!
+            if (shouldTrackBeCachedOffline(trackId, -1, updated)) {
+              useOfflineStore.getState().cacheTrack(targetTrack);
+            }
+            if (useOfflineStore.getState().isDownloaded(-1)) {
+              addTrackToOfflinePlaylist(-1, targetTrack);
+            }
           }
+        } else {
+          removeTrackFromOfflinePlaylist(-1, trackId);
         }
 
         return res.liked;

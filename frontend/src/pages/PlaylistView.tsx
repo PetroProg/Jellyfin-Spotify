@@ -9,7 +9,7 @@ import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { usePlayerStore } from '../store/playerStore';
 import { toast } from '../store/toastStore';
 import { useOfflineStore } from '../store/offlineStore';
-import { getOfflinePlaylistData, saveOfflinePlaylistData } from '../utils/offline';
+import { getOfflinePlaylistData, saveOfflinePlaylistData, removeTrackFromOfflinePlaylist } from '../utils/offline';
 import { useI18nStore } from '../store/i18nStore';
 
 interface PlaylistViewProps {
@@ -160,6 +160,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
     try {
       await apiRequest(`/playlists/${playlistId}/tracks/${track.id}`, { method: 'DELETE' });
       setTracks(prev => prev.filter(t => t.id !== track.id));
+      removeTrackFromOfflinePlaylist(Number(playlistId), track.id);
       toast.success(t('Track removed from playlist', 'Трек удален из плейлиста'));
     } catch (e: any) {
       toast.error(e.message || t('Failed to remove track from playlist', 'Ошибка удаления трека из плейлиста'));

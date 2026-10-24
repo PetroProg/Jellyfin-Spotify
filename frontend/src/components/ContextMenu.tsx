@@ -107,7 +107,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
         <button
           onClick={() => {
-            toggleLikeTrack(track.id);
+            toggleLikeTrack(track.id, track);
             onClose();
           }}
           className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-text hover:bg-cat-surface0 text-left transition-colors"

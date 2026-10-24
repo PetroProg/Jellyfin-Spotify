@@ -15,7 +15,8 @@ import {
   Library,
   ListPlus,
   Link2,
-  ClipboardList
+  ClipboardList,
+  Heart
 } from 'lucide-react';
 import { DownloadJob, Track, SpotifySearchResult } from '../types';
 import { apiRequest } from '../api/client';
@@ -23,8 +24,10 @@ import { TrackRow } from '../components/TrackRow';
 import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { usePlayerStore } from '../store/playerStore';
+import { useOfflineStore } from '../store/offlineStore';
 import { toast } from '../store/toastStore';
 import { useI18nStore } from '../store/i18nStore';
+import { shouldTrackBeCachedOffline, addTrackToOfflinePlaylist } from '../utils/offline';
 
 interface SearchImportProps {
   onOpenPlaylist: (id: number) => void;
@@ -51,13 +54,14 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
   const [spotifyResults, setSpotifyResults] = useState<SpotifySearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [downloadingTrackId, setDownloadingTrackId] = useState<string | null>(null);
+  const [likingTrackId, setLikingTrackId] = useState<string | null>(null);
 
   // Modals & Menu
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
   const [addToPlaylistSpotify, setAddToPlaylistSpotify] = useState<SpotifySearchResult | null>(null);
 
-  const { playTrack, addToQueue } = usePlayerStore();
+  const { playTrack, addToQueue, likedTrackIds, toggleLikeTrack } = usePlayerStore();
 
   const loadPlaylists = async () => {
     try {
@@ -222,6 +226,12 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
           )
         ]);
 
+        // Auto-cache to device if offline downloading is enabled for any playlist containing this track or liked tracks
+        const shouldCache = shouldTrackBeCachedOffline(res.track.id, undefined, usePlayerStore.getState().likedTrackIds);
+        if (shouldCache) {
+          useOfflineStore.getState().cacheTrack(res.track);
+        }
+
         // Immediately start playing downloaded track
         playTrack(res.track, [res.track], 0);
       }
@@ -229,6 +239,70 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
       toast.error(err.message || t('Failed to download track', 'Ошибка скачивания трека'));
     } finally {
       setDownloadingTrackId(null);
+    }
+  };
+
+  const handleLikeSpotifyTrack = async (st: SpotifySearchResult) => {
+    if (likingTrackId === st.id) return;
+    setLikingTrackId(st.id);
+
+    try {
+      const res = await apiRequest<{ success: boolean; track: Track; liked?: boolean }>('/tracks/download-single', {
+        method: 'POST',
+        body: JSON.stringify({
+          track: st,
+          isLikedOnly: true,
+        }),
+      });
+
+      if (res.success && res.track) {
+        setSpotifyResults((prev) =>
+          prev.map((item) =>
+            item.id === st.id
+              ? {
+                  ...item,
+                  is_downloaded: true,
+                  local_track_id: res.track.id,
+                  local_track: res.track
+                }
+              : item
+          )
+        );
+
+        setLocalResults((prev) => [
+          res.track,
+          ...prev.filter(
+            (t) =>
+              t.id !== res.track.id &&
+              !(t.title.toLowerCase() === res.track.title.toLowerCase() && t.artist.toLowerCase() === res.track.artist.toLowerCase())
+          )
+        ]);
+
+        const currentLiked = usePlayerStore.getState().likedTrackIds;
+        if (!currentLiked.includes(res.track.id)) {
+          usePlayerStore.setState({ likedTrackIds: [...currentLiked, res.track.id] });
+        }
+
+        const shouldCache = shouldTrackBeCachedOffline(res.track.id, -1, [...currentLiked, res.track.id]);
+        if (shouldCache) {
+          await useOfflineStore.getState().cacheTrack(res.track);
+          addTrackToOfflinePlaylist(-1, res.track);
+          toast.success(
+            t(
+              `"${res.track.title}" added to Liked Songs and saved offline`,
+              `«${res.track.title}» добавлен в любимые треки и сохранен оффлайн`
+            )
+          );
+        } else {
+          toast.success(
+            t(`"${res.track.title}" added to Liked Songs`, `«${res.track.title}» добавлен в любимые треки`)
+          );
+        }
+      }
+    } catch (err: any) {
+      toast.error(err.message || t('Failed to download track', 'Ошибка скачивания трека'));
+    } finally {
+      setLikingTrackId(null);
     }
   };
 
@@ -411,6 +485,21 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
 
                           {st.is_downloaded ? (
                             <div className="flex items-center gap-1.5 sm:gap-2">
+                              <button
+                                onClick={() => {
+                                  if (st.local_track) {
+                                    toggleLikeTrack(st.local_track.id, st.local_track);
+                                  }
+                                }}
+                                title={st.local_track && likedTrackIds.includes(st.local_track.id) ? t('Remove from Liked', 'Удалить из любимых') : t('Save to Liked Songs', 'В любимые треки')}
+                                className={`p-2 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 transition-all cursor-pointer active:scale-95 ${
+                                  st.local_track && likedTrackIds.includes(st.local_track.id)
+                                    ? 'text-cat-red'
+                                    : 'text-cat-subtext0 hover:text-cat-red'
+                                }`}
+                              >
+                                <Heart className={`w-4 h-4 ${st.local_track && likedTrackIds.includes(st.local_track.id) ? 'fill-current' : ''}`} />
+                              </button>
                               <span className="text-[11px] px-2.5 py-1 rounded-full bg-cat-green/20 text-cat-green font-semibold flex items-center gap-1">
                                 <Check className="w-3.5 h-3.5 stroke-[2.5]" />
                                 <span className="hidden sm:inline">{t('In Library', 'В медиатеке')}</span>
@@ -437,9 +526,25 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                           ) : (
                             <div className="flex items-center gap-1.5 sm:gap-2">
                               <button
+                                onClick={() => handleLikeSpotifyTrack(st)}
+                                disabled={likingTrackId === st.id || downloadingTrackId === st.id}
+                                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-red text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
+                                title={t(
+                                  'Add to Liked Songs (track will download automatically)',
+                                  'Добавить в любимые треки (трек скачается автоматически)'
+                                )}
+                              >
+                                {likingTrackId === st.id ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-cat-red" />
+                                ) : (
+                                  <Heart className="w-3.5 h-3.5 text-cat-red" />
+                                )}
+                                <span className="hidden xs:inline">{t('To Liked', 'В любимые')}</span>
+                              </button>
+                              <button
                                 onClick={() => setAddToPlaylistSpotify(st)}
-                                disabled={downloadingTrackId === st.id}
-                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-mauve text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
+                                disabled={likingTrackId === st.id || downloadingTrackId === st.id}
+                                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-mauve text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
                                 title={t(
                                   'Add to playlist (track will download automatically)',
                                   'Добавить в плейлист (трек скачается автоматически)'
@@ -450,8 +555,8 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                               </button>
                               <button
                                 onClick={() => handleDownloadSingle(st)}
-                                disabled={downloadingTrackId === st.id}
-                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cat-mauve/20 hover:bg-cat-mauve text-cat-mauve hover:text-cat-base text-xs font-bold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
+                                disabled={likingTrackId === st.id || downloadingTrackId === st.id}
+                                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-mauve/20 hover:bg-cat-mauve text-cat-mauve hover:text-cat-base text-xs font-bold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
                                 title={t('Download to server in high quality', 'Скачать на сервер в высоком качестве')}
                               >
                                 {downloadingTrackId === st.id ? (

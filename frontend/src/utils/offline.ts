@@ -133,6 +133,95 @@ export function getOfflinePlaylistData(
   }
 }
 
+export function addTrackToOfflinePlaylist(
+  playlistId: number,
+  track: Track,
+  playlistFallback?: Playlist
+): void {
+  try {
+    const existing = getOfflinePlaylistData(playlistId);
+    let playlist = existing?.playlist || playlistFallback;
+    if (!playlist) {
+      if (playlistId === -1) {
+        playlist = {
+          id: -1,
+          name: tr('Liked Songs', 'Любимые треки'),
+          description: tr('Your library of saved tracks', 'Ваша медиатека сохраненных композиций'),
+          created_at: new Date().toISOString(),
+          track_count: 0,
+        };
+      } else {
+        playlist = {
+          id: playlistId,
+          name: tr('Playlist', 'Плейлист'),
+          created_at: new Date().toISOString(),
+          track_count: 0,
+        };
+      }
+    }
+    const currentTracks = existing?.tracks || [];
+    if (!currentTracks.some((t) => t.id === track.id)) {
+      const updatedTracks = [track, ...currentTracks];
+      const updatedPlaylist = { ...playlist, track_count: updatedTracks.length };
+      saveOfflinePlaylistData(updatedPlaylist, updatedTracks);
+    }
+  } catch (err) {
+    console.warn(`[Offline] Failed to add track to offline playlist ${playlistId}:`, err);
+  }
+}
+
+export function removeTrackFromOfflinePlaylist(playlistId: number, trackId: number): void {
+  try {
+    const existing = getOfflinePlaylistData(playlistId);
+    if (!existing) return;
+    const updatedTracks = existing.tracks.filter((t) => t.id !== trackId);
+    const updatedPlaylist = { ...existing.playlist, track_count: updatedTracks.length };
+    saveOfflinePlaylistData(updatedPlaylist, updatedTracks);
+  } catch (err) {
+    console.warn(`[Offline] Failed to remove track from offline playlist ${playlistId}:`, err);
+  }
+}
+
+/**
+ * Checks whether a track should be automatically downloaded to device cache
+ * based on whether downloading is enabled in the target playlist, liked tracks,
+ * or ANY playlist currently saved for offline playback.
+ */
+export function shouldTrackBeCachedOffline(
+  trackId: number,
+  targetPlaylistId?: number,
+  likedTrackIds?: number[]
+): boolean {
+  try {
+    const downloadedIds = getOfflinePlaylistIds();
+    if (!downloadedIds || downloadedIds.length === 0) return false;
+
+    // 1. If target playlist has offline download enabled
+    if (targetPlaylistId !== undefined && downloadedIds.includes(targetPlaylistId)) {
+      return true;
+    }
+
+    // 2. If Liked Songs (-1) has offline download enabled
+    if (downloadedIds.includes(-1)) {
+      if (targetPlaylistId === -1) return true;
+      if (likedTrackIds && likedTrackIds.includes(trackId)) return true;
+    }
+
+    // 3. If track exists in ANY currently saved offline playlist on this device
+    for (const pId of downloadedIds) {
+      const data = getOfflinePlaylistData(pId);
+      if (data && data.tracks && data.tracks.some((t) => t.id === trackId)) {
+        return true;
+      }
+    }
+
+    return false;
+  } catch (err) {
+    console.warn('[Offline] shouldTrackBeCachedOffline error:', err);
+    return false;
+  }
+}
+
 export function getAllOfflinePlaylists(): Playlist[] {
   const ids = getOfflinePlaylistIds();
   const list: Playlist[] = [];

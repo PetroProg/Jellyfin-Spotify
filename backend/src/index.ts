@@ -1353,12 +1353,17 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
 
 server.post('/api/tracks/download-single', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const body = req.body || {};
-  const { track, playlistId } = body;
+  const { track, playlistId, isLikedOnly } = body;
   if (!track || !track.title || !track.artist) {
     return reply.status(400).send({ error: 'Трек не указан или отсутствуют данные' });
   }
 
-  const result = await downloadSingleSpotifyTrackDirect(track, req.user.id, playlistId ? Number(playlistId) : undefined);
+  const result = await downloadSingleSpotifyTrackDirect(
+    track,
+    req.user.id,
+    playlistId !== undefined && playlistId !== null ? Number(playlistId) : undefined,
+    Boolean(isLikedOnly)
+  );
   if (!result.success) {
     return reply.status(500).send({ error: result.error || 'Ошибка скачивания трека' });
   }

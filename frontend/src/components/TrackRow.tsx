@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, MoreHorizontal, Music2 } from 'lucide-react';
+import { Play, MoreHorizontal, Music2, Heart } from 'lucide-react';
 import { Track } from '../types';
 import { usePlayerStore } from '../store/playerStore';
 import { useI18nStore } from '../store/i18nStore';
@@ -18,9 +18,10 @@ export const TrackRow: React.FC<TrackRowProps> = ({
   onPlay,
   onOpenMenu,
 }) => {
-  const { currentTrack, isPlaying } = usePlayerStore();
-  const { lang } = useI18nStore();
+  const { currentTrack, isPlaying, likedTrackIds, toggleLikeTrack } = usePlayerStore();
+  const { lang, t } = useI18nStore();
   const isCurrent = currentTrack?.id === track.id;
+  const isLiked = likedTrackIds.includes(track.id);
 
   const formatDuration = (ms: number) => {
     const totalSecs = Math.floor(ms / 1000);
@@ -99,8 +100,23 @@ export const TrackRow: React.FC<TrackRowProps> = ({
         {formatDate(track.added_at)}
       </div>
 
-      {/* Col 5: Duration & 3-Dots Menu */}
-      <div className="flex items-center gap-3 flex-shrink-0">
+      {/* Col 5: Duration & Heart & 3-Dots Menu */}
+      <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleLikeTrack(track.id, track);
+          }}
+          title={isLiked ? t('Remove from Liked', 'Удалить из любимых') : t('Save to Liked Songs', 'В любимые треки')}
+          className={`p-1.5 rounded-lg transition-all cursor-pointer active:scale-95 ${
+            isLiked
+              ? 'text-cat-red hover:opacity-80'
+              : 'text-cat-subtext0/60 hover:text-cat-red opacity-0 group-hover:opacity-100 hover:bg-cat-surface1/40'
+          }`}
+        >
+          <Heart className={`w-4 h-4 ${isLiked ? 'fill-current' : ''}`} />
+        </button>
+
         <span className="text-xs font-mono text-cat-subtext0">
           {formatDuration(track.duration_ms)}
         </span>
