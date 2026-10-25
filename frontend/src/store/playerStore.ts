@@ -14,19 +14,20 @@ import {
   prewarmQueueBlobUrls,
   shouldTrackBeCachedOffline,
   addTrackToOfflinePlaylist,
-  removeTrackFromOfflinePlaylist
+  removeTrackFromOfflinePlaylist,
+  isTrackDownloadedLocally
 } from '../utils/offline';
 
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
 export const EQ_PRESETS: Record<string, { label: string; labelEn: string; bands: number[] }> = {
   flat: { label: 'Оригинал (Flat)', labelEn: 'Original (Flat)', bands: [0, 0, 0, 0, 0] },
-  bass: { label: 'Усиление басов', labelEn: 'Bass Boost', bands: [6, 4, 1, 0, 0] },
-  rock: { label: 'Рок', labelEn: 'Rock', bands: [5, 2, -1, 3, 5] },
-  pop: { label: 'Поп', labelEn: 'Pop', bands: [-1, 2, 4, 3, 1] },
-  vocal: { label: 'Чистый вокал', labelEn: 'Clean Vocal', bands: [-2, 0, 5, 4, 2] },
-  electronic: { label: 'Электроника', labelEn: 'Electronic', bands: [6, 4, -1, 3, 6] },
-  hiphop: { label: 'Хип-хоп', labelEn: 'Hip-Hop', bands: [7, 4, 0, 2, 3] },
+  bass: { label: 'Усиление басов', labelEn: 'Bass Boost', bands: [5.5, 4, 0.5, 0, 1] },
+  rock: { label: 'Рок', labelEn: 'Rock', bands: [4, 2, -1, 2.5, 3.5] },
+  pop: { label: 'Поп', labelEn: 'Pop', bands: [-1, 1.5, 3, 2, 2] },
+  vocal: { label: 'Чистый вокал', labelEn: 'Clean Vocal', bands: [-2, 0, 4, 3, 1] },
+  electronic: { label: 'Электроника', labelEn: 'Electronic', bands: [5, 3, 0, 2, 4] },
+  hiphop: { label: 'Хип-хоп', labelEn: 'Hip-Hop', bands: [6, 4.5, 0, 1, 2] },
 };
 
 interface PlayerState {
@@ -282,14 +283,13 @@ function releaseScreenWakeLock() {
 let isUserInitiatedPause = false;
 let wasInterruptedByExternalApp = false;
 
-// Web Audio API Graph (Lazy initialized only when EQ or DSP is explicitly engaged)
+// Web Audio API Graph (Clean static serial chain)
 let audioCtx: AudioContext | null = null;
 let sourceNode: MediaElementAudioSourceNode | null = null;
 let preAmpGainNode: GainNode | null = null;
 let eqFilters: BiquadFilterNode[] = [];
 let compressorNode: DynamicsCompressorNode | null = null;
 let fadeGainNode: GainNode | null = null;
-let limiterNode: DynamicsCompressorNode | null = null;
 let isAudioGraphAttached = false;
 
 function applyFadeVolume(volFraction: number) {
@@ -373,109 +373,41 @@ function startFadeIn(durationSec: number) {
   }, 40);
 }
 
-function shouldEngageAudioDsp(): boolean {
-  const isNorm = loadSavedNormalizer();
-  const preset = loadSavedEqPreset();
-  const bands = loadSavedEqBands();
-  const hasActiveEq = preset !== 'flat' || bands.some((b) => b !== 0);
-  return isNorm || hasActiveEq;
+function applyHeadroom(bands: number[]) {
+  if (!audioCtx || !preAmpGainNode) return;
+  const maxBoost = Math.max(0, ...bands);
+  // Gentle headroom: only attenuate by ~35% of max boost up to 2.0 dB maximum.
+  // This preserves powerful punchy bass without cutting overall volume by half or clipping.
+  const headroomDb = maxBoost > 0 ? -Math.min(maxBoost * 0.35, 2.0) : 0;
+  const preAmpLinear = Math.pow(10, headroomDb / 20);
+  preAmpGainNode.gain.setTargetAtTime(preAmpLinear, audioCtx.currentTime, 0.02);
 }
 
-function updateAudioGraphRouting() {
-  if (!audioCtx || !sourceNode) return;
-
-  const isNorm = loadSavedNormalizer();
-  const bands = loadSavedEqBands();
-  const preset = loadSavedEqPreset();
-  const hasActiveEq = preset !== 'flat' || bands.some((b) => b !== 0);
-
-  // Pure Bit-Perfect Direct Output (bypass filters & compressor completely)
-  if (!isNorm && !hasActiveEq) {
-    try {
-      sourceNode.disconnect();
-      if (fadeGainNode) {
-        sourceNode.connect(fadeGainNode);
-        fadeGainNode.disconnect();
-        fadeGainNode.connect(audioCtx.destination);
-      } else {
-        sourceNode.connect(audioCtx.destination);
-      }
-    } catch (_) {}
-    return;
+function updateFilterGains(bands: number[]) {
+  if (!audioCtx) return;
+  for (let i = 0; i < eqFilters.length; i++) {
+    const targetGain = bands[i] ?? 0;
+    eqFilters[i].gain.setTargetAtTime(targetGain, audioCtx.currentTime, 0.02);
   }
+  applyHeadroom(bands);
+}
 
-  try {
-    sourceNode.disconnect();
-
-    // 1. Dynamic Headroom Pre-Amplifier:
-    // When boosting EQ (e.g. +6dB bass on Bose), reduce input gain by maxBoost (+ 0.5dB safety margin)
-    // to guarantee 0 dBFS ceiling and 100% prevent digital clipping, crackle, & distortion!
-    const maxBoost = Math.max(0, ...bands);
-    const preAmpLinear = maxBoost > 0 ? Math.pow(10, -(maxBoost + 0.5) / 20) : 1.0;
-    if (preAmpGainNode) {
-      preAmpGainNode.gain.setTargetAtTime(preAmpLinear, audioCtx.currentTime, 0.03);
-    }
-
-    let lastNode: AudioNode = preAmpGainNode ? preAmpGainNode : sourceNode;
-    if (preAmpGainNode) {
-      sourceNode.connect(preAmpGainNode);
-    }
-
-    // 2. 5-Band Studio Equalizer
-    for (let i = 0; i < eqFilters.length; i++) {
-      const filter = eqFilters[i];
-      const targetGain = bands[i] ?? 0;
-      filter.gain.setTargetAtTime(targetGain, audioCtx.currentTime, 0.03);
-      lastNode.connect(filter);
-      lastNode = filter;
-    }
-
-    // 3. Studio Dynamics Compressor (Normalizer)
-    if (compressorNode) {
-      if (isNorm) {
-        compressorNode.threshold.setTargetAtTime(-8, audioCtx.currentTime, 0.03);
-        compressorNode.knee.setTargetAtTime(8, audioCtx.currentTime, 0.03);
-        compressorNode.ratio.setTargetAtTime(1.8, audioCtx.currentTime, 0.03);
-        compressorNode.attack.setTargetAtTime(0.04, audioCtx.currentTime, 0.03);
-        compressorNode.release.setTargetAtTime(0.25, audioCtx.currentTime, 0.03);
-      } else {
-        compressorNode.threshold.setTargetAtTime(0, audioCtx.currentTime, 0.03);
-        compressorNode.ratio.setTargetAtTime(1, audioCtx.currentTime, 0.03);
-      }
-      lastNode.connect(compressorNode);
-      lastNode = compressorNode;
-    }
-
-    // 4. Smooth Crossfade Gain Node
-    if (fadeGainNode) {
-      lastNode.connect(fadeGainNode);
-      lastNode = fadeGainNode;
-    }
-
-    // 5. Studio Brickwall Peak Limiter (protects DAC and Bluetooth A2DP against any transient clipping)
-    if (limiterNode) {
-      lastNode.connect(limiterNode);
-      try { limiterNode.disconnect(); } catch (_) {}
-      limiterNode.connect(audioCtx.destination);
-    } else {
-      try { lastNode.disconnect(); } catch (_) {}
-      lastNode.connect(audioCtx.destination);
-    }
-  } catch (err) {
-    console.warn('[Audio Routing Update Error]:', err);
+function updateNormalizer(enabled: boolean) {
+  if (!audioCtx || !compressorNode) return;
+  if (enabled) {
+    compressorNode.threshold.setTargetAtTime(-12, audioCtx.currentTime, 0.02);
+    compressorNode.knee.setTargetAtTime(10, audioCtx.currentTime, 0.02);
+    compressorNode.ratio.setTargetAtTime(2.5, audioCtx.currentTime, 0.02);
+    compressorNode.attack.setTargetAtTime(0.02, audioCtx.currentTime, 0.02);
+    compressorNode.release.setTargetAtTime(0.2, audioCtx.currentTime, 0.02);
+  } else {
+    compressorNode.threshold.setTargetAtTime(0, audioCtx.currentTime, 0.02);
+    compressorNode.ratio.setTargetAtTime(1, audioCtx.currentTime, 0.02);
   }
 }
 
-function ensureAudioGraph(forceAttach = false) {
-  if (!forceAttach && !shouldEngageAudioDsp() && !isAudioGraphAttached) {
-    // Pure Bit-Perfect mode: Keep <audio> on native OS/hardware output directly without Web Audio API!
-    return;
-  }
-
-  if (isAudioGraphAttached && audioCtx) {
-    updateAudioGraphRouting();
-    return;
-  }
+function ensureAudioGraph() {
+  if (isAudioGraphAttached && audioCtx) return;
 
   try {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -484,10 +416,12 @@ function ensureAudioGraph(forceAttach = false) {
     sourceNode = audioCtx.createMediaElementSource(audio);
     isAudioGraphAttached = true;
 
-    // Pre-amp gain for dynamic headroom
+    // 1. Dynamic Headroom Pre-Amplifier
     preAmpGainNode = audioCtx.createGain();
+    preAmpGainNode.gain.value = 1.0;
 
-    // 5-Band Equalizer filters
+    // 2. 5-Band Studio Equalizer (60Hz, 230Hz, 910Hz, 3.6kHz, 14kHz)
+    const savedBands = loadSavedEqBands();
     eqFilters = EQ_FREQUENCIES.map((freq, idx) => {
       const filter = audioCtx!.createBiquadFilter();
       if (idx === 0) {
@@ -499,34 +433,116 @@ function ensureAudioGraph(forceAttach = false) {
         filter.Q.value = 1.0;
       }
       filter.frequency.value = freq;
-      filter.gain.value = 0;
+      filter.gain.value = savedBands[idx] || 0;
       return filter;
     });
 
-    // Gentle mastering dynamics compressor
+    // 3. Studio Dynamics Compressor (Normalizer)
     compressorNode = audioCtx.createDynamicsCompressor();
-    compressorNode.threshold.value = -8;
-    compressorNode.knee.value = 8;
-    compressorNode.ratio.value = 1.8;
-    compressorNode.attack.value = 0.04;
-    compressorNode.release.value = 0.25;
+    const isNorm = loadSavedNormalizer();
+    if (isNorm) {
+      compressorNode.threshold.value = -12;
+      compressorNode.knee.value = 10;
+      compressorNode.ratio.value = 2.5;
+      compressorNode.attack.value = 0.02;
+      compressorNode.release.value = 0.2;
+    } else {
+      compressorNode.threshold.value = 0;
+      compressorNode.ratio.value = 1;
+    }
 
-    // Crossfade gain node
+    // 4. Smooth Crossfade Gain Node
     fadeGainNode = audioCtx.createGain();
     fadeGainNode.gain.value = 1.0;
 
-    // Transparent Brickwall Peak Limiter
-    limiterNode = audioCtx.createDynamicsCompressor();
-    limiterNode.threshold.value = -0.3; // -0.3 dBFS ceiling
-    limiterNode.knee.value = 0;          // hard knee
-    limiterNode.ratio.value = 20;        // brickwall limiting
-    limiterNode.attack.value = 0.003;    // 3ms ultra-fast attack
-    limiterNode.release.value = 0.05;    // 50ms fast transparent release
+    // Connect pristine single-path serial chain ONCE:
+    // sourceNode -> preAmpGainNode -> filter0 -> filter1 -> filter2 -> filter3 -> filter4 -> compressorNode -> fadeGainNode -> destination
+    sourceNode.connect(preAmpGainNode);
+    let lastNode: AudioNode = preAmpGainNode;
+    for (const filter of eqFilters) {
+      lastNode.connect(filter);
+      lastNode = filter;
+    }
+    lastNode.connect(compressorNode);
+    compressorNode.connect(fadeGainNode);
+    fadeGainNode.connect(audioCtx.destination);
 
-    updateAudioGraphRouting();
+    applyHeadroom(savedBands);
   } catch (err) {
     console.warn('[Web Audio API Init Error]:', err);
   }
+}
+
+function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
+  const syncBlobUrl = getSynchronousBlobUrl(track.id);
+  const streamUrl = `/api/stream/${track.id}`;
+
+  const applyPlayback = (targetSrc: string) => {
+    const needsChange = !audio.src.endsWith(targetSrc) && audio.src !== targetSrc;
+    if (needsChange) {
+      audio.src = targetSrc;
+    }
+
+    const applySeek = () => {
+      try {
+        if (startTime > 0) audio.currentTime = startTime;
+      } catch (_) {}
+    };
+
+    if (!needsChange && audio.readyState >= 1) {
+      applySeek();
+    } else {
+      audio.addEventListener('loadedmetadata', applySeek, { once: true });
+    }
+
+    if (autoPlay) {
+      isUserInitiatedPause = false;
+      wasInterruptedByExternalApp = false;
+      releaseAudioKeepalive();
+      requestScreenWakeLock();
+
+      if ((!startTime || startTime <= 0.1) && usePlayerStore.getState().crossfade > 0) {
+        startFadeIn(Math.min(usePlayerStore.getState().crossfade, 2.5));
+      } else {
+        restoreTargetVolume();
+      }
+
+      const p = audio.play();
+      if (p !== undefined) {
+        p.catch((err) => {
+          console.warn('[Audio play interrupted / autoplay]:', err);
+          if (err.name === 'NotAllowedError' && typeof document !== 'undefined' && document.visibilityState === 'visible') {
+            toast.info(tr('Click anywhere to enable audio on this device', 'Нажмите в любом месте для включения звука на этом устройстве'));
+          }
+        });
+      }
+    } else {
+      audio.pause();
+    }
+  };
+
+  // 1. If synchronous blob URL is already available in memory, play directly!
+  if (syncBlobUrl) {
+    applyPlayback(syncBlobUrl);
+    return;
+  }
+
+  // 2. If track is downloaded locally in cache storage: load blob before starting playback!
+  if (isTrackDownloadedLocally(track.id)) {
+    getCachedTrackUrl(track.id).then((blobUrl) => {
+      if (usePlayerStore.getState().currentTrack?.id === track.id) {
+        applyPlayback(blobUrl || streamUrl);
+      }
+    }).catch(() => {
+      if (usePlayerStore.getState().currentTrack?.id === track.id) {
+        applyPlayback(streamUrl);
+      }
+    });
+    return;
+  }
+
+  // 3. Track not downloaded: stream directly from server
+  applyPlayback(streamUrl);
 }
 
 // Proactive user-gesture unlock and background/interruption recovery
@@ -1171,61 +1187,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audioCtx.resume().catch(() => {});
       }
 
-      // Synchronous source assignment & playback for unbroken mobile background autoplay token
-      const streamUrl = `/api/stream/${track.id}`;
-      const syncBlobUrl = getSynchronousBlobUrl(track.id);
-      const targetSrc = syncBlobUrl || streamUrl;
-
-      if (!audio.src.endsWith(targetSrc) && audio.src !== targetSrc) {
-        audio.src = targetSrc;
-      }
-      audio.currentTime = 0;
-
-      if (get().crossfade > 0) {
-        startFadeIn(Math.min(get().crossfade, 2.5));
-      } else {
-        restoreTargetVolume();
-      }
-
-      isUserInitiatedPause = false;
-      wasInterruptedByExternalApp = false;
-      releaseAudioKeepalive();
-      requestScreenWakeLock();
-
-      const playPromise = audio.play();
-      if (playPromise !== undefined) {
-        playPromise.catch((err) => {
-          console.warn('[Audio play interrupted / autoplay]:', err);
-          if (err.name === 'NotAllowedError' && typeof document !== 'undefined' && document.visibilityState === 'visible') {
-            toast.info(tr('Click anywhere to enable audio on this device', 'Нажмите в любом месте для включения звука на этом устройстве'));
-          }
-        });
-      }
+      startPlaybackForTrack(track, 0, true);
 
       updateMediaSession(track);
       useSyncStore.getState().sendPlaybackState({ currentTime: 0, duration: initialDur, isPlaying: true });
       scheduleNextTrackPrefetch();
       prefetchRecommendationsIfNeeded();
-
-      // Proactive instant promotion to local Blob URL if track is cached in CacheStorage
-      if (!syncBlobUrl) {
-        getCachedTrackUrl(track.id).then((cachedBlob) => {
-          if (cachedBlob && get().currentTrack?.id === track.id) {
-            const cur = audio.currentTime;
-            if (!audio.src.startsWith('blob:') && cur < 8) {
-              console.log(`[Player] Promoting "${track.title}" from WAN stream to local offline Blob URL`);
-              audio.src = cachedBlob;
-              const applySeek = () => {
-                try { audio.currentTime = cur; } catch (_) {}
-                if (get().isPlaying) audio.play().catch(() => {});
-              };
-              if (audio.readyState >= 1) applySeek();
-              else audio.addEventListener('loadedmetadata', applySeek, { once: true });
-            }
-          }
-        }).catch(() => {});
-      }
-      prewarmQueueBlobUrls(q, idx + 1, 2);
+      prewarmQueueBlobUrls(q, idx + 1, 3);
     },
 
     playTrackLocally: (track, newQueue, index, startTime, autoPlay = true, playlistId) => {
@@ -1258,75 +1226,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audioCtx.resume().catch(() => {});
       }
 
-      const streamUrl = `/api/stream/${track.id}`;
-      const syncBlobUrl = getSynchronousBlobUrl(track.id);
-      const targetSrc = syncBlobUrl || streamUrl;
-      const needsSourceChange = !audio.src.endsWith(targetSrc) && audio.src !== targetSrc;
-      if (needsSourceChange) {
-        audio.src = targetSrc;
-      }
-
-      const applySeek = () => {
-        if (startTime && startTime > 0) {
-          try {
-            audio.currentTime = startTime;
-          } catch (_) {}
-        }
-      };
-
-      if (!needsSourceChange && audio.readyState >= 1) {
-        applySeek();
-      } else {
-        audio.addEventListener('loadedmetadata', applySeek, { once: true });
-      }
-
-      if (autoPlay) {
-        isUserInitiatedPause = false;
-        wasInterruptedByExternalApp = false;
-        releaseAudioKeepalive();
-        requestScreenWakeLock();
-
-        if ((!startTime || startTime <= 0.1) && get().crossfade > 0) {
-          startFadeIn(Math.min(get().crossfade, 2.5));
-        } else {
-          restoreTargetVolume();
-        }
-        const p = audio.play();
-        if (p !== undefined) {
-          p.catch((err) => {
-            console.warn('[Audio play interrupted / autoplay policy]:', err);
-            if (err.name === 'NotAllowedError' && typeof document !== 'undefined' && document.visibilityState === 'visible') {
-              toast.info(tr('Click anywhere to enable audio on this device', 'Нажмите в любом месте для включения звука на этом устройстве'));
-            }
-          });
-        }
-      } else {
-        audio.pause();
-      }
+      startPlaybackForTrack(track, startTime || 0, autoPlay);
 
       updateMediaSession(track);
       useSyncStore.getState().sendPlaybackState();
       scheduleNextTrackPrefetch();
       prefetchRecommendationsIfNeeded();
-
-      if (!syncBlobUrl) {
-        getCachedTrackUrl(track.id).then((cachedBlob) => {
-          if (cachedBlob && get().currentTrack?.id === track.id) {
-            const cur = audio.currentTime;
-            if (!audio.src.startsWith('blob:') && cur < 8) {
-              console.log(`[Player] Promoting "${track.title}" from WAN stream to local offline Blob URL`);
-              audio.src = cachedBlob;
-              const applySeek = () => {
-                try { audio.currentTime = cur; } catch (_) {}
-                if (get().isPlaying) audio.play().catch(() => {});
-              };
-              if (audio.readyState >= 1) applySeek();
-              else audio.addEventListener('loadedmetadata', applySeek, { once: true });
-            }
-          }
-        }).catch(() => {});
-      }
-      prewarmQueueBlobUrls(q, idx + 1, 2);
+      prewarmQueueBlobUrls(q, idx + 1, 3);
     },
 
     stopLocalPlayback: () => {
@@ -1379,52 +1285,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audioCtx.resume().catch(() => {});
       }
 
-      const streamUrl = `/api/stream/${chosenTrack.id}`;
-      const syncBlobUrl = getSynchronousBlobUrl(chosenTrack.id);
-      const targetSrc = syncBlobUrl || streamUrl;
-      if (!audio.src.endsWith(targetSrc) && audio.src !== targetSrc) {
-        audio.src = targetSrc;
-      }
-      audio.currentTime = 0;
+      startPlaybackForTrack(chosenTrack, 0, true);
 
-      if (get().crossfade > 0) {
-        startFadeIn(Math.min(get().crossfade, 2.5));
-      } else {
-        restoreTargetVolume();
-      }
-
-      isUserInitiatedPause = false;
-      wasInterruptedByExternalApp = false;
-      releaseAudioKeepalive();
-      requestScreenWakeLock();
-
-      const p = audio.play();
-      if (p !== undefined) {
-        p.catch((err) => console.warn('[Audio play interrupted]:', err));
-      }
       updateMediaSession(chosenTrack);
       useSyncStore.getState().sendPlaybackState({ currentTime: 0, duration: initialDur, isPlaying: true });
       scheduleNextTrackPrefetch();
       prefetchRecommendationsIfNeeded();
-
-      if (!syncBlobUrl) {
-        getCachedTrackUrl(chosenTrack.id).then((cachedBlob) => {
-          if (cachedBlob && get().currentTrack?.id === chosenTrack.id) {
-            const cur = audio.currentTime;
-            if (!audio.src.startsWith('blob:') && cur < 8) {
-              console.log(`[Player] Promoting "${chosenTrack.title}" from WAN stream to local offline Blob URL`);
-              audio.src = cachedBlob;
-              const applySeek = () => {
-                try { audio.currentTime = cur; } catch (_) {}
-                if (get().isPlaying) audio.play().catch(() => {});
-              };
-              if (audio.readyState >= 1) applySeek();
-              else audio.addEventListener('loadedmetadata', applySeek, { once: true });
-            }
-          }
-        }).catch(() => {});
-      }
-      prewarmQueueBlobUrls(shuffledQueue, 1, 2);
+      prewarmQueueBlobUrls(shuffledQueue, 1, 3);
     },
 
     togglePlay: () => {
@@ -1896,15 +1763,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     setEqGain: (bandIndex: number, gain: number) => {
-      ensureAudioGraph(true);
+      ensureAudioGraph();
       const bands = [...get().eqBands];
       bands[bandIndex] = gain;
-      if (eqFilters[bandIndex] && audioCtx) {
-        eqFilters[bandIndex].gain.setTargetAtTime(gain, audioCtx.currentTime, 0.03);
-      }
+      updateFilterGains(bands);
       try { localStorage.setItem(STORAGE_KEY_EQ_BANDS, JSON.stringify(bands)); } catch (_) {}
       set({ eqBands: bands, eqPreset: 'custom' });
-      updateAudioGraphRouting();
       apiRequest('/user/settings', {
         method: 'PUT',
         body: JSON.stringify({ eqPreset: 'custom', eqBands: JSON.stringify(bands) })
@@ -1915,23 +1779,14 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const preset = EQ_PRESETS[presetId];
       if (!preset) return;
 
-      const isFlat = presetId === 'flat';
-      if (!isFlat) {
-        ensureAudioGraph(true);
-      }
-
+      ensureAudioGraph();
       const bands = [...preset.bands];
-      bands.forEach((g, i) => {
-        if (eqFilters[i] && audioCtx) {
-          eqFilters[i].gain.setTargetAtTime(g, audioCtx.currentTime, 0.03);
-        }
-      });
+      updateFilterGains(bands);
       try {
         localStorage.setItem(STORAGE_KEY_EQ_BANDS, JSON.stringify(bands));
         localStorage.setItem(STORAGE_KEY_EQ_PRESET, presetId);
       } catch (_) {}
       set({ eqBands: bands, eqPreset: presetId });
-      updateAudioGraphRouting();
       apiRequest('/user/settings', {
         method: 'PUT',
         body: JSON.stringify({ eqPreset: presetId, eqBands: JSON.stringify(bands) })
@@ -1939,14 +1794,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     toggleNormalizer: () => {
+      ensureAudioGraph();
       const current = get().isNormalizerEnabled;
       const next = !current;
-      if (next) {
-        ensureAudioGraph(true);
-      }
+      updateNormalizer(next);
       try { localStorage.setItem(STORAGE_KEY_NORMALIZER, String(next)); } catch (_) {}
       set({ isNormalizerEnabled: next });
-      updateAudioGraphRouting();
       apiRequest('/user/settings', {
         method: 'PUT',
         body: JSON.stringify({ isNormalizerEnabled: String(next) })
@@ -2008,7 +1861,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       if (Object.keys(updates).length > 0) {
         set(updates);
-        updateAudioGraphRouting();
+        ensureAudioGraph();
+        if (updates.eqBands) {
+          updateFilterGains(updates.eqBands);
+        }
+        if (updates.isNormalizerEnabled !== undefined) {
+          updateNormalizer(updates.isNormalizerEnabled);
+        }
       }
     },
   };

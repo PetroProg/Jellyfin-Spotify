@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useState } from 'react';
 import { X, SlidersHorizontal, Volume2, Sparkles, RotateCcw } from 'lucide-react';
 import { usePlayerStore, EQ_PRESETS } from '../store/playerStore';
 import { useI18nStore } from '../store/i18nStore';
@@ -10,6 +10,173 @@ const BAND_LABELS = [
   { freq: '3.6 kHz', nameEn: 'Upper Mid', nameRu: 'Верх. средние' },
   { freq: '14 kHz', nameEn: 'Air / Highs', nameRu: 'Воздух / ВЧ' },
 ];
+
+interface VerticalSliderProps {
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  onChange: (value: number) => void;
+  onReset: () => void;
+  label: string;
+  name: string;
+}
+
+const VerticalSlider: React.FC<VerticalSliderProps> = ({
+  value,
+  min,
+  max,
+  step = 0.5,
+  onChange,
+  onReset,
+  label,
+  name,
+}) => {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const calculateValueFromPointer = (clientY: number) => {
+    if (!trackRef.current) return;
+    const rect = trackRef.current.getBoundingClientRect();
+    // Fraction: 0 at bottom (min), 1 at top (max)
+    const fraction = Math.max(0, Math.min(1, (rect.bottom - clientY) / rect.height));
+    const raw = min + fraction * (max - min);
+    const stepped = Math.round(raw / step) * step;
+    const clamped = Math.max(min, Math.min(max, Math.round(stepped * 10) / 10));
+    onChange(clamped);
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch (_) {}
+    setIsDragging(true);
+    calculateValueFromPointer(e.clientY);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging) return;
+    calculateValueFromPointer(e.clientY);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch (_) {}
+    setIsDragging(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowUp' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      onChange(Math.min(max, Math.round((value + (step || 1)) * 10) / 10));
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      onChange(Math.max(min, Math.round((value - (step || 1)) * 10) / 10));
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      onReset();
+    }
+  };
+
+  // Normalized percent from bottom (0% to 100%)
+  const percent = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+  const isPositive = value > 0;
+  const isNegative = value < 0;
+
+  return (
+    <div className="flex flex-col items-center select-none flex-1 min-w-0">
+      {/* dB Badge */}
+      <button
+        type="button"
+        onClick={onReset}
+        title="Double tap or click to reset to 0 dB"
+        className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-md transition-colors mb-2 cursor-pointer ${
+          isPositive
+            ? 'text-cat-mauve bg-cat-mauve/15'
+            : isNegative
+            ? 'text-cat-blue bg-cat-blue/15'
+            : 'text-cat-subtext0 bg-cat-surface0/60 hover:text-cat-text'
+        }`}
+      >
+        {value > 0 ? `+${value}` : value} dB
+      </button>
+
+      {/* Slider Interactive Area */}
+      <div
+        role="slider"
+        aria-valuenow={value}
+        aria-valuemin={min}
+        aria-valuemax={max}
+        tabIndex={0}
+        onKeyDown={handleKeyDown}
+        onDoubleClick={onReset}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        className="w-11 sm:w-12 h-36 flex items-center justify-center cursor-pointer touch-none relative group focus:outline-none"
+      >
+        {/* Track rail */}
+        <div
+          ref={trackRef}
+          className="w-2.5 h-28 bg-cat-surface1 rounded-full relative overflow-visible shadow-inner"
+        >
+          {/* Zero dB Center Tick */}
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-[2px] bg-cat-subtext0/50 rounded-full z-10 pointer-events-none" />
+
+          {/* Active Fill from 0 dB Center */}
+          {isPositive && (
+            <div
+              className="absolute left-0 right-0 bg-cat-mauve rounded-t-full transition-all duration-75"
+              style={{
+                bottom: '50%',
+                height: `${percent - 50}%`,
+              }}
+            />
+          )}
+          {isNegative && (
+            <div
+              className="absolute left-0 right-0 bg-cat-blue/80 rounded-b-full transition-all duration-75"
+              style={{
+                top: '50%',
+                height: `${50 - percent}%`,
+              }}
+            />
+          )}
+
+          {/* Thumb / Knob */}
+          <div
+            className={`absolute left-1/2 -translate-x-1/2 w-6 h-6 rounded-full bg-white dark:bg-cat-text border-2 shadow-lg transition-transform pointer-events-none z-20 flex items-center justify-center ${
+              isDragging
+                ? 'scale-110 border-cat-mauve shadow-cat-mauve/40 shadow-md ring-2 ring-cat-mauve/20'
+                : 'border-cat-surface2 group-hover:border-cat-mauve group-hover:scale-105'
+            }`}
+            style={{
+              bottom: `calc(${percent}% - 12px)`,
+            }}
+          >
+            <div className={`w-2 h-2 rounded-full ${isDragging ? 'bg-cat-mauve' : 'bg-cat-surface2'}`} />
+          </div>
+        </div>
+      </div>
+
+      {/* Band Frequency Label */}
+      <span className="text-[10px] font-mono font-bold text-cat-text mt-1">
+        {label}
+      </span>
+
+      {/* Band Name Subtext */}
+      <span className="text-[9px] text-cat-subtext0 text-center leading-tight truncate max-w-full px-0.5">
+        {name}
+      </span>
+    </div>
+  );
+};
 
 export const EqualizerModal: React.FC = () => {
   const { lang, t } = useI18nStore();
@@ -162,7 +329,7 @@ export const EqualizerModal: React.FC = () => {
           </div>
         </div>
 
-        {/* Section 4: 5-Band Equalizer Sliders */}
+        {/* Section 4: 5-Band Equalizer Sliders (Custom Touch-friendly Vertical Sliders) */}
         <div className="mb-5 bg-cat-surface0/30 border border-cat-surface1/20 rounded-2xl p-4">
           <div className="flex items-center justify-between mb-3 px-1">
             <label className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider">
@@ -178,32 +345,21 @@ export const EqualizerModal: React.FC = () => {
             </button>
           </div>
 
-          <div className="grid grid-cols-5 gap-2 items-end pt-2 pb-1">
+          <div className="flex justify-between items-center w-full pt-1 pb-1">
             {BAND_LABELS.map((band, idx) => {
               const val = eqBands[idx] || 0;
               return (
-                <div key={band.freq} className="flex flex-col items-center gap-2">
-                  <span className="text-[10px] font-mono text-cat-mauve font-bold">
-                    {val > 0 ? `+${val}` : val} dB
-                  </span>
-                  <div className="h-32 flex items-center justify-center">
-                    <input
-                      type="range"
-                      min={-12}
-                      max={12}
-                      step={1}
-                      value={val}
-                      onChange={(e) => setEqGain(idx, Number(e.target.value))}
-                      className="h-28 w-2 bg-cat-surface1 rounded-lg appearance-none cursor-pointer accent-cat-mauve -rotate-90 origin-center"
-                    />
-                  </div>
-                  <span className="text-[10px] font-mono font-semibold text-cat-text">
-                    {band.freq}
-                  </span>
-                  <span className="text-[9px] text-cat-subtext0 text-center leading-tight">
-                    {lang === 'en' ? band.nameEn : band.nameRu}
-                  </span>
-                </div>
+                <VerticalSlider
+                  key={band.freq}
+                  value={val}
+                  min={-12}
+                  max={12}
+                  step={0.5}
+                  onChange={(newGain) => setEqGain(idx, newGain)}
+                  onReset={() => setEqGain(idx, 0)}
+                  label={band.freq}
+                  name={lang === 'en' ? band.nameEn : band.nameRu}
+                />
               );
             })}
           </div>

@@ -20,6 +20,69 @@ export interface QueuedDownloadJob {
   usedBackgroundFetch?: boolean;
 }
 
+export const CACHED_TRACK_IDS_KEY = 'jellyfy_cached_track_ids';
+const cachedTrackIdSet = new Set<number>();
+let isCachedTrackIdSetInitialized = false;
+
+export function initCachedTrackIdSet(): Set<number> {
+  if (isCachedTrackIdSetInitialized) return cachedTrackIdSet;
+  if (typeof window === 'undefined') return cachedTrackIdSet;
+
+  try {
+    const raw = localStorage.getItem(CACHED_TRACK_IDS_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        for (const id of arr) cachedTrackIdSet.add(Number(id));
+      }
+    }
+
+    const playlistIds = getOfflinePlaylistIds();
+    for (const pId of playlistIds) {
+      const rawData = localStorage.getItem(`${OFFLINE_PLAYLIST_PREFIX}${pId}`);
+      if (rawData) {
+        try {
+          const parsed = JSON.parse(rawData);
+          if (parsed && Array.isArray(parsed.tracks)) {
+            for (const t of parsed.tracks) {
+              if (t && t.id) cachedTrackIdSet.add(Number(t.id));
+            }
+          }
+        } catch (_) {}
+      }
+    }
+    isCachedTrackIdSetInitialized = true;
+  } catch (err) {
+    console.warn('[Offline] initCachedTrackIdSet error:', err);
+  }
+  return cachedTrackIdSet;
+}
+
+export function addCachedTrackId(trackId: number): void {
+  if (!trackId || typeof window === 'undefined') return;
+  initCachedTrackIdSet();
+  cachedTrackIdSet.add(Number(trackId));
+  try {
+    localStorage.setItem(CACHED_TRACK_IDS_KEY, JSON.stringify(Array.from(cachedTrackIdSet)));
+  } catch (_) {}
+}
+
+export function removeCachedTrackId(trackId: number): void {
+  if (!trackId || typeof window === 'undefined') return;
+  initCachedTrackIdSet();
+  cachedTrackIdSet.delete(Number(trackId));
+  try {
+    localStorage.setItem(CACHED_TRACK_IDS_KEY, JSON.stringify(Array.from(cachedTrackIdSet)));
+  } catch (_) {}
+}
+
+export function isTrackDownloadedLocally(trackId: number): boolean {
+  if (!trackId || typeof window === 'undefined') return false;
+  if (activeBlobUrls.has(trackId)) return true;
+  initCachedTrackIdSet();
+  return cachedTrackIdSet.has(Number(trackId));
+}
+
 export function getSynchronousBlobUrl(trackId: number): string | null {
   return activeBlobUrls.get(trackId) || null;
 }
@@ -165,6 +228,7 @@ export function addTrackToOfflinePlaylist(
       const updatedPlaylist = { ...playlist, track_count: updatedTracks.length };
       saveOfflinePlaylistData(updatedPlaylist, updatedTracks);
     }
+    addCachedTrackId(track.id);
   } catch (err) {
     console.warn(`[Offline] Failed to add track to offline playlist ${playlistId}:`, err);
   }
@@ -177,6 +241,21 @@ export function removeTrackFromOfflinePlaylist(playlistId: number, trackId: numb
     const updatedTracks = existing.tracks.filter((t) => t.id !== trackId);
     const updatedPlaylist = { ...existing.playlist, track_count: updatedTracks.length };
     saveOfflinePlaylistData(updatedPlaylist, updatedTracks);
+
+    // If track is not present in any other downloaded playlist, remove from cached set
+    const allIds = getOfflinePlaylistIds();
+    let stillPresent = false;
+    for (const pId of allIds) {
+      if (pId === playlistId) continue;
+      const otherData = getOfflinePlaylistData(pId);
+      if (otherData?.tracks?.some((t) => t.id === trackId)) {
+        stillPresent = true;
+        break;
+      }
+    }
+    if (!stillPresent) {
+      removeCachedTrackId(trackId);
+    }
   } catch (err) {
     console.warn(`[Offline] Failed to remove track from offline playlist ${playlistId}:`, err);
   }
@@ -326,6 +405,7 @@ export async function getCachedTrackUrl(trackId: number): Promise<string | null>
     const cache = await caches.open(CACHE_NAME);
     const match = await cache.match(`/api/stream/${trackId}`);
     if (match) {
+      addCachedTrackId(trackId);
       const blob = await match.blob();
       if (blob && blob.size > 1024) {
         // Keep up to 6 blob URLs active in memory for seamless queue prebuffering
@@ -411,6 +491,7 @@ export async function cacheTrackOffline(
 
       if (res.ok && (res.status === 200 || res.status === 0)) {
         await cache.put(streamUrl, res);
+        addCachedTrackId(track.id);
 
         // Preload cover art non-blockingly
         if (track.cover_url && !track.cover_url.startsWith('data:')) {
