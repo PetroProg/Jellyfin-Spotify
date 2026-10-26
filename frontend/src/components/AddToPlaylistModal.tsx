@@ -84,7 +84,8 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
 
     try {
       if (activeTrack) {
-        const isNowLiked = await toggleLikeTrack(activeTrack.id, activeTrack);
+        const isCurrentLiked = likedTrackIds.includes(activeTrack.id);
+        const isNowLiked = await toggleLikeTrack(activeTrack.id, activeTrack, !isCurrentLiked);
         if (isNowLiked) {
           const shouldCache = shouldTrackBeCachedOffline(activeTrack.id, -1, [...likedTrackIds, activeTrack.id]);
           if (shouldCache) {
@@ -112,7 +113,11 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
           setActiveTrack(res.track);
           const currentLiked = usePlayerStore.getState().likedTrackIds;
           if (!currentLiked.includes(res.track.id)) {
-            usePlayerStore.setState({ likedTrackIds: [...currentLiked, res.track.id] });
+            const nextLiked = [...currentLiked, res.track.id];
+            usePlayerStore.setState({ likedTrackIds: nextLiked });
+            try {
+              localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(nextLiked));
+            } catch (_) {}
           }
           onSpotifyTrackDownloaded?.(spotifyTrack, res.track);
           onUpdated?.();

@@ -4,6 +4,7 @@ import fs from 'fs';
 import { db } from './db';
 import { refreshJellyfinLibrary } from './jellyfin';
 import { SpotifyTrack, resolveSpotifyTrackDetails, fetchSpotifyPlaylist, resolveDeezerTrackInfo } from './spotify';
+import { broadcastToUser } from './sync';
 
 const MUSIC_DIR = process.env.MUSIC_DIR || path.join(process.cwd(), 'music');
 
@@ -366,6 +367,10 @@ async function runWorkerLoop() {
 
       // Trigger Jellyfin library refresh
       await refreshJellyfinLibrary();
+
+      // Broadcast real-time updates to user's connected devices
+      broadcastToUser(item.userId, { type: 'LIKES_UPDATED' });
+      broadcastToUser(item.userId, { type: 'PLAYLISTS_UPDATED' });
     }
   }
 
@@ -511,6 +516,7 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
     // Already downloaded: link to playlist or liked_tracks
     if (item.isLikedOnly || !playlistId) {
       db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, existing.id);
+      broadcastToUser(item.userId, { type: 'LIKES_UPDATED', trackId: existing.id, liked: true });
     } else {
       db.prepare(`
         INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
@@ -641,6 +647,7 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
 
           if (item.isLikedOnly || !playlistId) {
             db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, trackId);
+            broadcastToUser(item.userId, { type: 'LIKES_UPDATED', trackId, liked: true });
           } else {
             db.prepare(`
               INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
@@ -760,6 +767,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
       if (isLikedOnly || playlistId === -1) {
         if (userId) {
           db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, trackRecord.id);
+          broadcastToUser(userId, { type: 'LIKES_UPDATED', trackId: trackRecord.id, liked: true });
         }
         return;
       }
@@ -774,6 +782,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
       if (playlistRow && (playlistRow.name === 'Любимые треки' || playlistRow.name.toLowerCase() === 'liked songs')) {
         if (userId) {
           db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, trackRecord.id);
+          broadcastToUser(userId, { type: 'LIKES_UPDATED', trackId: trackRecord.id, liked: true });
         }
       }
     };

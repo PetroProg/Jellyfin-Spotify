@@ -280,7 +280,11 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
 
         const currentLiked = usePlayerStore.getState().likedTrackIds;
         if (!currentLiked.includes(res.track.id)) {
-          usePlayerStore.setState({ likedTrackIds: [...currentLiked, res.track.id] });
+          const nextLiked = [...currentLiked, res.track.id];
+          usePlayerStore.setState({ likedTrackIds: nextLiked });
+          try {
+            localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(nextLiked));
+          } catch (_) {}
         }
 
         const shouldCache = shouldTrackBeCachedOffline(res.track.id, -1, [...currentLiked, res.track.id]);
@@ -488,7 +492,8 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                               <button
                                 onClick={() => {
                                   if (st.local_track) {
-                                    toggleLikeTrack(st.local_track.id, st.local_track);
+                                    const isStLiked = likedTrackIds.includes(st.local_track.id);
+                                    toggleLikeTrack(st.local_track.id, st.local_track, !isStLiked);
                                   }
                                 }}
                                 title={st.local_track && likedTrackIds.includes(st.local_track.id) ? t('Remove from Liked', 'Удалить из любимых') : t('Save to Liked Songs', 'В любимые треки')}

@@ -72,7 +72,7 @@ interface PlayerState {
   removeFromQueue: (index: number) => void;
   likedTrackIds: number[];
   loadLikes: () => Promise<void>;
-  toggleLikeTrack: (trackId: number, trackObj?: Track) => Promise<boolean>;
+  toggleLikeTrack: (trackId: number, trackObj?: Track, forceState?: boolean) => Promise<boolean>;
   blacklistTrack: (track: Track) => Promise<void>;
 
   setEqGain: (bandIndex: number, gain: number) => void;
@@ -1643,26 +1643,37 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
     },
 
-    toggleLikeTrack: async (trackId: number, trackObj?: Track) => {
+    toggleLikeTrack: async (trackId: number, trackObj?: Track, forceState?: boolean) => {
       const { likedTrackIds } = get();
       const isCurrentlyLiked = likedTrackIds.includes(trackId);
-      const newLiked = isCurrentlyLiked
-        ? likedTrackIds.filter((id) => id !== trackId)
-        : [...likedTrackIds, trackId];
+      const targetState = forceState !== undefined ? forceState : !isCurrentlyLiked;
+      const newLiked = targetState
+        ? Array.from(new Set([...likedTrackIds, trackId]))
+        : likedTrackIds.filter((id) => id !== trackId);
 
       set({ likedTrackIds: newLiked });
+      try {
+        localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(newLiked));
+      } catch (_) {}
 
       try {
-        const res = await apiRequest<{ liked: boolean }>(`/likes/${trackId}`, { method: 'POST', timeoutMs: 6000 });
-        const updated = res.liked
+        const res = await apiRequest<{ liked: boolean }>(`/likes/${trackId}`, {
+          method: 'POST',
+          body: JSON.stringify({ liked: targetState }),
+          timeoutMs: 6000,
+        });
+        const finalLiked = res.liked;
+        const updated = finalLiked
           ? Array.from(new Set([...get().likedTrackIds, trackId]))
           : get().likedTrackIds.filter((id) => id !== trackId);
         set({ likedTrackIds: updated });
-        localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(updated));
+        try {
+          localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(updated));
+        } catch (_) {}
 
         const targetTrack = trackObj || (get().currentTrack?.id === trackId ? get().currentTrack : get().queue.find((t) => t.id === trackId));
 
-        if (res.liked) {
+        if (finalLiked) {
           if (targetTrack) {
             // Auto-cache track if Liked Songs or any containing playlist is downloaded on this device!
             if (shouldTrackBeCachedOffline(trackId, -1, updated)) {
@@ -1676,9 +1687,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           removeTrackFromOfflinePlaylist(-1, trackId);
         }
 
-        return res.liked;
+        return finalLiked;
       } catch (err) {
         set({ likedTrackIds });
+        try {
+          localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(likedTrackIds));
+        } catch (_) {}
         throw err;
       }
     },

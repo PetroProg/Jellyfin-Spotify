@@ -74,6 +74,13 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       setTracks(loadedTracks);
       localStorage.setItem(CACHED_LIKED_TRACKS_KEY, JSON.stringify(loadedTracks));
 
+      // Synchronize playerStore's likedTrackIds so all UI components, buttons and context menus are in sync
+      const ids = loadedTracks.map((t) => t.id);
+      usePlayerStore.setState({ likedTrackIds: ids });
+      try {
+        localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(ids));
+      } catch (_) {}
+
       const likedPl = {
         id: LIKED_PLAYLIST_ID,
         name: 'Любимые треки',
@@ -91,12 +98,18 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       const offline = getOfflinePlaylistData(LIKED_PLAYLIST_ID);
       if (offline && offline.tracks && offline.tracks.length > 0) {
         setTracks(offline.tracks);
+        const ids = offline.tracks.map((t) => t.id);
+        usePlayerStore.setState({ likedTrackIds: ids });
       } else {
         const raw = localStorage.getItem(CACHED_LIKED_TRACKS_KEY);
         if (raw) {
           try {
             const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed) && parsed.length > 0) setTracks(parsed);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setTracks(parsed);
+              const ids = parsed.map((t: any) => t.id);
+              usePlayerStore.setState({ likedTrackIds: ids });
+            }
           } catch (_) {}
         }
       }
@@ -107,7 +120,13 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
 
   useEffect(() => {
     loadLikes();
-  }, [likedTrackIds]);
+  }, []);
+
+  useEffect(() => {
+    if (likedTrackIds.length !== tracks.length) {
+      loadLikes();
+    }
+  }, [likedTrackIds.length]);
 
   const pollJobs = async () => {
     try {
@@ -400,7 +419,9 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
               key={track.id}
               track={track}
               index={i}
-              onPlay={() => playTrack(track, tracks, i)}
+              playlistName="Любимые треки"
+              isLikedOverride={true}
+              onPlay={() => playTrack(track, tracks, i, LIKED_PLAYLIST_ID)}
               onOpenMenu={(e, t) => setMenuState({ track: t, pos: { x: e.clientX, y: e.clientY } })}
             />
           ))
@@ -411,6 +432,7 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
         <ContextMenu
           track={menuState.track}
           position={menuState.pos}
+          isLikedOverride={true}
           onClose={() => setMenuState(null)}
           onAddToQueue={(t) => addToQueue(t)}
           onAddToPlaylist={(t) => setAddToPlaylistTrack(t)}

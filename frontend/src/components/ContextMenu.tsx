@@ -7,6 +7,7 @@ import { useI18nStore } from '../store/i18nStore';
 interface ContextMenuProps {
   track: Track;
   position: { x: number; y: number };
+  isLikedOverride?: boolean;
   onClose: () => void;
   onAddToQueue: (track: Track) => void;
   onAddToPlaylist?: (track: Track) => void;
@@ -17,6 +18,7 @@ interface ContextMenuProps {
 export const ContextMenu: React.FC<ContextMenuProps> = ({
   track,
   position,
+  isLikedOverride,
   onClose,
   onAddToQueue,
   onAddToPlaylist,
@@ -26,7 +28,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   const menuRef = useRef<HTMLDivElement>(null);
   const { likedTrackIds, toggleLikeTrack } = usePlayerStore();
   const { t } = useI18nStore();
-  const isLiked = likedTrackIds.includes(track.id);
+  const isLiked = isLikedOverride !== undefined ? isLikedOverride : likedTrackIds.includes(track.id);
 
   useEffect(() => {
     const handleOutsideInteraction = (e: MouseEvent | TouchEvent) => {
@@ -107,7 +109,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
         <button
           onClick={() => {
-            toggleLikeTrack(track.id, track);
+            toggleLikeTrack(track.id, track, !isLiked);
             onClose();
           }}
           className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-text hover:bg-cat-surface0 text-left transition-colors"

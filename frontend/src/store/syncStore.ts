@@ -240,6 +240,22 @@ export const useSyncStore = create<SyncState>((set, get) => {
                 break;
               }
 
+              case 'LIKES_UPDATED': {
+                if (data.trackId && typeof data.liked === 'boolean') {
+                  const currentIds = usePlayerStore.getState().likedTrackIds;
+                  const newIds = data.liked
+                    ? Array.from(new Set([...currentIds, data.trackId]))
+                    : currentIds.filter((id) => id !== data.trackId);
+                  usePlayerStore.setState({ likedTrackIds: newIds });
+                  try {
+                    localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(newIds));
+                  } catch (_) {}
+                } else {
+                  usePlayerStore.getState().loadLikes();
+                }
+                break;
+              }
+
               case 'STOP_LOCAL_PLAYBACK': {
                 set({ isLocalActive: false });
                 usePlayerStore.getState().stopLocalPlayback();

@@ -51,7 +51,7 @@ export const FullPlayer: React.FC = () => {
   const handleToggleLike = async () => {
     if (!currentTrack) return;
     try {
-      await toggleLikeTrack(currentTrack.id, currentTrack);
+      await toggleLikeTrack(currentTrack.id, currentTrack, !isLiked);
     } catch (e) {
       console.warn(e);
     }

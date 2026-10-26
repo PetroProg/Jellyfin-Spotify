@@ -8,6 +8,7 @@ interface TrackRowProps {
   track: Track;
   index: number;
   playlistName?: string;
+  isLikedOverride?: boolean;
   onPlay: () => void;
   onOpenMenu: (e: React.MouseEvent, track: Track) => void;
 }
@@ -15,13 +16,15 @@ interface TrackRowProps {
 export const TrackRow: React.FC<TrackRowProps> = ({
   track,
   index,
+  playlistName,
+  isLikedOverride,
   onPlay,
   onOpenMenu,
 }) => {
   const { currentTrack, isPlaying, likedTrackIds, toggleLikeTrack } = usePlayerStore();
   const { lang, t } = useI18nStore();
   const isCurrent = currentTrack?.id === track.id;
-  const isLiked = likedTrackIds.includes(track.id);
+  const isLiked = isLikedOverride !== undefined ? isLikedOverride : likedTrackIds.includes(track.id);
 
   const formatDuration = (ms: number) => {
     const totalSecs = Math.floor(ms / 1000);
@@ -105,13 +108,13 @@ export const TrackRow: React.FC<TrackRowProps> = ({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            toggleLikeTrack(track.id, track);
+            toggleLikeTrack(track.id, track, !isLiked);
           }}
           title={isLiked ? t('Remove from Liked', 'Удалить из любимых') : t('Save to Liked Songs', 'В любимые треки')}
           className={`p-1.5 rounded-lg transition-all cursor-pointer active:scale-95 ${
             isLiked
-              ? 'text-cat-red hover:opacity-80'
-              : 'text-cat-subtext0/60 hover:text-cat-red opacity-0 group-hover:opacity-100 hover:bg-cat-surface1/40'
+              ? 'text-cat-red hover:opacity-80 opacity-100'
+              : 'text-cat-subtext0/60 hover:text-cat-red opacity-40 sm:opacity-0 sm:group-hover:opacity-100 hover:bg-cat-surface1/40'
           }`}
         >
           <Heart className={`w-4 h-4 ${isLiked ? 'fill-current' : ''}`} />

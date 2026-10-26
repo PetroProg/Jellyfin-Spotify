@@ -1144,6 +1144,10 @@ server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenti
 
     const totalCountRow: any = db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(req.user.id);
 
+    if (immediatelyLinked > 0) {
+      broadcastToUser(req.user.id, { type: 'LIKES_UPDATED' });
+    }
+
     if (needDownload.length === 0) {
       return {
         success: true,
@@ -1392,15 +1396,30 @@ server.get('/api/likes', { preHandler: [(server as any).authenticate] }, async (
 
 server.post('/api/likes/:trackId', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const trackId = Number(req.params.trackId);
-  const exists = db.prepare('SELECT 1 FROM liked_tracks WHERE user_id = ? AND track_id = ?').get(req.user.id, trackId);
+  const body = req.body || {};
+  const explicitLiked = typeof body.liked === 'boolean' ? body.liked : null;
+  const exists = !!db.prepare('SELECT 1 FROM liked_tracks WHERE user_id = ? AND track_id = ?').get(req.user.id, trackId);
 
-  if (exists) {
-    db.prepare('DELETE FROM liked_tracks WHERE user_id = ? AND track_id = ?').run(req.user.id, trackId);
-    return { liked: false };
+  let newLikedState: boolean;
+  if (explicitLiked !== null) {
+    newLikedState = explicitLiked;
   } else {
-    db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(req.user.id, trackId);
-    return { liked: true };
+    newLikedState = !exists;
   }
+
+  if (newLikedState) {
+    db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(req.user.id, trackId);
+  } else {
+    db.prepare('DELETE FROM liked_tracks WHERE user_id = ? AND track_id = ?').run(req.user.id, trackId);
+  }
+
+  broadcastToUser(req.user.id, {
+    type: 'LIKES_UPDATED',
+    trackId,
+    liked: newLikedState,
+  });
+
+  return { liked: newLikedState };
 });
 
 // ----------------- BLACKLIST (SETTINGS) -----------------
