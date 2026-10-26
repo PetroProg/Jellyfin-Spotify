@@ -25,7 +25,7 @@ function sanitizeFilename(name: string): string {
 }
 
 export function resolveAudioFilePath(targetDir: string, safeTitle: string): string | null {
-  const extensions = ['.m4a', '.mp3', '.opus', '.webm', '.flac', '.ogg'];
+  const extensions = ['.mp3', '.m4a', '.opus', '.webm', '.flac', '.ogg'];
   for (const ext of extensions) {
     const candidate = path.join(targetDir, `${safeTitle}${ext}`);
     if (fs.existsSync(candidate)) {
@@ -574,10 +574,10 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       '--no-playlist',
       '--extractor-args', 'youtube:player_client=android',
       '--force-overwrites',
-      '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+      '-f', 'bestaudio/best',
       '--extract-audio',
-      '--audio-format', 'm4a',
-      '--audio-quality', '0',
+      '--audio-format', 'mp3',
+      '--audio-quality', '320k',
       '--embed-thumbnail',
       '--add-metadata',
       '-o', outputTemplate,
@@ -602,8 +602,8 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       if (isSettled) return;
 
       if (code === 0) {
-        // Find saved file (.m4a preferred, or .mp3 fallback)
-        const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.m4a`);
+        // Find saved file (.mp3 preferred studio 320k, or format fallback)
+        const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.mp3`);
 
         // Verify audio file validity & duration
         const probe = await probeAudioFile(finalFile, track.duration_ms);
@@ -836,10 +836,10 @@ async function downloadSingleSpotifyTrackDirectInternal(
         '--no-playlist',
         '--extractor-args', 'youtube:player_client=android',
         '--force-overwrites',
-        '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+        '-f', 'bestaudio/best',
         '--extract-audio',
-        '--audio-format', 'm4a',
-        '--audio-quality', '0',
+        '--audio-format', 'mp3',
+        '--audio-quality', '320k',
         '--embed-thumbnail',
         '--add-metadata',
         '-o', outputTemplate,
@@ -871,7 +871,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
       return { success: false, error: 'Не удалось скачать аудиофайл с YouTube' };
     }
 
-    const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.m4a`);
+    const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.mp3`);
 
     // Verify audio file
     const probe = await probeAudioFile(finalFile, track.duration_ms);
@@ -1020,10 +1020,10 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
             '--extractor-args', 'youtube:player_client=android',
             '--force-overwrites',
             '--no-continue',
-            '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+            '-f', 'bestaudio/best',
             '--extract-audio',
-            '--audio-format', 'm4a',
-            '--audio-quality', '0',
+            '--audio-format', 'mp3',
+            '--audio-quality', '320k',
             '--embed-thumbnail',
             '--add-metadata',
             '-o', tempOutputTemplate,

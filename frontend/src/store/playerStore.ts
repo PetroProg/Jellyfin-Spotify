@@ -22,12 +22,12 @@ export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
 export const EQ_PRESETS: Record<string, { label: string; labelEn: string; bands: number[] }> = {
   flat: { label: 'Оригинал (Flat)', labelEn: 'Original (Flat)', bands: [0, 0, 0, 0, 0] },
-  bass: { label: 'Усиление басов', labelEn: 'Bass Boost', bands: [5.5, 4, 0.5, 0, 1] },
-  rock: { label: 'Рок', labelEn: 'Rock', bands: [4, 2, -1, 2.5, 3.5] },
-  pop: { label: 'Поп', labelEn: 'Pop', bands: [-1, 1.5, 3, 2, 2] },
-  vocal: { label: 'Чистый вокал', labelEn: 'Clean Vocal', bands: [-2, 0, 4, 3, 1] },
-  electronic: { label: 'Электроника', labelEn: 'Electronic', bands: [5, 3, 0, 2, 4] },
-  hiphop: { label: 'Хип-хоп', labelEn: 'Hip-Hop', bands: [6, 4.5, 0, 1, 2] },
+  bass: { label: 'Усиление басов', labelEn: 'Bass Boost', bands: [5.5, 3.5, 0, 0.5, 1] },
+  rock: { label: 'Рок', labelEn: 'Rock', bands: [3.5, 2, -0.5, 2, 2.5] },
+  pop: { label: 'Поп', labelEn: 'Pop', bands: [-0.5, 1.5, 2.5, 2, 2] },
+  vocal: { label: 'Чистый вокал', labelEn: 'Clean Vocal', bands: [-1.5, 0, 3.5, 2.5, 1] },
+  electronic: { label: 'Электроника', labelEn: 'Electronic', bands: [5, 3, 0, 2, 2.5] },
+  hiphop: { label: 'Хип-хоп', labelEn: 'Hip-Hop', bands: [6, 4, 0, 1, 1.5] },
 };
 
 interface PlayerState {
@@ -283,9 +283,11 @@ function releaseScreenWakeLock() {
 let isUserInitiatedPause = false;
 let wasInterruptedByExternalApp = false;
 
-// Web Audio API Graph (Clean static serial chain)
+// Web Audio API Graph (Dual-Path Studio Engine: True Bit-Perfect Direct Bypass + Calibrated Studio DSP)
 let audioCtx: AudioContext | null = null;
 let sourceNode: MediaElementAudioSourceNode | null = null;
+let dryGainNode: GainNode | null = null;
+let wetGainNode: GainNode | null = null;
 let preAmpGainNode: GainNode | null = null;
 let eqFilters: BiquadFilterNode[] = [];
 let compressorNode: DynamicsCompressorNode | null = null;
@@ -373,12 +375,27 @@ function startFadeIn(durationSec: number) {
   }, 40);
 }
 
+function updateDspRouting(bands: number[], isNormalizer: boolean) {
+  if (!audioCtx || !dryGainNode || !wetGainNode) return;
+  const isBitPerfect = !isNormalizer && bands.every((b) => b === 0);
+  const now = audioCtx.currentTime;
+
+  if (isBitPerfect) {
+    // Direct dry bypass: 100% clean original signal, zero filters, zero phase delay
+    dryGainNode.gain.setTargetAtTime(1.0, now, 0.02);
+    wetGainNode.gain.setTargetAtTime(0.0, now, 0.02);
+  } else {
+    // Active Studio DSP chain
+    dryGainNode.gain.setTargetAtTime(0.0, now, 0.02);
+    wetGainNode.gain.setTargetAtTime(1.0, now, 0.02);
+  }
+}
+
 function applyHeadroom(bands: number[]) {
   if (!audioCtx || !preAmpGainNode) return;
   const maxBoost = Math.max(0, ...bands);
-  // Gentle headroom: only attenuate by ~35% of max boost up to 2.0 dB maximum.
-  // This preserves powerful punchy bass without cutting overall volume by half or clipping.
-  const headroomDb = maxBoost > 0 ? -Math.min(maxBoost * 0.35, 2.0) : 0;
+  // Gentle headroom: only attenuate by ~25% of max boost up to 1.5 dB max
+  const headroomDb = maxBoost > 0 ? -Math.min(maxBoost * 0.25, 1.5) : 0;
   const preAmpLinear = Math.pow(10, headroomDb / 20);
   preAmpGainNode.gain.setTargetAtTime(preAmpLinear, audioCtx.currentTime, 0.02);
 }
@@ -390,20 +407,24 @@ function updateFilterGains(bands: number[]) {
     eqFilters[i].gain.setTargetAtTime(targetGain, audioCtx.currentTime, 0.02);
   }
   applyHeadroom(bands);
+  const isNorm = usePlayerStore.getState().isNormalizerEnabled;
+  updateDspRouting(bands, isNorm);
 }
 
 function updateNormalizer(enabled: boolean) {
   if (!audioCtx || !compressorNode) return;
   if (enabled) {
-    compressorNode.threshold.setTargetAtTime(-12, audioCtx.currentTime, 0.02);
-    compressorNode.knee.setTargetAtTime(10, audioCtx.currentTime, 0.02);
-    compressorNode.ratio.setTargetAtTime(2.5, audioCtx.currentTime, 0.02);
-    compressorNode.attack.setTargetAtTime(0.02, audioCtx.currentTime, 0.02);
-    compressorNode.release.setTargetAtTime(0.2, audioCtx.currentTime, 0.02);
+    compressorNode.threshold.setTargetAtTime(-14, audioCtx.currentTime, 0.02);
+    compressorNode.knee.setTargetAtTime(12, audioCtx.currentTime, 0.02);
+    compressorNode.ratio.setTargetAtTime(2.0, audioCtx.currentTime, 0.02);
+    compressorNode.attack.setTargetAtTime(0.03, audioCtx.currentTime, 0.02);
+    compressorNode.release.setTargetAtTime(0.25, audioCtx.currentTime, 0.02);
   } else {
     compressorNode.threshold.setTargetAtTime(0, audioCtx.currentTime, 0.02);
     compressorNode.ratio.setTargetAtTime(1, audioCtx.currentTime, 0.02);
   }
+  const bands = usePlayerStore.getState().eqBands;
+  updateDspRouting(bands, enabled);
 }
 
 function ensureAudioGraph() {
@@ -416,11 +437,17 @@ function ensureAudioGraph() {
     sourceNode = audioCtx.createMediaElementSource(audio);
     isAudioGraphAttached = true;
 
-    // 1. Dynamic Headroom Pre-Amplifier
+    // 1. Dry Direct Path (100% Bit-Perfect Bypass, zero filters, zero latency)
+    dryGainNode = audioCtx.createGain();
+
+    // 2. Wet DSP Path (Studio Equalizer + Dynamics Compressor)
+    wetGainNode = audioCtx.createGain();
+
+    // 3. Dynamic Headroom Pre-Amplifier
     preAmpGainNode = audioCtx.createGain();
     preAmpGainNode.gain.value = 1.0;
 
-    // 2. 5-Band Studio Equalizer (60Hz, 230Hz, 910Hz, 3.6kHz, 14kHz)
+    // 4. 5-Band Studio Equalizer (Butterworth Q=0.707 for natural acoustic transition without ringing)
     const savedBands = loadSavedEqBands();
     eqFilters = EQ_FREQUENCIES.map((freq, idx) => {
       const filter = audioCtx!.createBiquadFilter();
@@ -430,46 +457,61 @@ function ensureAudioGraph() {
         filter.type = 'highshelf';
       } else {
         filter.type = 'peaking';
-        filter.Q.value = 1.0;
       }
+      filter.Q.value = 0.707; // Natural Butterworth critical damping
       filter.frequency.value = freq;
       filter.gain.value = savedBands[idx] || 0;
       return filter;
     });
 
-    // 3. Studio Dynamics Compressor (Normalizer)
+    // 5. Studio Dynamics Compressor (Transparent Peak Leveling)
     compressorNode = audioCtx.createDynamicsCompressor();
     const isNorm = loadSavedNormalizer();
     if (isNorm) {
-      compressorNode.threshold.value = -12;
-      compressorNode.knee.value = 10;
-      compressorNode.ratio.value = 2.5;
-      compressorNode.attack.value = 0.02;
-      compressorNode.release.value = 0.2;
+      compressorNode.threshold.value = -14;
+      compressorNode.knee.value = 12;
+      compressorNode.ratio.value = 2.0;
+      compressorNode.attack.value = 0.03; // 30ms preserves drum and vocal punch
+      compressorNode.release.value = 0.25;
     } else {
       compressorNode.threshold.value = 0;
       compressorNode.ratio.value = 1;
     }
 
-    // 4. Smooth Crossfade Gain Node
+    // 6. Smooth Crossfade Gain Node
     fadeGainNode = audioCtx.createGain();
     fadeGainNode.gain.value = 1.0;
 
-    // Connect pristine single-path serial chain ONCE:
-    // sourceNode -> preAmpGainNode -> filter0 -> filter1 -> filter2 -> filter3 -> filter4 -> compressorNode -> fadeGainNode -> destination
-    sourceNode.connect(preAmpGainNode);
-    let lastNode: AudioNode = preAmpGainNode;
+    // Connect dual path:
+    // DRY PATH: sourceNode -> dryGainNode -> fadeGainNode -> destination
+    sourceNode.connect(dryGainNode);
+    dryGainNode.connect(fadeGainNode);
+
+    // WET PATH: sourceNode -> wetGainNode -> preAmp -> [filters] -> compressor -> fadeGainNode -> destination
+    sourceNode.connect(wetGainNode);
+    wetGainNode.connect(preAmpGainNode);
+    let lastWetNode: AudioNode = preAmpGainNode;
     for (const filter of eqFilters) {
-      lastNode.connect(filter);
-      lastNode = filter;
+      lastWetNode.connect(filter);
+      lastWetNode = filter;
     }
-    lastNode.connect(compressorNode);
+    lastWetNode.connect(compressorNode);
     compressorNode.connect(fadeGainNode);
+
+    // Common Output: fadeGainNode -> destination
     fadeGainNode.connect(audioCtx.destination);
 
     applyHeadroom(savedBands);
+    updateDspRouting(savedBands, isNorm);
   } catch (err) {
     console.warn('[Web Audio API Init Error]:', err);
+  }
+}
+
+function checkAndInitAudioGraph() {
+  const isBitPerfect = loadSavedEqPreset() === 'flat' && !loadSavedNormalizer() && loadSavedEqBands().every((b) => b === 0);
+  if (!isBitPerfect) {
+    ensureAudioGraph();
   }
 }
 
@@ -661,7 +703,7 @@ async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true)
     });
 
     if (autoPlay) {
-      ensureAudioGraph();
+      checkAndInitAudioGraph();
       if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
         audioCtx.resume().catch(() => {});
       }
@@ -1182,7 +1224,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         duration: initialDur,
       });
 
-      ensureAudioGraph();
+      checkAndInitAudioGraph();
       if (audioCtx && audioCtx.state === 'suspended') {
         audioCtx.resume().catch(() => {});
       }
@@ -1221,7 +1263,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         duration: initialDur,
       });
 
-      ensureAudioGraph();
+      checkAndInitAudioGraph();
       if (audioCtx && audioCtx.state === 'suspended') {
         audioCtx.resume().catch(() => {});
       }
@@ -1280,7 +1322,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         duration: initialDur,
       });
 
-      ensureAudioGraph();
+      checkAndInitAudioGraph();
       if (audioCtx && audioCtx.state === 'suspended') {
         audioCtx.resume().catch(() => {});
       }
@@ -1324,7 +1366,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         releaseAudioKeepalive();
         requestScreenWakeLock();
 
-        ensureAudioGraph();
+        checkAndInitAudioGraph();
         if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
           audioCtx.resume().catch(() => {});
         }
@@ -1395,7 +1437,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         return;
       }
 
-      ensureAudioGraph();
+      checkAndInitAudioGraph();
       if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
         audioCtx.resume().catch(() => {});
       }
