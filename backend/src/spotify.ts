@@ -405,7 +405,7 @@ export async function resolveSpotifyTrackDetails(trackId: string): Promise<Spoti
   return result;
 }
 
-export async function resolveDeezerTrackInfo(artist: string, title: string): Promise<{ cover_url?: string; album?: string; duration?: number; isrc?: string }> {
+export async function resolveDeezerTrackInfo(artist: string, title: string): Promise<{ cover_url?: string; album?: string; duration?: number; isrc?: string; preview?: string }> {
   try {
     const q = encodeURIComponent(`${artist} ${title}`.trim());
     const res = await fetch(`https://api.deezer.com/search?q=${q}`);
@@ -417,7 +417,8 @@ export async function resolveDeezerTrackInfo(artist: string, title: string): Pro
       cover_url: item.album?.cover_xl || item.album?.cover_big || item.album?.cover_medium,
       album: item.album?.title,
       duration: item.duration,
-      isrc: item.isrc
+      isrc: item.isrc,
+      preview: item.preview || undefined
     };
   } catch {
     return {};

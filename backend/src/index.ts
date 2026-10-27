@@ -20,7 +20,8 @@ import {
   fetchSpotifyLikedSongs,
   fetchSpotifyUserPlaylists,
   parseTrackListText,
-  getUserSpotifyToken
+  getUserSpotifyToken,
+  resolveDeezerTrackInfo
 } from './spotify';
 import { 
   enqueuePlaylistDownload, 
@@ -1372,6 +1373,99 @@ server.post('/api/tracks/download-single', { preHandler: [(server as any).authen
     return reply.status(500).send({ error: result.error || 'Ошибка скачивания трека' });
   }
   return result;
+});
+
+server.post('/api/tracks/play-instant', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const body = req.body || {};
+  const { track } = body;
+  if (!track || !track.title || !track.artist) {
+    return reply.status(400).send({ error: 'Трек не указан или отсутствуют данные' });
+  }
+
+  // 1. Check if track already exists locally in DB
+  const existing: any = db.prepare(`
+    SELECT * FROM tracks 
+    WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+       OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+    LIMIT 1
+  `).get(track.id, track.title, track.artist);
+
+  if (existing && fs.existsSync(existing.file_path)) {
+    return {
+      isExisting: true,
+      isPreview: false,
+      track: existing,
+      streamUrl: `/api/stream/${existing.id}`
+    };
+  }
+
+  // 2. Start background download asynchronously with deduplication
+  const bgPromise = downloadSingleSpotifyTrackDirect(track, req.user.id);
+  bgPromise.then((res) => {
+    if (res.success && res.track) {
+      broadcastToUser(req.user.id, {
+        type: 'INSTANT_TRACK_DOWNLOADED',
+        spotifyId: track.id,
+        track: res.track
+      });
+    }
+  }).catch((err) => {
+    console.warn('[Play Instant Background Download Error]', err.message);
+  });
+
+  // 3. Concurrently get Deezer 30s preview URL (typically resolves in 400-800ms)
+  let previewUrl: string | null = null;
+  let coverUrl = track.cover_url;
+  let albumName = track.album;
+  let durationMs = track.duration_ms;
+
+  try {
+    const dz = await resolveDeezerTrackInfo(track.artist, track.title);
+    if (dz.preview) {
+      previewUrl = dz.preview;
+    }
+    if (dz.cover_url && (!coverUrl || coverUrl.includes('mosaic.scdn.co'))) {
+      coverUrl = dz.cover_url;
+    }
+    if (dz.album && !albumName) {
+      albumName = dz.album;
+    }
+    if (dz.duration && (!durationMs || durationMs <= 0)) {
+      durationMs = dz.duration * 1000;
+    }
+  } catch (_) {}
+
+  // 4. If Deezer preview is available, return immediately!
+  if (previewUrl) {
+    return {
+      isExisting: false,
+      isPreview: true,
+      streamUrl: previewUrl,
+      track: {
+        id: -Date.now(),
+        title: track.title,
+        artist: track.artist,
+        album: albumName || '',
+        duration_ms: durationMs || 180000,
+        cover_url: coverUrl || '',
+        spotify_id: track.id,
+        isPreview: true
+      }
+    };
+  }
+
+  // 5. Fallback if no Deezer preview: wait for background download (~5-8s)
+  const dlRes = await bgPromise;
+  if (dlRes.success && dlRes.track) {
+    return {
+      isExisting: true,
+      isPreview: false,
+      track: dlRes.track,
+      streamUrl: `/api/stream/${dlRes.track.id}`
+    };
+  }
+
+  return reply.status(500).send({ error: dlRes.error || 'Не удалось воспроизвести трек' });
 });
 
 server.post('/api/tracks/upgrade-quality', { preHandler: [(server as any).authenticate] }, async () => {

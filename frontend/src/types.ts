@@ -16,6 +16,8 @@ export interface Track {
   added_at?: string;
   position?: number;
   spotify_id?: string;
+  streamUrl?: string;
+  isPreview?: boolean;
 }
 
 export interface Playlist {

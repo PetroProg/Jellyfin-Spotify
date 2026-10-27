@@ -82,6 +82,7 @@ interface PlayerState {
   resetEqualizer: () => void;
   setCrossfade: (seconds: number) => void;
   applyAccountSettings: (settings: Record<string, string>) => void;
+  handleInstantTrackDownloaded: (spotifyId: string, realTrack: Track) => void;
 }
 
 const STORAGE_KEY_VOLUME = 'jellyfy_player_volume';
@@ -535,7 +536,49 @@ function checkAndInitAudioGraph() {
 }
 
 function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
-  const syncBlobUrl = getSynchronousBlobUrl(track.id);
+  // If track has an explicit streamUrl (e.g. instant streaming from search)
+  if (track.streamUrl) {
+    const applyInstantPlayback = (targetSrc: string) => {
+      const needsChange = !audio.src.endsWith(targetSrc) && audio.src !== targetSrc;
+      if (needsChange) {
+        audio.src = targetSrc;
+      }
+
+      const applySeek = () => {
+        try {
+          if (startTime > 0) audio.currentTime = startTime;
+        } catch (_) {}
+      };
+
+      if (!needsChange && audio.readyState >= 1) {
+        applySeek();
+      } else {
+        audio.addEventListener('loadedmetadata', applySeek, { once: true });
+      }
+
+      if (autoPlay) {
+        isUserInitiatedPause = false;
+        wasInterruptedByExternalApp = false;
+        releaseAudioKeepalive();
+        requestScreenWakeLock();
+        restoreTargetVolume();
+
+        const p = audio.play();
+        if (p !== undefined) {
+          p.catch((err) => {
+            console.warn('[Audio instant play interrupted / autoplay]:', err);
+          });
+        }
+      } else {
+        audio.pause();
+      }
+    };
+
+    applyInstantPlayback(track.streamUrl);
+    return;
+  }
+
+  const syncBlobUrl = track.id > 0 ? getSynchronousBlobUrl(track.id) : null;
   const streamUrl = `/api/stream/${track.id}`;
 
   const applyPlayback = (targetSrc: string) => {
@@ -641,6 +684,7 @@ let isRecoveringStream = false;
 let errorRecoveryTimeout: any = null;
 let stallTimeout: any = null;
 let waitingTimeout: any = null;
+let downloadedInstantTrack: Track | null = null;
 
 /**
  * Resilient stream recovery when network drops, switches from Wi-Fi to LTE,
@@ -946,6 +990,30 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
     }
 
+    // Seamless transition from Deezer preview to full downloaded studio track
+    if (
+      get().currentTrack?.isPreview &&
+      downloadedInstantTrack &&
+      cur >= 25 &&
+      !audio.paused
+    ) {
+      const savedTime = cur;
+      const nextTrack = downloadedInstantTrack;
+      downloadedInstantTrack = null;
+      set({
+        currentTrack: { ...nextTrack, isPreview: false },
+        duration: (nextTrack.duration_ms || 180000) / 1000,
+        queue: [nextTrack]
+      });
+      audio.src = `/api/stream/${nextTrack.id}`;
+      const onReady = () => {
+        try { audio.currentTime = savedTime; } catch (_) {}
+        audio.play().catch(() => {});
+      };
+      if (audio.readyState >= 1) onReady();
+      else audio.addEventListener('loadedmetadata', onReady, { once: true });
+    }
+
     const now = Date.now();
     if (now - lastSyncTime > 1500) {
       lastSyncTime = now;
@@ -968,6 +1036,26 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     cancelFade();
     restoreTargetVolume();
+
+    // If instant preview ended and full track has finished downloading on server
+    if (get().currentTrack?.isPreview && downloadedInstantTrack) {
+      const nextTrack = downloadedInstantTrack;
+      downloadedInstantTrack = null;
+      set({
+        currentTrack: { ...nextTrack, isPreview: false },
+        duration: (nextTrack.duration_ms || 180000) / 1000,
+        queue: [nextTrack]
+      });
+      audio.src = `/api/stream/${nextTrack.id}`;
+      const onReady = () => {
+        try { audio.currentTime = 29; } catch (_) {}
+        audio.play().catch(() => {});
+        isTransitioningTrack = false;
+      };
+      if (audio.readyState >= 1) onReady();
+      else audio.addEventListener('loadedmetadata', onReady, { once: true });
+      return;
+    }
 
     const { repeat, nextTrack } = get();
     if (repeat === 'one') {
@@ -1943,6 +2031,28 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         if (updates.isNormalizerEnabled !== undefined) {
           updateNormalizer(updates.isNormalizerEnabled);
         }
+      }
+    },
+
+    handleInstantTrackDownloaded: (spotifyId: string, realTrack: Track) => {
+      downloadedInstantTrack = realTrack;
+      const { currentTrack } = get();
+      if (
+        currentTrack &&
+        (currentTrack.spotify_id === spotifyId ||
+          currentTrack.id < 0 ||
+          (currentTrack.title.toLowerCase() === realTrack.title.toLowerCase() &&
+            currentTrack.artist.toLowerCase() === realTrack.artist.toLowerCase()))
+      ) {
+        set({
+          currentTrack: {
+            ...realTrack,
+            isPreview: Boolean(currentTrack.isPreview),
+          },
+          duration: (realTrack.duration_ms || 180000) / 1000,
+          queue: [realTrack],
+        });
+        updateMediaSession(realTrack);
       }
     },
   };

@@ -256,6 +256,18 @@ export const useSyncStore = create<SyncState>((set, get) => {
                 break;
               }
 
+              case 'INSTANT_TRACK_DOWNLOADED': {
+                if (data.track && data.spotifyId) {
+                  window.dispatchEvent(
+                    new CustomEvent('jellyfy:instant_track_downloaded', {
+                      detail: { spotifyId: data.spotifyId, track: data.track },
+                    })
+                  );
+                  usePlayerStore.getState().handleInstantTrackDownloaded(data.spotifyId, data.track);
+                }
+                break;
+              }
+
               case 'STOP_LOCAL_PLAYBACK': {
                 set({ isLocalActive: false });
                 usePlayerStore.getState().stopLocalPlayback();

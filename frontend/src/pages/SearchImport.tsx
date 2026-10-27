@@ -55,13 +55,14 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
   const [searching, setSearching] = useState(false);
   const [downloadingTrackId, setDownloadingTrackId] = useState<string | null>(null);
   const [likingTrackId, setLikingTrackId] = useState<string | null>(null);
+  const [instantPlayingId, setInstantPlayingId] = useState<string | null>(null);
 
   // Modals & Menu
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
   const [addToPlaylistSpotify, setAddToPlaylistSpotify] = useState<SpotifySearchResult | null>(null);
 
-  const { playTrack, addToQueue, likedTrackIds, toggleLikeTrack } = usePlayerStore();
+  const { playTrack, addToQueue, likedTrackIds, toggleLikeTrack, currentTrack } = usePlayerStore();
 
   const loadPlaylists = async () => {
     try {
@@ -188,6 +189,76 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
       toast.error(err.message || t('Failed to import track list', 'Ошибка импорта списка треков'));
     } finally {
       setIsImportingList(false);
+    }
+  };
+
+  useEffect(() => {
+    const onInstantDownloaded = (e: any) => {
+      const { spotifyId, track } = e.detail || {};
+      if (spotifyId && track) {
+        setSpotifyResults((prev) =>
+          prev.map((item) =>
+            item.id === spotifyId
+              ? {
+                  ...item,
+                  is_downloaded: true,
+                  local_track_id: track.id,
+                  local_track: track,
+                }
+              : item
+          )
+        );
+        setLocalResults((prev) => [
+          track,
+          ...prev.filter(
+            (t) =>
+              t.id !== track.id &&
+              !(t.title.toLowerCase() === track.title.toLowerCase() && t.artist.toLowerCase() === track.artist.toLowerCase())
+          ),
+        ]);
+        setInstantPlayingId((cur) => (cur === spotifyId ? null : cur));
+      }
+    };
+    window.addEventListener('jellyfy:instant_track_downloaded', onInstantDownloaded);
+    return () => window.removeEventListener('jellyfy:instant_track_downloaded', onInstantDownloaded);
+  }, []);
+
+  const handlePlayInstant = async (st: SpotifySearchResult) => {
+    if (st.is_downloaded && st.local_track) {
+      playTrack(st.local_track, [st.local_track], 0);
+      return;
+    }
+
+    setInstantPlayingId(st.id);
+
+    try {
+      const res = await apiRequest<{
+        isExisting: boolean;
+        isPreview?: boolean;
+        streamUrl: string;
+        track: Track;
+      }>('/tracks/play-instant', {
+        method: 'POST',
+        body: JSON.stringify({ track: st }),
+        timeoutMs: 15000,
+      });
+
+      if (res.track && res.streamUrl) {
+        // Queue contains only this single track as requested
+        playTrack(
+          { ...res.track, streamUrl: res.streamUrl, isPreview: res.isPreview },
+          [{ ...res.track, streamUrl: res.streamUrl, isPreview: res.isPreview }],
+          0
+        );
+
+        if (res.isExisting && !res.isPreview) {
+          handleSpotifyTrackDownloaded(st, res.track);
+          setInstantPlayingId(null);
+        }
+      }
+    } catch (err: any) {
+      toast.error(err.message || t('Failed to play track', 'Не удалось воспроизвести трек'));
+      setInstantPlayingId(null);
     }
   };
 
@@ -457,145 +528,236 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                     </h3>
                   </div>
                   <div className="space-y-2">
-                    {spotifyResults.map((st) => (
-                      <div
-                        key={st.id}
-                        className="bg-cat-mantle p-3 rounded-2xl border border-cat-surface0/60 hover:border-cat-surface1 flex items-center justify-between gap-3 group transition-all"
-                      >
-                        {/* Cover Art & Track Info */}
-                        <div className="flex items-center gap-3 min-w-0 flex-1">
-                          <div className="w-12 h-12 rounded-xl bg-cat-surface0 overflow-hidden flex-shrink-0 flex items-center justify-center border border-cat-surface1/30">
-                            {st.cover_url ? (
-                              <img src={st.cover_url} alt="" className="w-full h-full object-cover" />
-                            ) : (
-                              <Music2 className="w-6 h-6 text-cat-mauve" />
-                            )}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <h4 className="text-sm font-bold text-cat-text truncate">
-                              {st.title}
-                            </h4>
-                            <p className="text-xs text-cat-subtext0 truncate mt-0.5">
-                              {st.artist} {st.album ? `• ${st.album}` : ''}
-                            </p>
-                          </div>
-                        </div>
+                    {spotifyResults.map((st) => {
+                      const isDownloaded = st.is_downloaded && !!st.local_track;
+                      const isPlayingThisInstant = instantPlayingId === st.id;
+                      const isCurrentlyPlaying =
+                        (isDownloaded && currentTrack?.id === st.local_track?.id) ||
+                        (currentTrack?.spotify_id === st.id);
 
-                        {/* Duration & Action Buttons */}
-                        <div className="flex items-center gap-2.5 flex-shrink-0">
-                          <span className="text-[11px] font-mono text-cat-subtext0 hidden xs:inline">
-                            {formatDuration(st.duration_ms)}
-                          </span>
+                      return (
+                        <div
+                          key={st.id}
+                          onClick={() => handlePlayInstant(st)}
+                          className={`p-3 rounded-2xl border transition-all flex items-center justify-between gap-3 group cursor-pointer ${
+                            isCurrentlyPlaying || isPlayingThisInstant
+                              ? 'bg-cat-surface0/90 border-cat-mauve/60 shadow-md ring-1 ring-cat-mauve/30'
+                              : 'bg-cat-mantle border-cat-surface0/60 hover:border-cat-surface1 hover:bg-cat-surface0/40'
+                          }`}
+                        >
+                          {/* Cover Art & Track Info */}
+                          <div className="flex items-center gap-3 min-w-0 flex-1">
+                            <div className="relative w-12 h-12 rounded-xl bg-cat-surface0 overflow-hidden flex-shrink-0 flex items-center justify-center border border-cat-surface1/30 group-hover:shadow-md transition-all">
+                              {st.cover_url ? (
+                                <img src={st.cover_url} alt="" className="w-full h-full object-cover" />
+                              ) : (
+                                <Music2 className="w-6 h-6 text-cat-mauve" />
+                              )}
 
-                          {st.is_downloaded ? (
-                            <div className="flex items-center gap-1.5 sm:gap-2">
-                              <button
-                                onClick={() => {
-                                  if (st.local_track) {
-                                    const isStLiked = likedTrackIds.includes(st.local_track.id);
-                                    toggleLikeTrack(st.local_track.id, st.local_track, !isStLiked);
-                                  }
-                                }}
-                                title={st.local_track && likedTrackIds.includes(st.local_track.id) ? t('Remove from Liked', 'Удалить из любимых') : t('Save to Liked Songs', 'В любимые треки')}
-                                className={`p-2 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 transition-all cursor-pointer active:scale-95 ${
-                                  st.local_track && likedTrackIds.includes(st.local_track.id)
-                                    ? 'text-cat-red'
-                                    : 'text-cat-subtext0 hover:text-cat-red'
+                              {/* Overlay Play / Animated icon on Cover */}
+                              <div
+                                className={`absolute inset-0 bg-black/40 flex items-center justify-center transition-opacity ${
+                                  isCurrentlyPlaying || isPlayingThisInstant
+                                    ? 'opacity-100'
+                                    : 'opacity-0 group-hover:opacity-100'
                                 }`}
                               >
-                                <Heart className={`w-4 h-4 ${st.local_track && likedTrackIds.includes(st.local_track.id) ? 'fill-current' : ''}`} />
-                              </button>
-                              <span className="text-[11px] px-2.5 py-1 rounded-full bg-cat-green/20 text-cat-green font-semibold flex items-center gap-1">
-                                <Check className="w-3.5 h-3.5 stroke-[2.5]" />
-                                <span className="hidden sm:inline">{t('In Library', 'В медиатеке')}</span>
-                              </span>
-                              <button
-                                onClick={() => {
-                                  if (st.local_track) {
-                                    playTrack(st.local_track, [st.local_track], 0);
-                                  }
-                                }}
-                                title={t('Play', 'Слушать')}
-                                className="p-2 rounded-full bg-cat-mauve text-cat-base hover:opacity-95 active:scale-95 transition-all shadow-md cursor-pointer"
-                              >
-                                <Play className="w-4 h-4 fill-current ml-0.5" />
-                              </button>
-                              <button
-                                onClick={() => setAddToPlaylistTrack(st.local_track || null)}
-                                title={t('Add to playlist', 'Добавить в плейлист')}
-                                className="p-2 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-mauve transition-all cursor-pointer active:scale-95"
-                              >
-                                <ListPlus className="w-4 h-4" />
-                              </button>
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-1.5 sm:gap-2">
-                              <button
-                                onClick={() => handleLikeSpotifyTrack(st)}
-                                disabled={likingTrackId === st.id || downloadingTrackId === st.id}
-                                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-red text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
-                                title={t(
-                                  'Add to Liked Songs (track will download automatically)',
-                                  'Добавить в любимые треки (трек скачается автоматически)'
-                                )}
-                              >
-                                {likingTrackId === st.id ? (
-                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-cat-red" />
+                                {isPlayingThisInstant ? (
+                                  <span className="flex gap-0.5 items-end h-3.5 w-3.5 pb-0.5">
+                                    <span className="w-1 bg-white rounded-full animate-bounce [animation-delay:-0.3s] h-full" />
+                                    <span className="w-1 bg-white rounded-full animate-bounce [animation-delay:-0.15s] h-2/3" />
+                                    <span className="w-1 bg-white rounded-full animate-bounce h-4/5" />
+                                  </span>
                                 ) : (
-                                  <Heart className="w-3.5 h-3.5 text-cat-red" />
+                                  <Play className="w-5 h-5 text-white fill-white ml-0.5" />
                                 )}
-                                <span className="hidden xs:inline">{t('To Liked', 'В любимые')}</span>
-                              </button>
-                              <button
-                                onClick={() => setAddToPlaylistSpotify(st)}
-                                disabled={likingTrackId === st.id || downloadingTrackId === st.id}
-                                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-mauve text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
-                                title={t(
-                                  'Add to playlist (track will download automatically)',
-                                  'Добавить в плейлист (трек скачается автоматически)'
-                                )}
-                              >
-                                <ListPlus className="w-3.5 h-3.5 text-cat-mauve" />
-                                <span className="hidden xs:inline">{t('To Playlist', 'В плейлист')}</span>
-                              </button>
-                              <button
-                                onClick={() => handleDownloadSingle(st)}
-                                disabled={likingTrackId === st.id || downloadingTrackId === st.id}
-                                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-mauve/20 hover:bg-cat-mauve text-cat-mauve hover:text-cat-base text-xs font-bold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
-                                title={t('Download to server in high quality', 'Скачать на сервер в высоком качестве')}
-                              >
-                                {downloadingTrackId === st.id ? (
-                                  <>
-                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                    <span className="hidden xs:inline">{t('Downloading...', 'Качается...')}</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Download className="w-3.5 h-3.5" />
-                                    <span>{t('Download', 'Скачать')}</span>
-                                  </>
-                                )}
-                              </button>
+                              </div>
                             </div>
-                          )}
 
-                          {st.local_track && (
-                            <button
-                              onClick={(e) =>
-                                setMenuState({
-                                  track: st.local_track!,
-                                  pos: { x: e.clientX, y: e.clientY }
-                                })
-                              }
-                              title={t('Track actions', 'Действия с треком')}
-                              className="p-1.5 rounded-xl hover:bg-cat-surface0 text-cat-subtext0 hover:text-cat-text transition-colors cursor-pointer"
-                            >
-                              <MoreHorizontal className="w-4 h-4" />
-                            </button>
-                          )}
+                            <div className="min-w-0 flex-1">
+                              <h4
+                                className={`text-sm font-bold truncate ${
+                                  isCurrentlyPlaying || isPlayingThisInstant ? 'text-cat-mauve' : 'text-cat-text'
+                                }`}
+                              >
+                                {st.title}
+                              </h4>
+                              <p className="text-xs text-cat-subtext0 truncate mt-0.5">
+                                {st.artist} {st.album ? `• ${st.album}` : ''}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Duration & Action Buttons */}
+                          <div className="flex items-center gap-2.5 flex-shrink-0">
+                            <span className="text-[11px] font-mono text-cat-subtext0 hidden xs:inline">
+                              {formatDuration(st.duration_ms)}
+                            </span>
+
+                            {isDownloaded ? (
+                              <div className="flex items-center gap-1.5 sm:gap-2">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (st.local_track) {
+                                      const isStLiked = likedTrackIds.includes(st.local_track.id);
+                                      toggleLikeTrack(st.local_track.id, st.local_track, !isStLiked);
+                                    }
+                                  }}
+                                  title={
+                                    st.local_track && likedTrackIds.includes(st.local_track.id)
+                                      ? t('Remove from Liked', 'Удалить из любимых')
+                                      : t('Save to Liked Songs', 'В любимые треки')
+                                  }
+                                  className={`p-2 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 transition-all cursor-pointer active:scale-95 ${
+                                    st.local_track && likedTrackIds.includes(st.local_track.id)
+                                      ? 'text-cat-red'
+                                      : 'text-cat-subtext0 hover:text-cat-red'
+                                  }`}
+                                >
+                                  <Heart
+                                    className={`w-4 h-4 ${
+                                      st.local_track && likedTrackIds.includes(st.local_track.id) ? 'fill-current' : ''
+                                    }`}
+                                  />
+                                </button>
+
+                                <span className="text-[11px] px-2.5 py-1 rounded-full bg-cat-green/20 text-cat-green font-semibold flex items-center gap-1">
+                                  <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                                  <span className="hidden sm:inline">{t('In Library', 'В медиатеке')}</span>
+                                </span>
+
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (st.local_track) {
+                                      playTrack(st.local_track, [st.local_track], 0);
+                                    }
+                                  }}
+                                  title={t('Play', 'Слушать')}
+                                  className="p-2 rounded-full bg-cat-mauve text-cat-base hover:opacity-95 active:scale-95 transition-all shadow-md cursor-pointer"
+                                >
+                                  <Play className="w-4 h-4 fill-current ml-0.5" />
+                                </button>
+
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setAddToPlaylistTrack(st.local_track || null);
+                                  }}
+                                  title={t('Add to playlist', 'Добавить в плейлист')}
+                                  className="p-2 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-mauve transition-all cursor-pointer active:scale-95"
+                                >
+                                  <ListPlus className="w-4 h-4" />
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-1.5 sm:gap-2">
+                                {isPlayingThisInstant ? (
+                                  <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-cat-mauve/20 text-cat-mauve border border-cat-mauve/40 text-xs font-semibold">
+                                    <span className="flex gap-0.5 items-end h-3 w-3 pb-0.5">
+                                      <span className="w-0.5 bg-cat-mauve rounded-full animate-bounce [animation-delay:-0.3s] h-full" />
+                                      <span className="w-0.5 bg-cat-mauve rounded-full animate-bounce [animation-delay:-0.15s] h-2/3" />
+                                      <span className="w-0.5 bg-cat-mauve rounded-full animate-bounce h-4/5" />
+                                    </span>
+                                    <span className="text-[11px] whitespace-nowrap">
+                                      {t('Playing (saving...)', 'Играет (сохраняется в медиатеку...)')}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handlePlayInstant(st);
+                                    }}
+                                    title={t('Play instantly and save to library', 'Слушать сразу и сохранить в медиатеку')}
+                                    className="p-2 rounded-full bg-cat-mauve text-cat-base hover:opacity-95 active:scale-95 transition-all shadow-md cursor-pointer flex-shrink-0"
+                                  >
+                                    <Play className="w-4 h-4 fill-current ml-0.5" />
+                                  </button>
+                                )}
+
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleLikeSpotifyTrack(st);
+                                  }}
+                                  disabled={likingTrackId === st.id || downloadingTrackId === st.id}
+                                  className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-red text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
+                                  title={t(
+                                    'Add to Liked Songs (track will download automatically)',
+                                    'Добавить в любимые треки (трек скачается автоматически)'
+                                  )}
+                                >
+                                  {likingTrackId === st.id ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin text-cat-red" />
+                                  ) : (
+                                    <Heart className="w-3.5 h-3.5 text-cat-red" />
+                                  )}
+                                  <span className="hidden xs:inline">{t('To Liked', 'В любимые')}</span>
+                                </button>
+
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setAddToPlaylistSpotify(st);
+                                  }}
+                                  disabled={likingTrackId === st.id || downloadingTrackId === st.id}
+                                  className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-mauve text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
+                                  title={t(
+                                    'Add to playlist (track will download automatically)',
+                                    'Добавить в плейлист (трек скачается автоматически)'
+                                  )}
+                                >
+                                  <ListPlus className="w-3.5 h-3.5 text-cat-mauve" />
+                                  <span className="hidden xs:inline">{t('To Playlist', 'В плейлист')}</span>
+                                </button>
+
+                                {!isPlayingThisInstant && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDownloadSingle(st);
+                                    }}
+                                    disabled={likingTrackId === st.id || downloadingTrackId === st.id}
+                                    className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-mauve/20 hover:bg-cat-mauve text-cat-mauve hover:text-cat-base text-xs font-bold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
+                                    title={t('Download to server in high quality', 'Скачать на сервер в высоком качестве')}
+                                  >
+                                    {downloadingTrackId === st.id ? (
+                                      <>
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                        <span className="hidden xs:inline">{t('Downloading...', 'Качается...')}</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Download className="w-3.5 h-3.5" />
+                                        <span>{t('Download', 'Скачать')}</span>
+                                      </>
+                                    )}
+                                  </button>
+                                )}
+                              </div>
+                            )}
+
+                            {st.local_track && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setMenuState({
+                                    track: st.local_track!,
+                                    pos: { x: e.clientX, y: e.clientY }
+                                  });
+                                }}
+                                title={t('Track actions', 'Действия с треком')}
+                                className="p-1.5 rounded-xl hover:bg-cat-surface0 text-cat-subtext0 hover:text-cat-text transition-colors cursor-pointer"
+                              >
+                                <MoreHorizontal className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
