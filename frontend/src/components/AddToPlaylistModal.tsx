@@ -70,7 +70,13 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
     setLoading(true);
     try {
       const data = await apiRequest<{ playlists: PlaylistWithStatus[] }>(`/tracks/${tId || 0}/playlists`);
-      setPlaylists(data.playlists || []);
+      const filtered = (data.playlists || []).filter(
+        (p) =>
+          !p.name.toLowerCase().startsWith('daily mix') &&
+          !p.name.toLowerCase().startsWith('ежедневный микс') &&
+          !(p as any).is_daily_mix
+      );
+      setPlaylists(filtered);
     } catch (e) {
       console.warn('[Load playlists error]:', e);
     } finally {

@@ -68,7 +68,13 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
   const loadPlaylists = async () => {
     try {
       const data = await apiRequest<{ playlists: Array<{ id: number; name: string }> }>('/playlists');
-      setPlaylists(data.playlists || []);
+      const filtered = (data.playlists || []).filter(
+        (p) =>
+          !p.name.toLowerCase().startsWith('daily mix') &&
+          !p.name.toLowerCase().startsWith('ежедневный микс') &&
+          !(p as any).is_daily_mix
+      );
+      setPlaylists(filtered);
     } catch (_) {}
   };
 

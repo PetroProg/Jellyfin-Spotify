@@ -785,8 +785,11 @@ server.post('/api/playlists/:id/tracks', { preHandler: [(server as any).authenti
   const trackId = Number(body.trackId);
   if (!trackId) return reply.status(400).send({ error: 'trackId обязателен' });
 
-  const playlist = db.prepare('SELECT id FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
+  const playlist: any = db.prepare('SELECT id, is_daily_mix, name FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
   if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
+  if (playlist.is_daily_mix || playlist.name?.toLowerCase().startsWith('daily mix')) {
+    return reply.status(400).send({ error: 'Нельзя добавлять треки в ежедневный микс' });
+  }
 
   const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
   const nextPos = (maxPosRow?.maxPos !== null && maxPosRow?.maxPos !== undefined) ? maxPosRow.maxPos + 1 : 0;
@@ -807,6 +810,8 @@ server.get('/api/tracks/:id/playlists', { preHandler: [(server as any).authentic
     FROM playlists p
     LEFT JOIN playlist_tracks pt_all ON p.id = pt_all.playlist_id
     WHERE p.user_id = ?
+      AND COALESCE(p.is_daily_mix, 0) = 0
+      AND p.name NOT LIKE 'Daily Mix%'
     GROUP BY p.id
     ORDER BY p.created_at DESC
   `).all(trackId, req.user.id);
