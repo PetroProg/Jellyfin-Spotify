@@ -1,7 +1,8 @@
 import { Playlist, Track } from '../types';
 import { tr, td } from '../store/i18nStore';
 
-export const CACHE_NAME = 'jellyfin-spotify-audio-cache';
+export const CACHE_NAME = 'jellyfin-spotify-audio-cache-v2';
+export const LEGACY_CACHE_NAME = 'jellyfin-spotify-audio-cache';
 export const OFFLINE_PLAYLISTS_KEY = 'offline_playlists_ids';
 export const OFFLINE_PLAYLIST_PREFIX = 'jellyfy_offline_playlist_';
 export const ALL_PLAYLISTS_CACHE_KEY = 'jellyfy_all_playlists_cache';
@@ -20,7 +21,7 @@ export interface QueuedDownloadJob {
   usedBackgroundFetch?: boolean;
 }
 
-export const CACHED_TRACK_IDS_KEY = 'jellyfy_cached_track_ids';
+export const CACHED_TRACK_IDS_KEY = 'jellyfy_cached_track_ids_v2';
 const cachedTrackIdSet = new Set<number>();
 let isCachedTrackIdSetInitialized = false;
 
@@ -34,21 +35,6 @@ export function initCachedTrackIdSet(): Set<number> {
       const arr = JSON.parse(raw);
       if (Array.isArray(arr)) {
         for (const id of arr) cachedTrackIdSet.add(Number(id));
-      }
-    }
-
-    const playlistIds = getOfflinePlaylistIds();
-    for (const pId of playlistIds) {
-      const rawData = localStorage.getItem(`${OFFLINE_PLAYLIST_PREFIX}${pId}`);
-      if (rawData) {
-        try {
-          const parsed = JSON.parse(rawData);
-          if (parsed && Array.isArray(parsed.tracks)) {
-            for (const t of parsed.tracks) {
-              if (t && t.id) cachedTrackIdSet.add(Number(t.id));
-            }
-          }
-        } catch (_) {}
       }
     }
     isCachedTrackIdSetInitialized = true;
@@ -403,8 +389,19 @@ export async function getCachedTrackUrl(trackId: number): Promise<string | null>
 
   try {
     const cache = await caches.open(CACHE_NAME);
-    const match = await cache.match(`/api/stream/${trackId}`);
+    let match = await cache.match(`/api/stream/${trackId}`);
+    // If completely offline and not yet in v2 studio cache, fall back to v1 legacy cache so offline playback never fails
+    if (!match && typeof navigator !== 'undefined' && !navigator.onLine) {
+      const legacyCache = await caches.open(LEGACY_CACHE_NAME);
+      match = await legacyCache.match(`/api/stream/${trackId}`);
+    }
     if (match) {
+      const contentType = match.headers.get('content-type') || '';
+      if (typeof navigator !== 'undefined' && navigator.onLine && contentType.includes('audio/mp4')) {
+        await cache.delete(`/api/stream/${trackId}`).catch(() => {});
+        removeCachedTrackId(trackId);
+        return null;
+      }
       addCachedTrackId(trackId);
       const blob = await match.blob();
       if (blob && blob.size > 1024) {
@@ -439,7 +436,16 @@ export async function isTrackCached(trackId: number): Promise<boolean> {
   try {
     const cache = await caches.open(CACHE_NAME);
     const match = await cache.match(`/api/stream/${trackId}`);
-    return !!match;
+    if (match) {
+      const contentType = match.headers.get('content-type') || '';
+      if (typeof navigator !== 'undefined' && navigator.onLine && contentType.includes('audio/mp4')) {
+        await cache.delete(`/api/stream/${trackId}`).catch(() => {});
+        removeCachedTrackId(trackId);
+        return false;
+      }
+      return true;
+    }
+    return false;
   } catch {
     return false;
   }

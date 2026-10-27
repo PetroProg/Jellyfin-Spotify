@@ -53,6 +53,7 @@ export interface AudioProbeResult {
   valid: boolean;
   durationSec: number;
   bitrateKbps: number;
+  sampleRate?: number;
   isHighQuality: boolean;
   reason?: string;
 }
@@ -73,6 +74,8 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
   return new Promise<AudioProbeResult>((resolve) => {
     const proc = spawn('ffprobe', [
       '-v', 'error',
+      '-select_streams', 'a:0',
+      '-show_entries', 'stream=codec_name,sample_rate,bit_rate',
       '-show_format',
       '-of', 'json',
       filePath
@@ -85,10 +88,13 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
         return resolve({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: 'PROBE_FAILED' });
       }
       try {
-        const data = JSON.parse(stdout)?.format || {};
+        const parsed = JSON.parse(stdout) || {};
+        const data = parsed.format || {};
+        const stream = parsed.streams?.[0] || {};
         const durationSec = parseFloat(data.duration) || 0;
-        const bitrateBps = parseInt(data.bit_rate, 10) || 0;
+        const bitrateBps = parseInt(data.bit_rate || stream.bit_rate, 10) || 0;
         const bitrateKbps = Math.round(bitrateBps / 1000);
+        const sampleRate = parseInt(stream.sample_rate, 10) || 0;
 
         const expectedSec = expectedDurationMs ? expectedDurationMs / 1000 : 0;
         let isTruncated = false;
@@ -102,18 +108,20 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
 
         const ext = path.extname(filePath).toLowerCase();
         const isLossless = ext === '.flac' || ext === '.wav';
-        const isAacOrOpus = ext === '.m4a' || ext === '.aac' || ext === '.opus' || ext === '.ogg';
-        // AAC 110k+ and Opus 110k+ are transparent broadcast masters; legacy MP3 needs 220k+
-        const isLowBitrate = !isLossless && (isAacOrOpus ? bitrateKbps < 110 : bitrateKbps < 220);
+        // Require true 320 kbps 48 kHz studio MP3 (or lossless); flag legacy 128k .m4a and 44.1 kHz Format-18 sources
+        const isLowBitrate = !isLossless && (ext !== '.mp3' || bitrateKbps < 250);
+        const isSuboptimalSampleRate = !isLossless && sampleRate > 0 && sampleRate < 48000;
 
-        if (isTruncated || isLowBitrate) {
+        if (isTruncated || isLowBitrate || isSuboptimalSampleRate) {
           const reasons: string[] = [];
           if (isTruncated) reasons.push(`Обрезан (${Math.round(durationSec)}с вместо ${Math.round(expectedSec)}с)`);
-          if (isLowBitrate) reasons.push(`Низкий битрейт (${bitrateKbps} kbps)`);
+          if (isLowBitrate) reasons.push(`Низкий битрейт/формат (${bitrateKbps} kbps ${ext})`);
+          if (isSuboptimalSampleRate) reasons.push(`Частота дискретизации ${sampleRate} Hz (Format 18 вместо 48000 Hz Opus Master)`);
           return resolve({
             valid: true,
             durationSec,
             bitrateKbps,
+            sampleRate,
             isHighQuality: false,
             reason: reasons.join(', ')
           });
@@ -123,6 +131,7 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
           valid: true,
           durationSec,
           bitrateKbps,
+          sampleRate,
           isHighQuality: true
         });
       } catch (err: any) {
@@ -566,18 +575,18 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       }
     };
 
-    // Launch yt-dlp with pristine studio AAC (m4a) audio quality (Direct Bit-Perfect for Bose Bluetooth)
+    // Launch yt-dlp with Format 251 (48kHz Opus Master) -> 320 kbps 48kHz MP3 with -1.8dB True-Peak headroom
     const ytDlpProcess = spawn('nice', [
       '-n', '19',
       'ionice', '-c', '3',
       'yt-dlp',
       '--no-playlist',
-      '--extractor-args', 'youtube:player_client=android',
       '--force-overwrites',
-      '-f', 'bestaudio/best',
+      '-f', 'bestaudio[acodec=opus]/bestaudio/best',
       '--extract-audio',
       '--audio-format', 'mp3',
       '--audio-quality', '320k',
+      '--postprocessor-args', 'ExtractAudio:-af aresample=resampler=soxr:precision=28,volume=-1.8dB -ar 48000',
       '--embed-thumbnail',
       '--add-metadata',
       '-o', outputTemplate,
@@ -834,12 +843,12 @@ async function downloadSingleSpotifyTrackDirectInternal(
         'ionice', '-c', '3',
         'yt-dlp',
         '--no-playlist',
-        '--extractor-args', 'youtube:player_client=android',
         '--force-overwrites',
-        '-f', 'bestaudio/best',
+        '-f', 'bestaudio[acodec=opus]/bestaudio/best',
         '--extract-audio',
         '--audio-format', 'mp3',
         '--audio-quality', '320k',
+        '--postprocessor-args', 'ExtractAudio:-af aresample=resampler=soxr:precision=28,volume=-1.8dB -ar 48000',
         '--embed-thumbnail',
         '--add-metadata',
         '-o', outputTemplate,
@@ -958,7 +967,15 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
     return { started: false, message: 'Процесс обновления уже выполняется' };
   }
 
-  const allTracks = db.prepare('SELECT id, title, artist, album, duration_ms, file_path, cover_url, spotify_id FROM tracks ORDER BY id ASC').all() as any[];
+  const allTracks = db.prepare(`
+    SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.file_path, t.cover_url, t.spotify_id
+    FROM tracks t
+    ORDER BY
+      CASE WHEN EXISTS (SELECT 1 FROM liked_tracks lt WHERE lt.track_id = t.id)
+             OR EXISTS (SELECT 1 FROM playlist_tracks pt WHERE pt.track_id = t.id)
+           THEN 0 ELSE 1 END ASC,
+      t.id DESC
+  `).all() as any[];
 
   upgradeProgress.isRunning = true;
   upgradeProgress.total = allTracks.length;
@@ -1017,13 +1034,13 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
             'ionice', '-c', '3',
             'yt-dlp',
             '--no-playlist',
-            '--extractor-args', 'youtube:player_client=android',
             '--force-overwrites',
             '--no-continue',
-            '-f', 'bestaudio/best',
+            '-f', 'bestaudio[acodec=opus]/bestaudio/best',
             '--extract-audio',
             '--audio-format', 'mp3',
             '--audio-quality', '320k',
+            '--postprocessor-args', 'ExtractAudio:-af aresample=resampler=soxr:precision=28,volume=-1.8dB -ar 48000',
             '--embed-thumbnail',
             '--add-metadata',
             '-o', tempOutputTemplate,

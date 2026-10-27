@@ -538,7 +538,7 @@ server.get('/api/stream/:trackId', async (req: any, reply: any) => {
   const baseHeaders = {
     'Content-Type': contentType,
     'Accept-Ranges': 'bytes',
-    'Cache-Control': 'public, max-age=31536000, immutable',
+    'Cache-Control': 'no-cache',
     'ETag': etag,
     'Last-Modified': lastModified,
     'Connection': 'keep-alive',

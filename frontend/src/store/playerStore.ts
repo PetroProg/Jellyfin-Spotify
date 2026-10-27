@@ -148,11 +148,14 @@ const loadSavedNormalizer = (): boolean => {
 };
 
 // Global Audio Instance
+// -1.4 dB True-Peak headroom (0.85 linear) prevents inter-sample Gibbs overshoots (> 0 dBFS in decoded MP3s)
+// from hard-clipping the 16-bit DAC or Bluetooth AAC/LDAC/SBC encoder on loud transients
+const MASTER_HEADROOM = 0.85;
 const audio = new Audio();
 audio.preload = 'auto';
 audio.crossOrigin = 'anonymous';
 const initialVolume = loadSavedVolume();
-audio.volume = initialVolume;
+audio.volume = Math.max(0, Math.min(1, initialVolume * MASTER_HEADROOM));
 
 // Crossfade fade controller
 let fadeInterval: any = null;
@@ -164,7 +167,7 @@ let silentAudioUrl: string | null = null;
 function getSilentAudioUrl(): string {
   if (silentAudioUrl) return silentAudioUrl;
   try {
-    const sampleRate = 44100;
+    const sampleRate = 48000;
     const numChannels = 1;
     const bitsPerSample = 16;
     const durationSec = 3; // 3 seconds of solid PCM silence
@@ -297,11 +300,12 @@ let isAudioGraphAttached = false;
 function applyFadeVolume(volFraction: number) {
   const target = usePlayerStore.getState().volume;
   const clampedFraction = Math.max(0, Math.min(1, volFraction));
+  const effectiveTarget = Math.max(0, Math.min(1, target * MASTER_HEADROOM));
   if (audioCtx && fadeGainNode) {
     fadeGainNode.gain.setTargetAtTime(clampedFraction, audioCtx.currentTime, 0.03);
-    audio.volume = target;
+    audio.volume = effectiveTarget;
   } else {
-    audio.volume = Math.max(0, Math.min(1, clampedFraction * target));
+    audio.volume = Math.max(0, Math.min(1, clampedFraction * effectiveTarget));
   }
 }
 
@@ -394,10 +398,35 @@ function updateDspRouting(bands: number[], isNormalizer: boolean) {
 function applyHeadroom(bands: number[]) {
   if (!audioCtx || !preAmpGainNode) return;
   const maxBoost = Math.max(0, ...bands);
-  // Gentle headroom: only attenuate by ~25% of max boost up to 1.5 dB max
-  const headroomDb = maxBoost > 0 ? -Math.min(maxBoost * 0.25, 1.5) : 0;
+  // Account for adjacent low-shelf (60Hz) + peaking (230Hz) filter overlap so bass boosts never clip 0 dBFS
+  const lowOverlap = (bands[0] > 0 && bands[1] > 0) ? Math.min(bands[0], bands[1]) * 0.35 : 0;
+  const headroomDb = maxBoost > 0 ? -Math.min(maxBoost * 0.65 + lowOverlap, 6.0) : 0;
   const preAmpLinear = Math.pow(10, headroomDb / 20);
   preAmpGainNode.gain.setTargetAtTime(preAmpLinear, audioCtx.currentTime, 0.02);
+}
+
+function syncCompressorMode(bands: number[], isNormalizer: boolean) {
+  if (!audioCtx || !compressorNode) return;
+  const now = audioCtx.currentTime;
+  const maxBoost = Math.max(0, ...bands);
+
+  if (isNormalizer) {
+    compressorNode.threshold.setTargetAtTime(-14, now, 0.02);
+    compressorNode.knee.setTargetAtTime(12, now, 0.02);
+    compressorNode.ratio.setTargetAtTime(2.0, now, 0.02);
+    compressorNode.attack.setTargetAtTime(0.03, now, 0.02);
+    compressorNode.release.setTargetAtTime(0.25, now, 0.02);
+  } else if (maxBoost > 0) {
+    // Transparent True-Peak Safety Ceiling when EQ boost is active: prevents bass transients from clipping > 0 dBFS
+    compressorNode.threshold.setTargetAtTime(-2.0, now, 0.02);
+    compressorNode.knee.setTargetAtTime(6.0, now, 0.02);
+    compressorNode.ratio.setTargetAtTime(6.0, now, 0.02);
+    compressorNode.attack.setTargetAtTime(0.02, now, 0.02);
+    compressorNode.release.setTargetAtTime(0.18, now, 0.02);
+  } else {
+    compressorNode.threshold.setTargetAtTime(0, now, 0.02);
+    compressorNode.ratio.setTargetAtTime(1, now, 0.02);
+  }
 }
 
 function updateFilterGains(bands: number[]) {
@@ -408,22 +437,14 @@ function updateFilterGains(bands: number[]) {
   }
   applyHeadroom(bands);
   const isNorm = usePlayerStore.getState().isNormalizerEnabled;
+  syncCompressorMode(bands, isNorm);
   updateDspRouting(bands, isNorm);
 }
 
 function updateNormalizer(enabled: boolean) {
   if (!audioCtx || !compressorNode) return;
-  if (enabled) {
-    compressorNode.threshold.setTargetAtTime(-14, audioCtx.currentTime, 0.02);
-    compressorNode.knee.setTargetAtTime(12, audioCtx.currentTime, 0.02);
-    compressorNode.ratio.setTargetAtTime(2.0, audioCtx.currentTime, 0.02);
-    compressorNode.attack.setTargetAtTime(0.03, audioCtx.currentTime, 0.02);
-    compressorNode.release.setTargetAtTime(0.25, audioCtx.currentTime, 0.02);
-  } else {
-    compressorNode.threshold.setTargetAtTime(0, audioCtx.currentTime, 0.02);
-    compressorNode.ratio.setTargetAtTime(1, audioCtx.currentTime, 0.02);
-  }
   const bands = usePlayerStore.getState().eqBands;
+  syncCompressorMode(bands, enabled);
   updateDspRouting(bands, enabled);
 }
 
@@ -433,7 +454,12 @@ function ensureAudioGraph() {
   try {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     if (!AudioContextClass) return;
-    audioCtx = new AudioContextClass();
+    try {
+      // Use 'playback' latencyHint for a large, jitter-free hardware audio buffer (prevents DSP callback micro-underruns)
+      audioCtx = new AudioContextClass({ latencyHint: 'playback' });
+    } catch (_) {
+      audioCtx = new AudioContextClass();
+    }
     sourceNode = audioCtx.createMediaElementSource(audio);
     isAudioGraphAttached = true;
 
@@ -447,36 +473,28 @@ function ensureAudioGraph() {
     preAmpGainNode = audioCtx.createGain();
     preAmpGainNode.gain.value = 1.0;
 
-    // 4. 5-Band Studio Equalizer (Butterworth Q=0.707 for natural acoustic transition without ringing)
+    // 4. 5-Band Studio Equalizer (Calibrated Q to prevent mud & inter-band phase ringing)
     const savedBands = loadSavedEqBands();
     eqFilters = EQ_FREQUENCIES.map((freq, idx) => {
       const filter = audioCtx!.createBiquadFilter();
       if (idx === 0) {
         filter.type = 'lowshelf';
+        filter.Q.value = 0.707;
       } else if (idx === EQ_FREQUENCIES.length - 1) {
         filter.type = 'highshelf';
+        filter.Q.value = 0.707;
       } else {
         filter.type = 'peaking';
+        filter.Q.value = 0.85;
       }
-      filter.Q.value = 0.707; // Natural Butterworth critical damping
       filter.frequency.value = freq;
       filter.gain.value = savedBands[idx] || 0;
       return filter;
     });
 
-    // 5. Studio Dynamics Compressor (Transparent Peak Leveling)
+    // 5. Studio Dynamics Compressor (Transparent Peak Leveling & Safety Ceiling)
     compressorNode = audioCtx.createDynamicsCompressor();
     const isNorm = loadSavedNormalizer();
-    if (isNorm) {
-      compressorNode.threshold.value = -14;
-      compressorNode.knee.value = 12;
-      compressorNode.ratio.value = 2.0;
-      compressorNode.attack.value = 0.03; // 30ms preserves drum and vocal punch
-      compressorNode.release.value = 0.25;
-    } else {
-      compressorNode.threshold.value = 0;
-      compressorNode.ratio.value = 1;
-    }
 
     // 6. Smooth Crossfade Gain Node
     fadeGainNode = audioCtx.createGain();
@@ -502,6 +520,7 @@ function ensureAudioGraph() {
     fadeGainNode.connect(audioCtx.destination);
 
     applyHeadroom(savedBands);
+    syncCompressorMode(savedBands, isNorm);
     updateDspRouting(savedBands, isNorm);
   } catch (err) {
     console.warn('[Web Audio API Init Error]:', err);
@@ -1590,7 +1609,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     setVolume: (val: number) => {
       const clamped = Math.max(0, Math.min(1, val));
       if (!isFadingIn && !isFadingOut) {
-        audio.volume = clamped;
+        audio.volume = Math.max(0, Math.min(1, clamped * MASTER_HEADROOM));
       }
       localStorage.setItem(STORAGE_KEY_VOLUME, clamped.toString());
       set({ volume: clamped });
