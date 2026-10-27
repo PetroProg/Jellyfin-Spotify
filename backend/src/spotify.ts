@@ -405,24 +405,132 @@ export async function resolveSpotifyTrackDetails(trackId: string): Promise<Spoti
   return result;
 }
 
-export async function resolveDeezerTrackInfo(artist: string, title: string): Promise<{ cover_url?: string; album?: string; duration?: number; isrc?: string; preview?: string }> {
-  try {
-    const q = encodeURIComponent(`${artist} ${title}`.trim());
-    const res = await fetch(`https://api.deezer.com/search?q=${q}`);
-    if (!res.ok) return {};
-    const data: any = await res.json();
-    const item = data.data?.[0];
-    if (!item) return {};
-    return {
-      cover_url: item.album?.cover_xl || item.album?.cover_big || item.album?.cover_medium,
-      album: item.album?.title,
-      duration: item.duration,
-      isrc: item.isrc,
-      preview: item.preview || undefined
-    };
-  } catch {
-    return {};
+export interface DeezerInfoResult {
+  cover_url?: string;
+  album?: string;
+  duration?: number;
+  isrc?: string;
+  preview?: string;
+}
+
+const deezerInfoCache = new Map<string, { data: DeezerInfoResult; expires: number }>();
+
+function generateDeezerCandidateQueries(artist: string, title: string): string[] {
+  const queries: string[] = [];
+
+  const cleanTitle = title
+    .replace(/\s*\((feat\.|ft\.|with|remix|acoustic|radio edit|deluxe|version)[^)]*\)/gi, '')
+    .replace(/\s*\[(feat\.|ft\.|with|remix|acoustic|radio edit|deluxe|version)[^\]]*\]/gi, '')
+    .replace(/\s*\([^)]*\)/g, '')
+    .replace(/\s*\[[^\]]*\]/g, '')
+    .trim() || title;
+
+  const artistParts = artist
+    .split(/,|;|\bfeat\.?\b|\bft\.?\b|\bvs\.?\b|\bwith\b/i)
+    .map(a => a.trim())
+    .filter(Boolean);
+
+  const primaryArtist = artistParts[0] || artist;
+  const firstArtist = primaryArtist.split(/\s+&\s+/)[0]?.trim() || primaryArtist;
+
+  // 1. Primary artist + clean title (e.g. "MiyaGi Untouchable")
+  queries.push(`${primaryArtist} ${cleanTitle}`.trim());
+
+  // 2. First artist + clean title (if primary had &)
+  if (firstArtist !== primaryArtist) {
+    queries.push(`${firstArtist} ${cleanTitle}`.trim());
   }
+
+  // 3. Full artist + clean title
+  if (artist !== primaryArtist) {
+    queries.push(`${artist} ${cleanTitle}`.trim());
+  }
+
+  // 4. Primary artist + full title
+  if (title !== cleanTitle) {
+    queries.push(`${primaryArtist} ${title}`.trim());
+  }
+
+  // 5. Clean title + primary artist
+  queries.push(`${cleanTitle} ${primaryArtist}`.trim());
+
+  // 6. Clean title alone (if distinct enough)
+  if (cleanTitle.length >= 4) {
+    queries.push(cleanTitle);
+  }
+
+  return [...new Set(queries.filter(q => q.length > 0))];
+}
+
+export async function resolveDeezerTrackInfo(artist: string, title: string): Promise<DeezerInfoResult> {
+  const cacheKey = `${artist.toLowerCase()}:::${title.toLowerCase()}`;
+  const cached = deezerInfoCache.get(cacheKey);
+  if (cached && cached.expires > Date.now()) {
+    return cached.data;
+  }
+
+  const queries = generateDeezerCandidateQueries(artist, title);
+
+  const tryQuery = async (query: string): Promise<DeezerInfoResult | null> => {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2500);
+      const res = await fetch(`https://api.deezer.com/search?q=${encodeURIComponent(query)}`, {
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      if (!res.ok) return null;
+      const data: any = await res.json();
+      const items = data.data || [];
+      if (!items.length) return null;
+
+      // Prefer item with preview
+      const itemWithPreview = items.find((it: any) => it.preview) || items[0];
+      if (!itemWithPreview) return null;
+
+      return {
+        cover_url: itemWithPreview.album?.cover_xl || itemWithPreview.album?.cover_big || itemWithPreview.album?.cover_medium,
+        album: itemWithPreview.album?.title,
+        duration: itemWithPreview.duration,
+        isrc: itemWithPreview.isrc,
+        preview: itemWithPreview.preview || undefined
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  // 1. Run top 3 candidates concurrently in parallel (~150-250ms)
+  const batch1 = queries.slice(0, 3);
+  const results1 = await Promise.allSettled(batch1.map(q => tryQuery(q)));
+  for (const r of results1) {
+    if (r.status === 'fulfilled' && r.value?.preview) {
+      deezerInfoCache.set(cacheKey, { data: r.value, expires: Date.now() + 3600000 });
+      return r.value;
+    }
+  }
+
+  // 2. If none had preview, try remaining candidates
+  const batch2 = queries.slice(3, 6);
+  if (batch2.length > 0) {
+    const results2 = await Promise.allSettled(batch2.map(q => tryQuery(q)));
+    for (const r of results2) {
+      if (r.status === 'fulfilled' && r.value?.preview) {
+        deezerInfoCache.set(cacheKey, { data: r.value, expires: Date.now() + 3600000 });
+        return r.value;
+      }
+    }
+  }
+
+  // 3. Fallback: if no preview found anywhere, return best metadata found
+  for (const r of results1) {
+    if (r.status === 'fulfilled' && r.value) {
+      deezerInfoCache.set(cacheKey, { data: r.value, expires: Date.now() + 1800000 });
+      return r.value;
+    }
+  }
+
+  return {};
 }
 
 export async function resolveSpotifyTrackCover(trackId: string): Promise<string | undefined> {

@@ -1435,7 +1435,7 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
     }
   } catch (_) {}
 
-  // 4. If Deezer preview is available, return immediately!
+  // 4. If Deezer preview is available, return immediately (<300ms)!
   if (previewUrl) {
     return {
       isExisting: false,
@@ -1454,18 +1454,37 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
     };
   }
 
-  // 5. Fallback if no Deezer preview: wait for background download (~5-8s)
-  const dlRes = await bgPromise;
-  if (dlRes.success && dlRes.track) {
+  // 5. Fallback if no Deezer preview: check if background download completes within 1.5s
+  const quickResult = await Promise.race([
+    bgPromise,
+    new Promise<{ timeout: true }>((resolve) => setTimeout(() => resolve({ timeout: true }), 1500))
+  ]);
+
+  if ('success' in quickResult && quickResult.success && quickResult.track) {
     return {
       isExisting: true,
       isPreview: false,
-      track: dlRes.track,
-      streamUrl: `/api/stream/${dlRes.track.id}`
+      track: quickResult.track,
+      streamUrl: `/api/stream/${quickResult.track.id}`
     };
   }
 
-  return reply.status(500).send({ error: dlRes.error || 'Не удалось воспроизвести трек' });
+  // 6. Otherwise NEVER block the HTTP connection! Return pending download status immediately
+  return {
+    isExisting: false,
+    isPreview: false,
+    isPendingDownload: true,
+    track: {
+      id: -Date.now(),
+      title: track.title,
+      artist: track.artist,
+      album: albumName || '',
+      duration_ms: durationMs || 180000,
+      cover_url: coverUrl || '',
+      spotify_id: track.id,
+      isPreview: false
+    }
+  };
 });
 
 server.post('/api/tracks/upgrade-quality', { preHandler: [(server as any).authenticate] }, async () => {

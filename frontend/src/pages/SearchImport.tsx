@@ -56,6 +56,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
   const [downloadingTrackId, setDownloadingTrackId] = useState<string | null>(null);
   const [likingTrackId, setLikingTrackId] = useState<string | null>(null);
   const [instantPlayingId, setInstantPlayingId] = useState<string | null>(null);
+  const [pendingPlaySpotifyId, setPendingPlaySpotifyId] = useState<string | null>(null);
 
   // Modals & Menu
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
@@ -217,11 +218,20 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
           ),
         ]);
         setInstantPlayingId((cur) => (cur === spotifyId ? null : cur));
+
+        // If this track was waiting for download to start playing
+        setPendingPlaySpotifyId((cur) => {
+          if (cur === spotifyId) {
+            playTrack(track, [track], 0);
+            return null;
+          }
+          return cur;
+        });
       }
     };
     window.addEventListener('jellyfy:instant_track_downloaded', onInstantDownloaded);
     return () => window.removeEventListener('jellyfy:instant_track_downloaded', onInstantDownloaded);
-  }, []);
+  }, [playTrack]);
 
   const handlePlayInstant = async (st: SpotifySearchResult) => {
     if (st.is_downloaded && st.local_track) {
@@ -230,18 +240,26 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
     }
 
     setInstantPlayingId(st.id);
+    setPendingPlaySpotifyId(null);
 
     try {
       const res = await apiRequest<{
         isExisting: boolean;
         isPreview?: boolean;
-        streamUrl: string;
+        isPendingDownload?: boolean;
+        streamUrl?: string;
         track: Track;
       }>('/tracks/play-instant', {
         method: 'POST',
         body: JSON.stringify({ track: st }),
-        timeoutMs: 15000,
+        timeoutMs: 30000,
       });
+
+      if (res.isPendingDownload) {
+        setPendingPlaySpotifyId(st.id);
+        setInstantPlayingId(null);
+        return;
+      }
 
       if (res.track && res.streamUrl) {
         // Queue contains only this single track as requested
@@ -259,6 +277,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
     } catch (err: any) {
       toast.error(err.message || t('Failed to play track', 'Не удалось воспроизвести трек'));
       setInstantPlayingId(null);
+      setPendingPlaySpotifyId(null);
     }
   };
 
@@ -531,6 +550,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                     {spotifyResults.map((st) => {
                       const isDownloaded = st.is_downloaded && !!st.local_track;
                       const isPlayingThisInstant = instantPlayingId === st.id;
+                      const isPendingThisInstant = pendingPlaySpotifyId === st.id;
                       const isCurrentlyPlaying =
                         (isDownloaded && currentTrack?.id === st.local_track?.id) ||
                         (currentTrack?.spotify_id === st.id);
@@ -540,7 +560,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                           key={st.id}
                           onClick={() => handlePlayInstant(st)}
                           className={`p-3 rounded-2xl border transition-all flex items-center justify-between gap-3 group cursor-pointer ${
-                            isCurrentlyPlaying || isPlayingThisInstant
+                            isCurrentlyPlaying || isPlayingThisInstant || isPendingThisInstant
                               ? 'bg-cat-surface0/90 border-cat-mauve/60 shadow-md ring-1 ring-cat-mauve/30'
                               : 'bg-cat-mantle border-cat-surface0/60 hover:border-cat-surface1 hover:bg-cat-surface0/40'
                           }`}
@@ -557,7 +577,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                               {/* Overlay Play / Animated icon on Cover */}
                               <div
                                 className={`absolute inset-0 bg-black/40 flex items-center justify-center transition-opacity ${
-                                  isCurrentlyPlaying || isPlayingThisInstant
+                                  isCurrentlyPlaying || isPlayingThisInstant || isPendingThisInstant
                                     ? 'opacity-100'
                                     : 'opacity-0 group-hover:opacity-100'
                                 }`}
@@ -568,6 +588,8 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                     <span className="w-1 bg-white rounded-full animate-bounce [animation-delay:-0.15s] h-2/3" />
                                     <span className="w-1 bg-white rounded-full animate-bounce h-4/5" />
                                   </span>
+                                ) : isPendingThisInstant ? (
+                                  <Loader2 className="w-4 h-4 text-white animate-spin" />
                                 ) : (
                                   <Play className="w-5 h-5 text-white fill-white ml-0.5" />
                                 )}
@@ -577,7 +599,9 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                             <div className="min-w-0 flex-1">
                               <h4
                                 className={`text-sm font-bold truncate ${
-                                  isCurrentlyPlaying || isPlayingThisInstant ? 'text-cat-mauve' : 'text-cat-text'
+                                  isCurrentlyPlaying || isPlayingThisInstant || isPendingThisInstant
+                                    ? 'text-cat-mauve'
+                                    : 'text-cat-text'
                                 }`}
                               >
                                 {st.title}
@@ -662,6 +686,13 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                     </span>
                                     <span className="text-[11px] whitespace-nowrap">
                                       {t('Playing (saving...)', 'Играет (сохраняется в медиатеку...)')}
+                                    </span>
+                                  </div>
+                                ) : isPendingThisInstant ? (
+                                  <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-cat-blue/20 text-cat-blue border border-cat-blue/40 text-xs font-semibold">
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin text-cat-blue" />
+                                    <span className="text-[11px] whitespace-nowrap">
+                                      {t('Downloading... (starts automatically)', 'Скачивание... Запустится сразу')}
                                     </span>
                                   </div>
                                 ) : (
