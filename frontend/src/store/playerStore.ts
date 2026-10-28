@@ -201,6 +201,33 @@ function releaseScreenWakeLock() {
 let isUserInitiatedPause = false;
 let wasInterruptedByExternalApp = false;
 
+/**
+ * Checks whether audio playback is currently active.
+ * Used by PWA auto-updater to avoid interrupting listening sessions.
+ */
+export function isPlaybackActive(): boolean {
+  try {
+    const store = usePlayerStore.getState();
+    // 1. Explicit store playback flag
+    if (store.isPlaying) return true;
+
+    // 2. Direct HTMLAudioElement inspection
+    if (typeof audio !== 'undefined' && audio) {
+      if (!audio.paused && !audio.ended && audio.currentTime > 0) return true;
+      if (store.currentTrack && !audio.paused && !audio.ended) return true;
+    }
+
+    // 3. Native MediaSession playback state (for lockscreen / background / Bluetooth playback)
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      if (navigator.mediaSession.playbackState === 'playing') return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // Web Audio API Graph (Dual-Path Studio Engine: True Bit-Perfect Direct Bypass + Calibrated Studio DSP)
 let audioCtx: AudioContext | null = null;
 let sourceNode: MediaElementAudioSourceNode | null = null;

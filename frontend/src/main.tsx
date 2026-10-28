@@ -2,13 +2,22 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { registerSW } from 'virtual:pwa-register';
+import { isPlaybackActive } from './store/playerStore';
 import App from './App';
 import './index.css';
 
-// Instant PWA Auto-update handler: checks for updates on startup, focus, and back online
+// Flag indicating that an update was detected while songs were playing and must be deferred
+let updatePostponed = false;
+
+// PWA update handler: checks for updates on startup, focus, and back online
 const updateSW = registerSW({
   immediate: true,
   onNeedRefresh() {
+    if (isPlaybackActive()) {
+      console.log('[PWA] New version available, but songs are currently playing. Postponing update until browser reload.');
+      updatePostponed = true;
+      return;
+    }
     console.log('[PWA] New version available, reloading to apply updates...');
     updateSW(true);
   },
@@ -41,13 +50,17 @@ const updateSW = registerSW({
 });
 
 // Auto-reload once new service worker takes over clients
+// Suppressed if music is currently playing or if the update was postponed until manual browser reload
 if ('serviceWorker' in navigator) {
   let refreshing = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (!refreshing) {
-      refreshing = true;
-      window.location.reload();
+    if (refreshing) return;
+    if (isPlaybackActive() || updatePostponed) {
+      console.log('[PWA] Service worker updated, but playback is active or update was postponed. Reload suppressed until browser reload.');
+      return;
     }
+    refreshing = true;
+    window.location.reload();
   });
 }
 
