@@ -172,101 +172,6 @@ let fadeInterval: any = null;
 let isFadingIn = false;
 let isFadingOut = false;
 
-let silentAudioUrl: string | null = null;
-
-function getSilentAudioUrl(): string {
-  if (silentAudioUrl) return silentAudioUrl;
-  try {
-    const sampleRate = 48000;
-    const numChannels = 1;
-    const bitsPerSample = 16;
-    const durationSec = 3; // 3 seconds of solid PCM silence
-    const dataSize = durationSec * sampleRate * numChannels * (bitsPerSample / 8);
-    const totalSize = 44 + dataSize;
-    const buffer = new ArrayBuffer(totalSize);
-    const view = new DataView(buffer);
-
-    // "RIFF"
-    view.setUint32(0, 0x52494646, false);
-    view.setUint32(4, 36 + dataSize, true);
-    view.setUint32(8, 0x57415645, false); // "WAVE"
-
-    // "fmt "
-    view.setUint32(12, 0x666d7420, false);
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true); // PCM
-    view.setUint16(22, numChannels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * numChannels * (bitsPerSample / 8), true);
-    view.setUint16(32, numChannels * (bitsPerSample / 8), true);
-    view.setUint16(34, bitsPerSample, true);
-
-    // "data"
-    view.setUint32(36, 0x64617461, false);
-    view.setUint32(40, dataSize, true);
-
-    const blob = new Blob([buffer], { type: 'audio/wav' });
-    silentAudioUrl = URL.createObjectURL(blob);
-    return silentAudioUrl;
-  } catch (_) {
-    return 'data:audio/wav;base64,UklGRjIAAABXQVZFZm10IBIAAAABAAEAQB8AAEAfAAABAAgAAABmYWN0BAAAAAAAAABkYXRhAAAAAA==';
-  }
-}
-
-// Inaudible looping silent audio element to keep Android/Samsung One UI OS audio session alive ONLY when paused
-let keepAliveAudio: HTMLAudioElement | null = null;
-let standbyKeepaliveTimer: any = null;
-const STANDBY_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes graceful standby window on pause
-
-function clearStandbyKeepaliveTimer() {
-  if (standbyKeepaliveTimer) {
-    clearTimeout(standbyKeepaliveTimer);
-    standbyKeepaliveTimer = null;
-  }
-}
-
-function ensureAudioKeepalive() {
-  if (typeof window === 'undefined') return;
-  try {
-    clearStandbyKeepaliveTimer();
-    if (!keepAliveAudio) {
-      keepAliveAudio = new Audio(getSilentAudioUrl());
-      keepAliveAudio.loop = true;
-      keepAliveAudio.volume = 0.001;
-      keepAliveAudio.onended = () => {
-        // Never loop silent audio if main music is playing!
-        if (!usePlayerStore.getState().isPlaying && standbyKeepaliveTimer) {
-          keepAliveAudio?.play().catch(() => {});
-        }
-      };
-    }
-    if (keepAliveAudio.paused && !usePlayerStore.getState().isPlaying) {
-      keepAliveAudio.play().catch(() => {});
-    }
-  } catch (_) {}
-}
-
-function scheduleStandbyKeepalive() {
-  clearStandbyKeepaliveTimer();
-  // Keep silent audio playing only during pause so Android OS maintains active audio focus and lockscreen controls
-  ensureAudioKeepalive();
-  // Hold active for 15 minutes while paused so user can pause in store/conversation without losing headphone resume
-  standbyKeepaliveTimer = setTimeout(() => {
-    console.log('[Audio Keepalive] 15m pause standby grace period expired. Releasing keepalive.');
-    releaseAudioKeepalive();
-  }, STANDBY_TIMEOUT_MS);
-}
-
-function releaseAudioKeepalive() {
-  clearStandbyKeepaliveTimer();
-  if (keepAliveAudio && !keepAliveAudio.paused) {
-    try {
-      keepAliveAudio.pause();
-      keepAliveAudio.currentTime = 0;
-    } catch (_) {}
-  }
-}
-
 // Screen WakeLock to prevent mobile OS from aggressively terminating playback
 let wakeLockSentinel: any = null;
 
@@ -599,7 +504,6 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
       if (autoPlay) {
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
-        releaseAudioKeepalive();
         requestScreenWakeLock();
         restoreTargetVolume();
 
@@ -642,7 +546,6 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
     if (autoPlay) {
       isUserInitiatedPause = false;
       wasInterruptedByExternalApp = false;
-      releaseAudioKeepalive();
       requestScreenWakeLock();
 
       if ((!startTime || startTime <= 0.1) && usePlayerStore.getState().crossfade > 0) {
@@ -699,10 +602,9 @@ const updateMediaPositionState = (cur?: number, dur?: number) => {
     const d = dur ?? usePlayerStore.getState().duration;
     if (d > 0 && isFinite(d) && c >= 0 && isFinite(c)) {
       try {
-        const isPaused = audio.paused || !usePlayerStore.getState().isPlaying;
         navigator.mediaSession.setPositionState({
           duration: Math.max(d, c),
-          playbackRate: isPaused ? 0 : (audio.playbackRate || 1),
+          playbackRate: (audio.playbackRate && audio.playbackRate > 0) ? audio.playbackRate : 1,
           position: Math.min(c, d)
         });
       } catch (_) {}
@@ -863,8 +765,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   audio.onplay = () => {
     isUserInitiatedPause = false;
     wasInterruptedByExternalApp = false;
-    // Release silent keepalive during active playback to eliminate Bluetooth mixer stutter & dropouts
-    releaseAudioKeepalive();
     requestScreenWakeLock();
     set({ isPlaying: true });
     if ('mediaSession' in navigator) {
@@ -896,8 +796,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       wasInterruptedByExternalApp = true;
       console.log('[Audio] External interruption detected (Instagram/phone call/system)');
     }
-    // Always schedule standby keepalive on pause so Android lockscreen and Bluetooth button stay alive
-    scheduleStandbyKeepalive();
 
     set({ isPlaying: false });
     if ('mediaSession' in navigator) {
@@ -1185,7 +1083,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       navigator.mediaSession.setActionHandler('play', () => {
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
-        clearStandbyKeepaliveTimer();
         get().resume();
       });
       navigator.mediaSession.setActionHandler('pause', () => {
@@ -1194,11 +1091,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         get().pause();
       });
       try {
-        navigator.mediaSession.setActionHandler('stop', () => {
-          isUserInitiatedPause = true;
-          wasInterruptedByExternalApp = false;
-          get().pause();
-        });
+        navigator.mediaSession.setActionHandler('stop', null);
       } catch (_) {}
       navigator.mediaSession.setActionHandler('previoustrack', () => get().prevTrack());
       navigator.mediaSession.setActionHandler('nexttrack', () => get().nextTrack());
@@ -1375,7 +1268,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     playTrack: (track, newQueue, index, playlistId) => {
-      clearStandbyKeepaliveTimer();
       const isLocal = useSyncStore.getState().isLocalActive;
 
       let q: Track[];
@@ -1461,7 +1353,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     playTrackLocally: (track, newQueue, index, startTime, autoPlay = true, playlistId) => {
-      clearStandbyKeepaliveTimer();
       let q = newQueue && newQueue.length > 0 ? [...newQueue] : get().queue;
       let idx = index !== undefined && index >= 0 ? index : q.findIndex((t) => t.id === track.id);
 
@@ -1503,12 +1394,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       try {
         audio.pause();
       } catch (_) {}
-      releaseAudioKeepalive();
       releaseScreenWakeLock();
     },
 
     shufflePlay: (tracks: Track[], playlistId?: number | null) => {
-      clearStandbyKeepaliveTimer();
       if (!tracks || tracks.length === 0) return;
 
       const isLocal = useSyncStore.getState().isLocalActive;
@@ -1574,7 +1463,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (isPlaying) {
         isUserInitiatedPause = true;
         wasInterruptedByExternalApp = false;
-        scheduleStandbyKeepalive();
         releaseScreenWakeLock();
         audio.pause();
         set({ isPlaying: false });
@@ -1586,8 +1474,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       } else {
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
-        clearStandbyKeepaliveTimer();
-        releaseAudioKeepalive();
         requestScreenWakeLock();
 
         checkAndInitAudioGraph();
@@ -1623,7 +1509,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       cancelFade();
       isUserInitiatedPause = true;
       wasInterruptedByExternalApp = false;
-      scheduleStandbyKeepalive();
       releaseScreenWakeLock();
 
       const isLocal = useSyncStore.getState().isLocalActive;
@@ -1646,8 +1531,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       isUserInitiatedPause = false;
       wasInterruptedByExternalApp = false;
-      clearStandbyKeepaliveTimer();
-      releaseAudioKeepalive();
       requestScreenWakeLock();
 
       const isLocal = useSyncStore.getState().isLocalActive;
@@ -1761,7 +1644,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       // End of playback
       isTransitioningTrack = false;
       set({ isPlaying: false });
-      releaseAudioKeepalive();
       releaseScreenWakeLock();
       useSyncStore.getState().sendPlaybackState({ isPlaying: false });
     },
