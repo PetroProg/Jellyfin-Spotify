@@ -449,6 +449,36 @@ function updateNormalizer(enabled: boolean) {
   updateDspRouting(bands, enabled);
 }
 
+let audioCtxKeepAliveNode: OscillatorNode | ConstantSourceNode | null = null;
+let audioCtxKeepAliveGain: GainNode | null = null;
+
+function ensureAudioContextKeepAlive() {
+  if (!audioCtx || audioCtxKeepAliveNode) return;
+  try {
+    const ctx = audioCtx as any;
+    if (typeof ctx.createConstantSource === 'function') {
+      const source = ctx.createConstantSource();
+      const gain = ctx.createGain();
+      gain.gain.value = 0.00001; // Inaudible (-100 dB)
+      source.connect(gain);
+      gain.connect(ctx.destination);
+      source.start();
+      audioCtxKeepAliveNode = source;
+      audioCtxKeepAliveGain = gain;
+    } else if (typeof ctx.createOscillator === 'function') {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      gain.gain.value = 0.00001;
+      osc.frequency.value = 20; // 20 Hz
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      audioCtxKeepAliveNode = osc;
+      audioCtxKeepAliveGain = gain;
+    }
+  } catch (_) {}
+}
+
 function ensureAudioGraph() {
   if (isAudioGraphAttached && audioCtx) return;
 
@@ -523,6 +553,7 @@ function ensureAudioGraph() {
     applyHeadroom(savedBands);
     syncCompressorMode(savedBands, isNorm);
     updateDspRouting(savedBands, isNorm);
+    ensureAudioContextKeepAlive();
   } catch (err) {
     console.warn('[Web Audio API Init Error]:', err);
   }
@@ -631,22 +662,13 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
     return;
   }
 
-  // 2. If track is downloaded locally in cache storage: load blob before starting playback!
-  if (isTrackDownloadedLocally(track.id)) {
-    getCachedTrackUrl(track.id).then((blobUrl) => {
-      if (usePlayerStore.getState().currentTrack?.id === track.id) {
-        applyPlayback(blobUrl || streamUrl);
-      }
-    }).catch(() => {
-      if (usePlayerStore.getState().currentTrack?.id === track.id) {
-        applyPlayback(streamUrl);
-      }
-    });
-    return;
-  }
-
-  // 3. Track not downloaded: stream directly from server
+  // 2. Play immediately with streamUrl to maintain audio hardware session without asynchronous delay
   applyPlayback(streamUrl);
+
+  // If track is in local offline cache, pre-warm or load blob in background
+  if (isTrackDownloadedLocally(track.id)) {
+    getCachedTrackUrl(track.id).catch(() => {});
+  }
 }
 
 // Proactive user-gesture unlock and background/interruption recovery
@@ -846,7 +868,20 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     useSyncStore.getState().sendPlaybackState({ isPlaying: true });
   };
 
+  let isTransitioningTrack = false;
+
   audio.onpause = () => {
+    // If the track reached the end or we are currently transitioning to the next track,
+    // this is a natural EOF pause preceding 'ended' event, NOT an external interruption!
+    const cur = audio.currentTime;
+    const dur = audio.duration;
+    const isNaturalEndOfTrack = audio.ended || (dur > 0 && cur >= dur - 0.8) || isTransitioningTrack;
+
+    if (isNaturalEndOfTrack) {
+      // Natural EOF pause preceding track handover: do not release wakeLock or trigger external interruption
+      return;
+    }
+
     releaseScreenWakeLock();
     if (!isUserInitiatedPause && get().currentTrack) {
       wasInterruptedByExternalApp = true;
@@ -866,6 +901,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   let consecutiveErrors = 0;
 
   audio.onerror = () => {
+    isTransitioningTrack = false;
     const err = audio.error;
     const { currentTrack, isPlaying } = get();
     console.warn('[Audio Error Event]: code =', err?.code, 'message =', err?.message, 'track =', currentTrack?.title);
@@ -914,6 +950,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   };
 
   audio.onplaying = () => {
+    isTransitioningTrack = false;
     consecutiveErrors = 0;
     networkRetryCount = 0;
     if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
@@ -1014,6 +1051,29 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       else audio.addEventListener('loadedmetadata', onReady, { once: true });
     }
 
+    // Gapless pre-roll transition: start next track slightly before EOF (0.35s) so the audio decoder never idles out
+    // and OS background audio session doesn't suspend or drop WakeLock.
+    if (
+      !isTransitioningTrack &&
+      !get().currentTrack?.isPreview &&
+      effectiveDur > 3 &&
+      cur >= effectiveDur - 0.35 &&
+      !audio.paused
+    ) {
+      isTransitioningTrack = true;
+      cancelFade();
+      restoreTargetVolume();
+      const { repeat, nextTrack } = get();
+      if (repeat === 'one') {
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
+        isTransitioningTrack = false;
+      } else {
+        nextTrack();
+      }
+      return;
+    }
+
     const now = Date.now();
     if (now - lastSyncTime > 1500) {
       lastSyncTime = now;
@@ -1027,8 +1087,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   audio.onloadedmetadata = handleAudioDuration;
   audio.ondurationchange = handleAudioDuration;
   audio.oncanplay = handleAudioDuration;
-
-  let isTransitioningTrack = false;
 
   audio.onended = () => {
     if (isTransitioningTrack) return;
@@ -1067,9 +1125,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       isTransitioningTrack = false;
     } else {
       nextTrack();
-      setTimeout(() => {
-        isTransitioningTrack = false;
-      }, 600);
     }
   };
 
@@ -1642,6 +1697,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
 
       // End of playback
+      isTransitioningTrack = false;
       set({ isPlaying: false });
       releaseAudioKeepalive();
       releaseScreenWakeLock();
