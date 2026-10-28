@@ -89,8 +89,17 @@ const STORAGE_KEY_VOLUME = 'jellyfy_player_volume';
 const STORAGE_KEY_EQ_BANDS = 'jellyfy_eq_bands';
 const STORAGE_KEY_EQ_PRESET = 'jellyfy_eq_preset';
 const STORAGE_KEY_NORMALIZER = 'jellyfy_normalizer_enabled';
+const STORAGE_KEY_SHUFFLE = 'jellyfy_shuffle';
 const STORAGE_KEY_LIKED_IDS = 'jellyfy_cached_liked_ids';
 const STORAGE_KEY_CROSSFADE = 'jellyfy_crossfade';
+
+const loadSavedShuffle = (): boolean => {
+  try {
+    return localStorage.getItem(STORAGE_KEY_SHUFFLE) === 'true';
+  } catch (_) {
+    return false;
+  }
+};
 
 const loadSavedCrossfade = (): number => {
   try {
@@ -1326,7 +1335,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     queue: [],
     originalQueue: [],
     currentIndex: -1,
-    shuffle: false,
+    shuffle: loadSavedShuffle(),
     smartShuffle: true,
     repeat: 'off',
     volume: initialVolume,
@@ -1339,36 +1348,87 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     crossfade: loadSavedCrossfade(),
 
     updateQueueIfCurrent: (playlistId: number, newTracks: Track[]) => {
-      const { currentPlaylistId, currentTrack, queue } = get();
+      const { currentPlaylistId, currentTrack, queue, originalQueue, shuffle } = get();
       if (currentPlaylistId !== playlistId || !newTracks || newTracks.length <= queue.length) return;
-      const newIdx = currentTrack ? newTracks.findIndex((t) => t.id === currentTrack.id) : 0;
-      set({
-        queue: newTracks,
-        currentIndex: newIdx >= 0 ? newIdx : get().currentIndex,
-      });
+
+      if (shuffle) {
+        const existingIds = new Set(queue.map((t) => t.id));
+        const addedTracks = newTracks.filter((t) => !existingIds.has(t.id));
+        if (addedTracks.length > 0) {
+          for (let i = addedTracks.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [addedTracks[i], addedTracks[j]] = [addedTracks[j], addedTracks[i]];
+          }
+          set({
+            queue: [...queue, ...addedTracks],
+            originalQueue: newTracks,
+          });
+        }
+      } else {
+        const newIdx = currentTrack ? newTracks.findIndex((t) => t.id === currentTrack.id) : 0;
+        set({
+          queue: newTracks,
+          originalQueue: newTracks,
+          currentIndex: newIdx >= 0 ? newIdx : get().currentIndex,
+        });
+      }
     },
 
     playTrack: (track, newQueue, index, playlistId) => {
       clearStandbyKeepaliveTimer();
       const isLocal = useSyncStore.getState().isLocalActive;
+
+      let q: Track[];
+      let idx: number;
+      let orig = newQueue ? [...newQueue] : get().originalQueue;
+
+      if (newQueue && newQueue !== get().queue) {
+        // User started playback from a new list/playlist view
+        if (get().shuffle && newQueue.length > 1) {
+          const clickedIdx = (index !== undefined && index >= 0 && index < newQueue.length && newQueue[index].id === track.id)
+            ? index
+            : newQueue.findIndex((t) => t.id === track.id);
+          const chosenTrack = clickedIdx !== -1 ? newQueue[clickedIdx] : track;
+          const remaining = clickedIdx !== -1
+            ? newQueue.filter((_, i) => i !== clickedIdx)
+            : newQueue.filter((t) => t.id !== track.id);
+
+          for (let i = remaining.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
+          }
+
+          q = [chosenTrack, ...remaining];
+          idx = 0;
+        } else {
+          q = [...newQueue];
+          idx = index !== undefined ? index : q.findIndex((t) => t.id === track.id);
+          if (idx === -1) {
+            q = [track, ...q];
+            idx = 0;
+          }
+        }
+      } else {
+        // Navigating within existing active queue (QueuePanel, nextTrack, prevTrack, etc.)
+        q = get().queue;
+        idx = index !== undefined ? index : q.findIndex((t) => t.id === track.id);
+        if (idx === -1) {
+          q = [track, ...q];
+          idx = 0;
+        }
+      }
+
       if (!isLocal) {
-        useSyncStore.getState().sendRemoteCommand('playTrack', { track, queue: newQueue, index });
+        useSyncStore.getState().sendRemoteCommand('playTrack', { track, queue: q, index: idx });
         set({
           currentTrack: track,
-          queue: newQueue ? [...newQueue] : get().queue,
-          currentIndex: index !== undefined ? index : 0,
+          queue: q,
+          originalQueue: orig,
+          currentIndex: idx,
           currentPlaylistId: playlistId !== undefined ? playlistId : get().currentPlaylistId,
           isPlaying: true,
         });
         return;
-      }
-
-      let q = newQueue ? [...newQueue] : get().queue;
-      let idx = index !== undefined ? index : q.findIndex((t) => t.id === track.id);
-
-      if (idx === -1) {
-        q = [track, ...q];
-        idx = 0;
       }
 
       const initialDur = (track.duration_ms && track.duration_ms > 0)
@@ -1378,7 +1438,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       set({
         currentTrack: track,
         queue: q,
-        originalQueue: newQueue ? [...newQueue] : get().originalQueue,
+        originalQueue: orig,
         currentIndex: idx,
         currentPlaylistId: playlistId !== undefined ? playlistId : get().currentPlaylistId,
         isPlaying: true,
@@ -1483,6 +1543,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         currentTime: 0,
         duration: initialDur,
       });
+
+      localStorage.setItem(STORAGE_KEY_SHUFFLE, 'true');
 
       checkAndInitAudioGraph();
       if (audioCtx && audioCtx.state === 'suspended') {
@@ -1760,25 +1822,31 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     toggleShuffle: () => {
-      const { shuffle, queue, currentTrack } = get();
+      const { shuffle, queue, currentTrack, originalQueue } = get();
       const nextShuffle = !shuffle;
 
       if (nextShuffle) {
+        const orig = (originalQueue && originalQueue.length >= queue.length)
+          ? originalQueue
+          : [...queue];
+
         const withoutCurrent = queue.filter((t) => t.id !== currentTrack?.id);
         for (let i = withoutCurrent.length - 1; i > 0; i--) {
           const j = Math.floor(Math.random() * (i + 1));
           [withoutCurrent[i], withoutCurrent[j]] = [withoutCurrent[j], withoutCurrent[i]];
         }
         const newQueue = currentTrack ? [currentTrack, ...withoutCurrent] : withoutCurrent;
-        set({ shuffle: true, queue: newQueue, currentIndex: currentTrack ? 0 : -1 });
+        set({ shuffle: true, queue: newQueue, originalQueue: orig, currentIndex: currentTrack ? 0 : -1 });
       } else {
-        const orig = get().originalQueue;
+        const orig = (originalQueue && originalQueue.length > 0) ? originalQueue : queue;
         const newIdx = currentTrack ? orig.findIndex((t) => t.id === currentTrack.id) : 0;
         set({ shuffle: false, queue: orig, currentIndex: newIdx !== -1 ? newIdx : 0 });
       }
 
+      localStorage.setItem(STORAGE_KEY_SHUFFLE, String(nextShuffle));
+
       if (useSyncStore.getState().isLocalActive) {
-        useSyncStore.getState().sendPlaybackState();
+        useSyncStore.getState().sendPlaybackState({ shuffle: nextShuffle });
       } else {
         useSyncStore.getState().sendRemoteCommand('toggleShuffle');
       }
