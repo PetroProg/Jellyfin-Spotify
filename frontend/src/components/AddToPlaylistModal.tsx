@@ -74,6 +74,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         (p) =>
           !p.name.toLowerCase().startsWith('daily mix') &&
           !p.name.toLowerCase().startsWith('ежедневный микс') &&
+          !p.name.toLowerCase().startsWith('микс дня') &&
           !(p as any).is_daily_mix
       );
       setPlaylists(filtered);
@@ -113,6 +114,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
             track: spotifyTrack,
             isLikedOnly: true,
           }),
+          timeoutMs: 120000,
         });
 
         if (res.success && res.track) {
@@ -216,6 +218,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
             track: spotifyTrack,
             playlistId: playlist.id,
           }),
+          timeoutMs: 120000,
         });
 
         if (res.success && res.track) {
@@ -289,6 +292,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
               track: spotifyTrack,
               playlistId: res.id,
             }),
+            timeoutMs: 120000,
           });
           if (dlRes.success && dlRes.track) {
             setActiveTrack(dlRes.track);

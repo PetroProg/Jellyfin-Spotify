@@ -72,6 +72,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
         (p) =>
           !p.name.toLowerCase().startsWith('daily mix') &&
           !p.name.toLowerCase().startsWith('ежедневный микс') &&
+          !p.name.toLowerCase().startsWith('микс дня') &&
           !(p as any).is_daily_mix
       );
       setPlaylists(filtered);
@@ -294,7 +295,8 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
     try {
       const res = await apiRequest<{ success: boolean; track: Track }>('/tracks/download-single', {
         method: 'POST',
-        body: JSON.stringify({ track: st })
+        body: JSON.stringify({ track: st }),
+        timeoutMs: 120000,
       });
 
       if (res.success && res.track) {

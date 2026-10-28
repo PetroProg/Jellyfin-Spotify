@@ -49,6 +49,117 @@ export function cleanupPartialFiles(targetDir: string, safeTitle: string) {
   } catch (_) {}
 }
 
+export function isTrackBlacklistedForUser(
+  userId: number,
+  title: string,
+  artist: string,
+  spotifyId?: string
+): boolean {
+  if (!userId || !title) return false;
+  try {
+    const lTitle = title.toLowerCase().trim();
+    const lArtist = (artist || '').toLowerCase().trim();
+    const primaryArtist = lArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
+
+    const cleanTitle = (s: string) =>
+      s
+        .toLowerCase()
+        .replace(/[\(\[][^\)\]]*(feat|ft|with|remix|version|bonus|edit)[^\)\]]*[\)\]]/gi, '')
+        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+        .trim();
+
+    const cTitle = cleanTitle(lTitle);
+
+    const rows: any[] = db.prepare(`
+      SELECT title, artist, spotify_id FROM blacklist WHERE user_id = ?
+    `).all(userId);
+
+    return rows.some((b) => {
+      if (spotifyId && b.spotify_id && b.spotify_id === spotifyId) return true;
+      const bTitle = (b.title || '').toLowerCase().trim();
+      const bArtist = (b.artist || '').toLowerCase().trim();
+      const bPrimary = bArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
+
+      // Artist-wide ban
+      if (bTitle === '*' && (bArtist === lArtist || bArtist === primaryArtist || lArtist.startsWith(bArtist))) {
+        return true;
+      }
+
+      // Check artist match
+      const artistMatches =
+        !bArtist ||
+        bArtist === '*' ||
+        bArtist === lArtist ||
+        bArtist === primaryArtist ||
+        bPrimary === primaryArtist ||
+        lArtist.startsWith(bArtist);
+
+      if (!artistMatches) return false;
+
+      // Exact title match or normalized title match
+      if (bTitle === lTitle) return true;
+      if (cTitle && cleanTitle(bTitle) === cTitle) return true;
+
+      return false;
+    });
+  } catch (err: any) {
+    console.error('[Blacklist Check Error]', err.message);
+    return false;
+  }
+}
+
+export function cancelBlacklistedDownloads(
+  userId: number,
+  title: string,
+  artist: string,
+  spotifyId?: string
+): void {
+  const lTitle = title.toLowerCase().trim();
+  const lArtist = (artist || '').toLowerCase().trim();
+  const primaryArtist = lArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
+
+  const cleanTitle = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[\(\[][^\)\]]*(feat|ft|with|remix|version|bonus|edit)[^\)\]]*[\)\]]/gi, '')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim();
+
+  const cTitle = cleanTitle(lTitle);
+
+  for (let i = queue.length - 1; i >= 0; i--) {
+    const item = queue[i];
+    if (item.userId !== userId) continue;
+
+    if (spotifyId && item.track.id && item.track.id === spotifyId) {
+      queue.splice(i, 1);
+      continue;
+    }
+
+    const itemArtist = (item.track.artist || '').toLowerCase().trim();
+    const itemPrimary = itemArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
+    const artistMatches =
+      !lArtist ||
+      lArtist === '*' ||
+      lArtist === itemArtist ||
+      lArtist === itemPrimary ||
+      primaryArtist === itemPrimary ||
+      itemArtist.startsWith(lArtist);
+
+    if (!artistMatches) continue;
+
+    if (lTitle === '*') {
+      queue.splice(i, 1);
+      continue;
+    }
+
+    const itemTitle = (item.track.title || '').toLowerCase().trim();
+    if (itemTitle === lTitle || (cTitle && cleanTitle(itemTitle) === cTitle)) {
+      queue.splice(i, 1);
+    }
+  }
+}
+
 export interface AudioProbeResult {
   valid: boolean;
   durationSec: number;
@@ -182,6 +293,10 @@ export function enqueuePlaylistDownload(
   }
 
   for (let i = 0; i < tracks.length; i++) {
+    if (isTrackBlacklistedForUser(userId, tracks[i].title, tracks[i].artist, tracks[i].id)) {
+      console.log(`[Downloader] Skipping queued blacklisted track "${tracks[i].artist} - ${tracks[i].title}" for user ${userId}`);
+      continue;
+    }
     const customPos = (tracks[i] as any).position;
     queue.push({
       jobId,
@@ -290,6 +405,11 @@ export async function resumePlaylistDownload(playlistId: number, existingJobId?:
 
     let queuedCount = 0;
     playlistData.tracks.forEach((track) => {
+      if (isTrackBlacklistedForUser(playlist.user_id, track.title, track.artist, track.id)) {
+        console.log(`[Downloader] Skipping resume of blacklisted track "${track.artist} - ${track.title}" for user ${playlist.user_id}`);
+        return;
+      }
+
       const isAlreadyAdded = (track.id && existingTrackSet.has(`sp:${track.id}`)) ||
         existingTrackSet.has(`name:${track.title.toLowerCase().trim()}|${track.artist.toLowerCase().trim()}`);
 
@@ -522,6 +642,12 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       db.prepare('UPDATE tracks SET cover_url = ? WHERE id = ?').run(details.cover_url, existing.id);
     }
 
+    // Check blacklist before linking to playlist or liked_tracks
+    if (isTrackBlacklistedForUser(item.userId, details.title || track.title, details.artist || track.artist, track.id)) {
+      console.log(`[Downloader] Skipping blacklisted existing track "${track.artist} - ${track.title}" for user ${item.userId}`);
+      return;
+    }
+
     // Already downloaded: link to playlist or liked_tracks
     if (item.isLikedOnly || !playlistId) {
       db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, existing.id);
@@ -654,7 +780,9 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
             db.prepare('UPDATE tracks SET duration_ms = ? WHERE id = ?').run(actualDurationMs, trackId);
           }
 
-          if (item.isLikedOnly || !playlistId) {
+          if (isTrackBlacklistedForUser(item.userId, details.title || track.title, details.artist || track.artist, track.id)) {
+            console.log(`[Downloader] Track "${track.artist} - ${track.title}" was blacklisted during download. Skipping playlist link.`);
+          } else if (item.isLikedOnly || !playlistId) {
             db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, trackId);
             broadcastToUser(item.userId, { type: 'LIKES_UPDATED', trackId, liked: true });
           } else {
@@ -706,6 +834,9 @@ export async function downloadSingleSpotifyTrackDirect(
   if (inFlightSingleDownloads.has(downloadKey)) {
     const result = await inFlightSingleDownloads.get(downloadKey)!;
     if (result.success && result.track) {
+      if (userId && isTrackBlacklistedForUser(userId, result.track.title, result.track.artist, result.track.spotify_id || track.id)) {
+        return { ...result, addedToPlaylist: false, liked: false };
+      }
       if (isLikedOnly || playlistId === -1) {
         if (userId) {
           db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, result.track.id);
@@ -773,6 +904,10 @@ async function downloadSingleSpotifyTrackDirectInternal(
     // Helper to attach to playlist or liked tracks
     const attachToPlaylist = (trackRecord: any) => {
       if (!trackRecord?.id) return;
+      if (userId && isTrackBlacklistedForUser(userId, trackRecord.title || track.title, trackRecord.artist || track.artist, trackRecord.spotify_id || track.id)) {
+        console.log(`[Downloader] Skipping attach: track "${track.artist} - ${track.title}" is blacklisted for user ${userId}`);
+        return;
+      }
       if (isLikedOnly || playlistId === -1) {
         if (userId) {
           db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, trackRecord.id);

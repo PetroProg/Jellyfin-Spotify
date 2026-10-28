@@ -29,7 +29,8 @@ import {
   resumePlaylistDownload, 
   downloadSingleSpotifyTrackDirect,
   reDownloadAllTracksInHighQuality,
-  getUpgradeProgress 
+  getUpgradeProgress,
+  cancelBlacklistedDownloads 
 } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
@@ -686,8 +687,17 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
     FROM playlist_tracks pt
     JOIN tracks t ON pt.track_id = t.id
     WHERE pt.playlist_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM blacklist b
+        WHERE b.user_id = ?
+          AND (
+            (b.spotify_id IS NOT NULL AND b.spotify_id != '' AND b.spotify_id = t.spotify_id)
+            OR (LOWER(b.title) = LOWER(t.title) AND (LOWER(b.artist) = LOWER(t.artist) OR LOWER(b.title) = '*'))
+            OR (b.title = '*' AND (LOWER(b.artist) = LOWER(t.artist) OR LOWER(t.artist) LIKE LOWER(b.artist) || '%'))
+          )
+      )
     ORDER BY pt.position ASC
-  `).all(playlistId);
+  `).all(playlistId, req.user.id);
 
   const activeJob: any = db.prepare(`
     SELECT * FROM download_jobs
@@ -775,7 +785,33 @@ server.delete('/api/playlists/:id', { preHandler: [(server as any).authenticate]
 });
 
 server.delete('/api/playlists/:id/tracks/:trackId', { preHandler: [(server as any).authenticate] }, async (req: any) => {
-  db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').run(req.params.id, req.params.trackId);
+  const playlistId = Number(req.params.id);
+  const trackId = Number(req.params.trackId);
+  db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').run(playlistId, trackId);
+
+  // If this playlist is a Daily Mix, also remove the track from daily_mix_tracks_json
+  const playlist: any = db.prepare('SELECT id, daily_mix_tracks_json FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
+  if (playlist?.daily_mix_tracks_json) {
+    try {
+      const trackRow: any = db.prepare('SELECT title, artist, spotify_id FROM tracks WHERE id = ?').get(trackId);
+      if (trackRow) {
+        const dmTracks: any[] = JSON.parse(playlist.daily_mix_tracks_json);
+        const lTitle = (trackRow.title || '').toLowerCase().trim();
+        const lArtist = (trackRow.artist || '').toLowerCase().trim();
+        const filtered = dmTracks.filter((t: any) => {
+          if (trackRow.spotify_id && t.id === trackRow.spotify_id) return false;
+          return !(t.title?.toLowerCase().trim() === lTitle && t.artist?.toLowerCase().trim() === lArtist);
+        });
+        if (filtered.length !== dmTracks.length) {
+          db.prepare('UPDATE playlists SET daily_mix_tracks_json = ? WHERE id = ?').run(
+            JSON.stringify(filtered),
+            playlist.id
+          );
+        }
+      }
+    } catch (_) {}
+  }
+
   return { success: true };
 });
 
@@ -812,6 +848,7 @@ server.get('/api/tracks/:id/playlists', { preHandler: [(server as any).authentic
     WHERE p.user_id = ?
       AND COALESCE(p.is_daily_mix, 0) = 0
       AND p.name NOT LIKE 'Daily Mix%'
+      AND p.name NOT LIKE 'Микс дня%'
     GROUP BY p.id
     ORDER BY p.created_at DESC
   `).all(trackId, req.user.id);
@@ -1507,6 +1544,15 @@ server.get('/api/likes', { preHandler: [(server as any).authenticate] }, async (
     FROM liked_tracks lt
     JOIN tracks t ON lt.track_id = t.id
     WHERE lt.user_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM blacklist b
+        WHERE b.user_id = lt.user_id
+          AND (
+            (b.spotify_id IS NOT NULL AND b.spotify_id != '' AND b.spotify_id = t.spotify_id)
+            OR (LOWER(b.title) = LOWER(t.title) AND (LOWER(b.artist) = LOWER(t.artist) OR LOWER(b.title) = '*'))
+            OR (b.title = '*' AND (LOWER(b.artist) = LOWER(t.artist) OR LOWER(t.artist) LIKE LOWER(b.artist) || '%'))
+          )
+      )
     ORDER BY lt.created_at DESC
   `).all(req.user.id);
   return { tracks };
@@ -1564,14 +1610,20 @@ server.post('/api/blacklist', { preHandler: [(server as any).authenticate] }, as
     `).run(req.user.id, title, artist, spotify_id || '');
   }
 
-  // 2. Remove this track from ALL playlists owned by this user
+  // 2. Immediately cancel in-flight / queued downloads for this track/artist in downloader
+  cancelBlacklistedDownloads(req.user.id, title, artist, spotify_id);
+
+  // 3. Remove this track from ALL playlists owned by this user
   const targetTrackIds: number[] = [];
   if (track_id) {
     targetTrackIds.push(Number(track_id));
   }
-  const matchingTracks: any[] = db.prepare(
-    'SELECT id FROM tracks WHERE LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?)'
-  ).all(title, artist);
+  const matchingTracks: any[] = db.prepare(`
+    SELECT id FROM tracks 
+    WHERE (LOWER(title) = LOWER(?) AND (LOWER(artist) = LOWER(?) OR ? = '*'))
+       OR (? != '' AND spotify_id = ?)
+  `).all(title, artist, title, spotify_id || '', spotify_id || '');
+
   for (const mt of matchingTracks) {
     if (!targetTrackIds.includes(mt.id)) {
       targetTrackIds.push(mt.id);
@@ -1586,6 +1638,37 @@ server.post('/api/blacklist', { preHandler: [(server as any).authenticate] }, as
     `).run(tid, req.user.id);
 
     db.prepare('DELETE FROM liked_tracks WHERE user_id = ? AND track_id = ?').run(req.user.id, tid);
+  }
+
+  // 4. Clean up daily_mix_tracks_json for all Daily Mixes of this user
+  const userDailyMixes: any[] = db.prepare(`
+    SELECT id, daily_mix_tracks_json FROM playlists 
+    WHERE user_id = ? AND (is_daily_mix = 1 OR name LIKE 'Daily Mix%' OR name LIKE 'Микс дня%')
+  `).all(req.user.id);
+
+  const lTitle = title.toLowerCase().trim();
+  const lArtist = artist.toLowerCase().trim();
+  const primaryArtist = lArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
+
+  for (const dm of userDailyMixes) {
+    if (!dm.daily_mix_tracks_json) continue;
+    try {
+      const dmTracks: any[] = JSON.parse(dm.daily_mix_tracks_json);
+      const filtered = dmTracks.filter((t: any) => {
+        if (spotify_id && t.id === spotify_id) return false;
+        const tTitle = (t.title || '').toLowerCase().trim();
+        const tArtist = (t.artist || '').toLowerCase().trim();
+        const matchArtist = tArtist === lArtist || tArtist === primaryArtist || tArtist.startsWith(lArtist);
+        const matchTitle = tTitle === lTitle || lTitle === '*';
+        return !(matchArtist && matchTitle);
+      });
+      if (filtered.length !== dmTracks.length) {
+        db.prepare('UPDATE playlists SET daily_mix_tracks_json = ? WHERE id = ?').run(
+          JSON.stringify(filtered),
+          dm.id
+        );
+      }
+    } catch (_) {}
   }
 
   return { success: true, removedCount: targetTrackIds.length };
