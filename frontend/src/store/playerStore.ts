@@ -172,6 +172,108 @@ let fadeInterval: any = null;
 let isFadingIn = false;
 let isFadingOut = false;
 
+// Silent Audio Anchor to maintain Android AudioFocus & prevent Spotify from hijacking media buttons or OS killing process on pause
+let silentAnchorUrl: string | null = null;
+let silentAnchorAudio: HTMLAudioElement | null = null;
+let standbyTimeoutTimer: any = null;
+const STANDBY_GRACE_PERIOD_MS = 30 * 60 * 1000; // 30 minutes grace period on pause
+
+function getSilentAudioUrl(): string {
+  if (silentAnchorUrl) return silentAnchorUrl;
+  try {
+    const sampleRate = 44100;
+    const numChannels = 1;
+    const bitsPerSample = 16;
+    const durationSec = 1;
+    const dataSize = durationSec * sampleRate * numChannels * (bitsPerSample / 8);
+    const totalSize = 44 + dataSize;
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new DataView(buffer);
+
+    // "RIFF"
+    view.setUint32(0, 0x52494646, false);
+    view.setUint32(4, 36 + dataSize, true);
+    view.setUint32(8, 0x57415645, false); // "WAVE"
+
+    // "fmt "
+    view.setUint32(12, 0x666d7420, false);
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numChannels * (bitsPerSample / 8), true);
+    view.setUint16(32, numChannels * (bitsPerSample / 8), true);
+    view.setUint16(34, bitsPerSample, true);
+
+    // "data"
+    view.setUint32(36, 0x64617461, false);
+    view.setUint32(40, dataSize, true);
+
+    const blob = new Blob([buffer], { type: 'audio/wav' });
+    silentAnchorUrl = URL.createObjectURL(blob);
+    return silentAnchorUrl;
+  } catch (_) {
+    return 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+  }
+}
+
+function primeSilentAnchor() {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!silentAnchorAudio) {
+      silentAnchorAudio = new Audio(getSilentAudioUrl());
+      silentAnchorAudio.loop = true;
+      silentAnchorAudio.volume = 0.0001;
+      silentAnchorAudio.onerror = () => {};
+    }
+  } catch (_) {}
+}
+
+function clearStandbyTimer() {
+  if (standbyTimeoutTimer) {
+    clearTimeout(standbyTimeoutTimer);
+    standbyTimeoutTimer = null;
+  }
+}
+
+function activateSilentAnchor() {
+  if (typeof window === 'undefined') return;
+  const currentTrack = usePlayerStore.getState().currentTrack;
+  if (!currentTrack) return;
+
+  clearStandbyTimer();
+  primeSilentAnchor();
+
+  if (silentAnchorAudio) {
+    try {
+      silentAnchorAudio.play().then(() => {
+        // Enforce MediaSession state as 'paused' so Android notification displays the PLAY button
+        if ('mediaSession' in navigator) {
+          navigator.mediaSession.playbackState = 'paused';
+          updateMediaPositionState();
+        }
+      }).catch((err) => {
+        console.warn('[SilentAnchor] Play failed:', err);
+      });
+    } catch (_) {}
+  }
+
+  standbyTimeoutTimer = setTimeout(() => {
+    console.log('[SilentAnchor] 30m grace period expired. Releasing anchor.');
+    deactivateSilentAnchor();
+  }, STANDBY_GRACE_PERIOD_MS);
+}
+
+function deactivateSilentAnchor() {
+  clearStandbyTimer();
+  if (silentAnchorAudio && !silentAnchorAudio.paused) {
+    try {
+      silentAnchorAudio.pause();
+      silentAnchorAudio.currentTime = 0;
+    } catch (_) {}
+  }
+}
+
 // Screen WakeLock to prevent mobile OS from aggressively terminating playback
 let wakeLockSentinel: any = null;
 
@@ -531,6 +633,8 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
       if (autoPlay) {
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
+        deactivateSilentAnchor();
+        primeSilentAnchor();
         requestScreenWakeLock();
         restoreTargetVolume();
 
@@ -573,6 +677,8 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
     if (autoPlay) {
       isUserInitiatedPause = false;
       wasInterruptedByExternalApp = false;
+      deactivateSilentAnchor();
+      primeSilentAnchor();
       requestScreenWakeLock();
 
       if ((!startTime || startTime <= 0.1) && usePlayerStore.getState().crossfade > 0) {
@@ -629,9 +735,10 @@ const updateMediaPositionState = (cur?: number, dur?: number) => {
     const d = dur ?? usePlayerStore.getState().duration;
     if (d > 0 && isFinite(d) && c >= 0 && isFinite(c)) {
       try {
+        const isPaused = audio.paused || !usePlayerStore.getState().isPlaying;
         navigator.mediaSession.setPositionState({
           duration: Math.max(d, c),
-          playbackRate: (audio.playbackRate && audio.playbackRate > 0) ? audio.playbackRate : 1,
+          playbackRate: isPaused ? 0 : (audio.playbackRate && audio.playbackRate > 0 ? audio.playbackRate : 1),
           position: Math.min(c, d)
         });
       } catch (_) {}
@@ -792,6 +899,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   audio.onplay = () => {
     isUserInitiatedPause = false;
     wasInterruptedByExternalApp = false;
+    deactivateSilentAnchor();
     requestScreenWakeLock();
     set({ isPlaying: true });
     if ('mediaSession' in navigator) {
@@ -823,6 +931,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       wasInterruptedByExternalApp = true;
       console.log('[Audio] External interruption detected (Instagram/phone call/system)');
     }
+
+    // Anchor audio focus so Spotify cannot hijack media buttons & OS doesn't kill process
+    activateSilentAnchor();
 
     set({ isPlaying: false });
     if ('mediaSession' in navigator) {
@@ -1110,6 +1221,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       navigator.mediaSession.setActionHandler('play', () => {
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
+        deactivateSilentAnchor();
         get().resume();
       });
       navigator.mediaSession.setActionHandler('pause', () => {
@@ -1118,7 +1230,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         get().pause();
       });
       try {
-        navigator.mediaSession.setActionHandler('stop', null);
+        navigator.mediaSession.setActionHandler('stop', () => {
+          isUserInitiatedPause = true;
+          wasInterruptedByExternalApp = false;
+          get().pause();
+        });
       } catch (_) {}
       navigator.mediaSession.setActionHandler('previoustrack', () => get().prevTrack());
       navigator.mediaSession.setActionHandler('nexttrack', () => get().nextTrack());
@@ -1421,6 +1537,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       try {
         audio.pause();
       } catch (_) {}
+      deactivateSilentAnchor();
       releaseScreenWakeLock();
     },
 
@@ -1492,6 +1609,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         wasInterruptedByExternalApp = false;
         releaseScreenWakeLock();
         audio.pause();
+        activateSilentAnchor();
         set({ isPlaying: false });
         if ('mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'paused';
@@ -1501,6 +1619,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       } else {
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
+        deactivateSilentAnchor();
         requestScreenWakeLock();
 
         checkAndInitAudioGraph();
@@ -1544,6 +1663,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       } else {
         audio.pause();
       }
+      activateSilentAnchor();
       set({ isPlaying: false });
       if ('mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'paused';
@@ -1558,6 +1678,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       isUserInitiatedPause = false;
       wasInterruptedByExternalApp = false;
+      deactivateSilentAnchor();
       requestScreenWakeLock();
 
       const isLocal = useSyncStore.getState().isLocalActive;
@@ -1671,6 +1792,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       // End of playback
       isTransitioningTrack = false;
       set({ isPlaying: false });
+      deactivateSilentAnchor();
       releaseScreenWakeLock();
       useSyncStore.getState().sendPlaybackState({ isPlaying: false });
     },

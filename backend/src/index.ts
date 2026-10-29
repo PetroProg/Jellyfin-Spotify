@@ -30,7 +30,8 @@ import {
   downloadSingleSpotifyTrackDirect,
   reDownloadAllTracksInHighQuality,
   getUpgradeProgress,
-  cancelBlacklistedDownloads 
+  cancelBlacklistedDownloads,
+  isTrackBlacklistedForUser
 } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
@@ -651,7 +652,11 @@ server.get('/api/playlists', { preHandler: [(server as any).authenticate] }, asy
     SELECT p.*, COUNT(pt.track_id) as track_count
     FROM playlists p
     LEFT JOIN playlist_tracks pt ON p.id = pt.playlist_id
-    WHERE p.user_id = ? AND COALESCE(p.is_daily_mix, 0) = 0
+    WHERE p.user_id = ? 
+      AND COALESCE(p.is_daily_mix, 0) = 0
+      AND LOWER(p.name) NOT LIKE '%daily mix%'
+      AND LOWER(p.name) NOT LIKE '%микс дня%'
+      AND LOWER(p.name) NOT LIKE '%ежедневный микс%'
     GROUP BY p.id
     ORDER BY p.created_at DESC
   `).all(req.user.id);
@@ -699,13 +704,15 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
     ORDER BY pt.position ASC
   `).all(playlistId, req.user.id);
 
+  const validTracks = tracks.filter((t: any) => !isTrackBlacklistedForUser(req.user.id, t.title, t.artist, t.spotify_id));
+
   const activeJob: any = db.prepare(`
     SELECT * FROM download_jobs
     WHERE playlist_id = ?
     ORDER BY created_at DESC LIMIT 1
   `).get(playlistId);
 
-  return { playlist, tracks, activeJob: activeJob || null };
+  return { playlist, tracks: validTracks, activeJob: activeJob || null };
 });
 
 server.put('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
@@ -847,8 +854,9 @@ server.get('/api/tracks/:id/playlists', { preHandler: [(server as any).authentic
     LEFT JOIN playlist_tracks pt_all ON p.id = pt_all.playlist_id
     WHERE p.user_id = ?
       AND COALESCE(p.is_daily_mix, 0) = 0
-      AND p.name NOT LIKE 'Daily Mix%'
-      AND p.name NOT LIKE 'Микс дня%'
+      AND LOWER(p.name) NOT LIKE '%daily mix%'
+      AND LOWER(p.name) NOT LIKE '%микс дня%'
+      AND LOWER(p.name) NOT LIKE '%ежедневный микс%'
     GROUP BY p.id
     ORDER BY p.created_at DESC
   `).all(trackId, req.user.id);

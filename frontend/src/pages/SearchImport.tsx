@@ -70,9 +70,9 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
       const data = await apiRequest<{ playlists: Array<{ id: number; name: string }> }>('/playlists');
       const filtered = (data.playlists || []).filter(
         (p) =>
-          !p.name.toLowerCase().startsWith('daily mix') &&
-          !p.name.toLowerCase().startsWith('ежедневный микс') &&
-          !p.name.toLowerCase().startsWith('микс дня') &&
+          !p.name.toLowerCase().includes('daily mix') &&
+          !p.name.toLowerCase().includes('ежедневный микс') &&
+          !p.name.toLowerCase().includes('микс дня') &&
           !(p as any).is_daily_mix
       );
       setPlaylists(filtered);
@@ -152,7 +152,8 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
     try {
       const res = await apiRequest<any>('/spotify/import', {
         method: 'POST',
-        body: JSON.stringify({ url: spotifyUrl })
+        body: JSON.stringify({ url: spotifyUrl }),
+        timeoutMs: 180000,
       });
       setSpotifyUrl('');
       loadJobs();
@@ -181,7 +182,8 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
           text: listText,
           playlistName: listPlaylistName.trim() || undefined,
           playlistId: listTargetPlaylistId !== 'new' ? Number(listTargetPlaylistId) : undefined
-        })
+        }),
+        timeoutMs: 180000,
       });
       setListText('');
       setListPlaylistName('');

@@ -72,9 +72,9 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
       const data = await apiRequest<{ playlists: PlaylistWithStatus[] }>(`/tracks/${tId || 0}/playlists`);
       const filtered = (data.playlists || []).filter(
         (p) =>
-          !p.name.toLowerCase().startsWith('daily mix') &&
-          !p.name.toLowerCase().startsWith('ежедневный микс') &&
-          !p.name.toLowerCase().startsWith('микс дня') &&
+          !p.name.toLowerCase().includes('daily mix') &&
+          !p.name.toLowerCase().includes('ежедневный микс') &&
+          !p.name.toLowerCase().includes('микс дня') &&
           !(p as any).is_daily_mix
       );
       setPlaylists(filtered);

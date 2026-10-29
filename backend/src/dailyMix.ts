@@ -1,7 +1,7 @@
 import fs from 'fs';
 import { db } from './db';
 import { SpotifyTrack, getSpotifyCredentials } from './spotify';
-import { enqueuePlaylistDownload, cancelPlaylistDownloads } from './downloader';
+import { enqueuePlaylistDownload, cancelPlaylistDownloads, isTrackBlacklistedForUser } from './downloader';
 
 export interface CategoryConfig {
   key: string;
@@ -865,22 +865,9 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     return [];
   }
 
-  // 2. Load user blacklist
-  const blacklistRows: any[] = db.prepare(`
-    SELECT LOWER(title) as title, LOWER(artist) as artist, spotify_id
-    FROM blacklist
-    WHERE user_id = ?
-  `).all(userId);
-
+  // 2. Blacklist checker with full normalization & artist splitting
   const isBlacklisted = (artist: string, title: string, spId?: string) => {
-    const lArtist = artist.toLowerCase().trim();
-    const lPrimary = extractPrimaryArtist(artist).toLowerCase();
-    const lTitle = title.toLowerCase().trim();
-    return blacklistRows.some(b =>
-      (spId && b.spotify_id === spId) ||
-      (b.title === lTitle && (b.artist === lArtist || b.artist === lPrimary)) ||
-      (b.title === '*' && (b.artist === lArtist || b.artist === lPrimary))
-    );
+    return isTrackBlacklistedForUser(userId, title, artist, spId);
   };
 
   // Build set of all tracks already owned by user
@@ -1344,7 +1331,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
 
     // 3. Interleave Familiar (15-20%) and New (80-85%) tracks to form EXACTLY 25 tracks
     // Position 0 is ALWAYS familiar for instant 0ms playback!
-    const finalMixItems: { type: 'familiar' | 'new'; track: any; position: number }[] = [];
+    let finalMixItems: { type: 'familiar' | 'new'; track: any; position: number }[] = [];
     let famIdx = 0;
     let newIdx = 0;
 
@@ -1363,6 +1350,8 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
         finalMixItems.push({ type: 'new', track: finalNewTracks[newIdx++], position: pos });
       }
     }
+
+    finalMixItems = finalMixItems.filter(item => !isTrackBlacklistedForUser(userId, item.track.title, item.track.artist, item.track.id));
 
     const seedNames = seedArtistsPool.slice(0, 4).map(a => a.displayName);
     const mixName = `Микс дня #${mixNumber} • ${catDef.title}`;

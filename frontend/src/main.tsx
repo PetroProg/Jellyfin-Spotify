@@ -26,6 +26,12 @@ const updateSW = registerSW({
   },
   onRegistered(registration?: ServiceWorkerRegistration) {
     if (registration) {
+      // If a new worker is waiting and no songs are playing, activate immediately
+      if (registration.waiting && !isPlaybackActive()) {
+        console.log('[PWA] Service worker waiting found on startup. Applying update...');
+        updateSW(true);
+      }
+
       // 1. Immediately trigger an update check on startup
       registration.update().catch(() => {});
 
