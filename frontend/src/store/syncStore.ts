@@ -155,9 +155,16 @@ export const useSyncStore = create<SyncState>((set, get) => {
                 const { activeDeviceId, activeDeviceName, devices, playback } = data;
                 const player = usePlayerStore.getState();
                 const isLocallyPlaying = Boolean(player.isPlaying && player.currentTrack);
+                const hasLocalSession = Boolean(get().isLocalActive && player.currentTrack);
+                const remoteIsActivelyPlaying = Boolean(
+                  activeDeviceId && activeDeviceId !== deviceId && playback && playback.isPlaying
+                );
 
-                // If this device is physically playing sound, it maintains local audio sovereignty
-                const isLocal = isLocallyPlaying || (!activeDeviceId || activeDeviceId === deviceId);
+                // If this device is physically playing sound or holds an active local session (while remote isn't playing), keep local sovereignty
+                const isLocal =
+                  isLocallyPlaying ||
+                  (hasLocalSession && !remoteIsActivelyPlaying) ||
+                  (!activeDeviceId || activeDeviceId === deviceId);
 
                 set({
                   activeDeviceId: isLocal ? deviceId : (activeDeviceId || deviceId),
@@ -166,7 +173,7 @@ export const useSyncStore = create<SyncState>((set, get) => {
                   devices: devices || [],
                 });
 
-                if (isLocal && isLocallyPlaying) {
+                if (isLocal && (isLocallyPlaying || hasLocalSession)) {
                   // Confirm to server our active playback state
                   setTimeout(() => get().sendPlaybackState(), 100);
                 } else if (playback && playback.track) {
@@ -193,7 +200,11 @@ export const useSyncStore = create<SyncState>((set, get) => {
                 const { activeDeviceId, activeDeviceName, devices } = data;
                 const player = usePlayerStore.getState();
                 const isLocallyPlaying = Boolean(player.isPlaying && player.currentTrack);
-                const isLocal = isLocallyPlaying || (activeDeviceId ? activeDeviceId === deviceId : true);
+                const hasLocalSession = Boolean(get().isLocalActive && player.currentTrack);
+                const isLocal =
+                  isLocallyPlaying ||
+                  hasLocalSession ||
+                  (activeDeviceId ? activeDeviceId === deviceId : true);
 
                 set({
                   devices: devices || [],
@@ -208,7 +219,14 @@ export const useSyncStore = create<SyncState>((set, get) => {
                 const { activeDeviceId, activeDeviceName, state } = data;
                 const player = usePlayerStore.getState();
                 const isLocallyPlaying = Boolean(player.isPlaying && player.currentTrack);
-                const isLocal = isLocallyPlaying || activeDeviceId === deviceId;
+                const hasLocalSession = Boolean(get().isLocalActive && player.currentTrack);
+                const remoteIsActivelyPlaying = Boolean(
+                  activeDeviceId && activeDeviceId !== deviceId && state && state.isPlaying
+                );
+                const isLocal =
+                  isLocallyPlaying ||
+                  (hasLocalSession && !remoteIsActivelyPlaying) ||
+                  activeDeviceId === deviceId;
 
                 set({
                   activeDeviceId: isLocal ? deviceId : activeDeviceId,

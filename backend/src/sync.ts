@@ -202,7 +202,7 @@ export function setupWebSocketSync(server: FastifyInstance) {
             }
 
             // If no active device currently, make this device the active candidate
-            if (!playback.activeDeviceId || !clients.has(playback.activeDeviceId)) {
+            if (!playback.activeDeviceId) {
               playback.activeDeviceId = deviceId;
               playback.activeDeviceName = session.deviceName;
             }
@@ -399,15 +399,8 @@ export function setupWebSocketSync(server: FastifyInstance) {
           const currentClients = userClients.get(userId);
           if (!currentClients || !currentClients.has(session.deviceId)) {
             playback.isPlaying = false;
-            // Pick next available client as active if any exist
-            if (currentClients && currentClients.size > 0) {
-              const nextClient = currentClients.values().next().value;
-              playback.activeDeviceId = nextClient.deviceId;
-              playback.activeDeviceName = nextClient.deviceName;
-            } else {
-              playback.activeDeviceId = null;
-              playback.activeDeviceName = null;
-            }
+            playback.activeDeviceId = null;
+            playback.activeDeviceName = null;
 
             broadcastToUser(userId, {
               type: 'DEVICES_CHANGED',

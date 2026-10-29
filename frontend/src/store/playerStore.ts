@@ -15,7 +15,8 @@ import {
   shouldTrackBeCachedOffline,
   addTrackToOfflinePlaylist,
   removeTrackFromOfflinePlaylist,
-  isTrackDownloadedLocally
+  isTrackDownloadedLocally,
+  setCurrentlyPlayingTrackId
 } from '../utils/offline';
 
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
@@ -172,7 +173,8 @@ let fadeInterval: any = null;
 let isFadingIn = false;
 let isFadingOut = false;
 
-// Silent Audio Anchor to maintain Android AudioFocus & prevent Spotify from hijacking media buttons or OS killing process on pause
+// Silent Audio Anchor to maintain Android AudioFocus, bypass Chromium SilentSinkSuspender (30s zero-frame kill),
+// and prevent Spotify from hijacking media buttons or mobile OS killing the process in the background
 let silentAnchorUrl: string | null = null;
 let silentAnchorAudio: HTMLAudioElement | null = null;
 let standbyTimeoutTimer: any = null;
@@ -181,11 +183,17 @@ const STANDBY_GRACE_PERIOD_MS = 30 * 60 * 1000; // 30 minutes grace period on pa
 function getSilentAudioUrl(): string {
   if (silentAnchorUrl) return silentAnchorUrl;
   try {
-    const sampleRate = 44100;
+    // 10-second 8000 Hz mono 16-bit PCM WAV with alternating ±2 LSB dithering.
+    // Chromium's C++ SilentSinkSuspender (media/base/silent_sink_suspender.cc) inspects AudioBus::AreFramesZero()
+    // and closes the physical Android AudioTrack after 30 seconds if frames are 0.0f.
+    // Alternating ±2 LSB at volume 0.01 (-124 dBFS) is 100% physically inaudible (below thermal noise),
+    // but strictly non-zero in IEEE-754 float32 so Chromium never suspends the hardware audio sink!
+    const sampleRate = 8000;
     const numChannels = 1;
     const bitsPerSample = 16;
-    const durationSec = 1;
-    const dataSize = durationSec * sampleRate * numChannels * (bitsPerSample / 8);
+    const durationSec = 10;
+    const numSamples = durationSec * sampleRate * numChannels;
+    const dataSize = numSamples * (bitsPerSample / 8);
     const totalSize = 44 + dataSize;
     const buffer = new ArrayBuffer(totalSize);
     const view = new DataView(buffer);
@@ -209,6 +217,11 @@ function getSilentAudioUrl(): string {
     view.setUint32(36, 0x64617461, false);
     view.setUint32(40, dataSize, true);
 
+    // Fill with non-zero sub-LSB alternating samples (±2 out of 32768)
+    for (let i = 0; i < numSamples; i++) {
+      view.setInt16(44 + i * 2, (i & 1) === 0 ? 2 : -2, true);
+    }
+
     const blob = new Blob([buffer], { type: 'audio/wav' });
     silentAnchorUrl = URL.createObjectURL(blob);
     return silentAnchorUrl;
@@ -223,7 +236,8 @@ function primeSilentAnchor() {
     if (!silentAnchorAudio) {
       silentAnchorAudio = new Audio(getSilentAudioUrl());
       silentAnchorAudio.loop = true;
-      silentAnchorAudio.volume = 0.0001;
+      silentAnchorAudio.preload = 'auto';
+      silentAnchorAudio.volume = 0.01;
       silentAnchorAudio.onerror = () => {};
     }
   } catch (_) {}
@@ -236,32 +250,36 @@ function clearStandbyTimer() {
   }
 }
 
-function activateSilentAnchor() {
+function activateSilentAnchor(forPause: boolean = false) {
   if (typeof window === 'undefined') return;
-  const currentTrack = usePlayerStore.getState().currentTrack;
-  if (!currentTrack) return;
 
   clearStandbyTimer();
   primeSilentAnchor();
 
   if (silentAnchorAudio) {
     try {
-      silentAnchorAudio.play().then(() => {
-        // Enforce MediaSession state as 'paused' so Android notification displays the PLAY button
-        if ('mediaSession' in navigator) {
-          navigator.mediaSession.playbackState = 'paused';
-          updateMediaPositionState();
-        }
-      }).catch((err) => {
-        console.warn('[SilentAnchor] Play failed:', err);
-      });
+      if (silentAnchorAudio.paused) {
+        silentAnchorAudio.play().then(() => {
+          if (forPause && 'mediaSession' in navigator) {
+            navigator.mediaSession.playbackState = 'paused';
+            updateMediaPositionState();
+          }
+        }).catch((err) => {
+          console.warn('[SilentAnchor] Play failed:', err);
+        });
+      } else if (forPause && 'mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'paused';
+        updateMediaPositionState();
+      }
     } catch (_) {}
   }
 
-  standbyTimeoutTimer = setTimeout(() => {
-    console.log('[SilentAnchor] 30m grace period expired. Releasing anchor.');
-    deactivateSilentAnchor();
-  }, STANDBY_GRACE_PERIOD_MS);
+  if (forPause) {
+    standbyTimeoutTimer = setTimeout(() => {
+      console.log('[SilentAnchor] 30m grace period expired. Releasing anchor.');
+      deactivateSilentAnchor();
+    }, STANDBY_GRACE_PERIOD_MS);
+  }
 }
 
 function deactivateSilentAnchor() {
@@ -302,6 +320,20 @@ function releaseScreenWakeLock() {
 // Track interruptions by external apps (like Instagram, TikTok, phone calls)
 let isUserInitiatedPause = false;
 let wasInterruptedByExternalApp = false;
+let isInternalSrcChange = false;
+let interruptionRetryTimeout1: any = null;
+let interruptionRetryTimeout2: any = null;
+
+function clearInterruptionRetries() {
+  if (interruptionRetryTimeout1) {
+    clearTimeout(interruptionRetryTimeout1);
+    interruptionRetryTimeout1 = null;
+  }
+  if (interruptionRetryTimeout2) {
+    clearTimeout(interruptionRetryTimeout2);
+    interruptionRetryTimeout2 = null;
+  }
+}
 
 /**
  * Checks whether audio playback is currently active.
@@ -346,7 +378,10 @@ function applyFadeVolume(volFraction: number) {
   const clampedFraction = Math.max(0, Math.min(1, volFraction));
   const effectiveTarget = Math.max(0, Math.min(1, target * MASTER_HEADROOM));
   if (audioCtx && fadeGainNode) {
-    fadeGainNode.gain.setTargetAtTime(clampedFraction, audioCtx.currentTime, 0.03);
+    try {
+      fadeGainNode.gain.cancelScheduledValues(audioCtx.currentTime);
+      fadeGainNode.gain.setTargetAtTime(clampedFraction, audioCtx.currentTime, 0.03);
+    } catch (_) {}
     audio.volume = effectiveTarget;
   } else {
     audio.volume = Math.max(0, Math.min(1, clampedFraction * effectiveTarget));
@@ -597,6 +632,17 @@ function ensureAudioGraph() {
     syncCompressorMode(savedBands, isNorm);
     updateDspRouting(savedBands, isNorm);
     ensureAudioContextKeepAlive();
+
+    audioCtx.onstatechange = () => {
+      if (
+        audioCtx &&
+        (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted') &&
+        usePlayerStore.getState().isPlaying &&
+        !isUserInitiatedPause
+      ) {
+        audioCtx.resume().catch(() => {});
+      }
+    };
   } catch (err) {
     console.warn('[Web Audio API Init Error]:', err);
   }
@@ -609,12 +655,101 @@ function checkAndInitAudioGraph() {
   }
 }
 
+// Background Playback Health Watchdog
+let playbackWatchdogTimer: any = null;
+let lastWatchdogMediaTime = -1;
+let lastWatchdogWallTime = 0;
+
+function stopPlaybackWatchdog() {
+  if (playbackWatchdogTimer) {
+    clearInterval(playbackWatchdogTimer);
+    playbackWatchdogTimer = null;
+  }
+  lastWatchdogMediaTime = -1;
+  lastWatchdogWallTime = 0;
+}
+
+function startPlaybackWatchdog() {
+  if (playbackWatchdogTimer) return;
+  lastWatchdogMediaTime = audio.currentTime || 0;
+  lastWatchdogWallTime = Date.now();
+
+  playbackWatchdogTimer = setInterval(() => {
+    const store = usePlayerStore.getState();
+    if (!store.isPlaying || isUserInitiatedPause || !store.currentTrack) {
+      stopPlaybackWatchdog();
+      return;
+    }
+    if (!useSyncStore.getState().isLocalActive) {
+      return;
+    }
+
+    // 1. Keep WebAudio AudioContext alive if suspended in background
+    if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
+      audioCtx.resume().catch(() => {});
+    }
+
+    // 2. Keep non-zero silent anchor playing so Chromium SilentSinkSuspender never drops hardware AudioTrack
+    if (silentAnchorAudio && silentAnchorAudio.paused) {
+      silentAnchorAudio.play().catch(() => {});
+    }
+
+    if (isRecoveringStream || isInternalSrcChange) {
+      lastWatchdogMediaTime = audio.currentTime || 0;
+      lastWatchdogWallTime = Date.now();
+      return;
+    }
+
+    // 3. Check if track reached or passed EOF in background without firing timeupdate/ended
+    const cur = audio.currentTime || 0;
+    const dur = (audio.duration && isFinite(audio.duration) && audio.duration > 0) ? audio.duration : store.duration;
+    if (!store.currentTrack.isPreview && dur > 3 && (audio.ended || cur >= dur - 0.25)) {
+      console.log('[Watchdog] Track reached EOF in background, advancing queue...');
+      if (store.repeat === 'one') {
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
+      } else {
+        store.nextTrack();
+      }
+      lastWatchdogMediaTime = 0;
+      lastWatchdogWallTime = Date.now();
+      return;
+    }
+
+    // 4. If audio is unexpectedly paused while store.isPlaying && !isUserInitiatedPause
+    if (audio.paused && !audio.ended) {
+      console.log('[Watchdog] Audio unexpectedly paused in background, resuming...');
+      audio.play().then(() => {
+        if ('mediaSession' in navigator) {
+          navigator.mediaSession.playbackState = 'playing';
+        }
+      }).catch(() => {
+        recoverAudioStream(cur > 0 ? cur : store.currentTime, true);
+      });
+      return;
+    }
+
+    // 5. Check for frozen playhead (> 8 seconds without advancing while not paused)
+    if (Math.abs(cur - lastWatchdogMediaTime) >= 0.05) {
+      lastWatchdogMediaTime = cur;
+      lastWatchdogWallTime = Date.now();
+    } else if (Date.now() - lastWatchdogWallTime > 8000) {
+      console.warn('[Watchdog] Playhead frozen for >8s in background, triggering stream recovery...');
+      lastWatchdogWallTime = Date.now();
+      recoverAudioStream(cur > 0 ? cur : store.currentTime, true);
+    }
+  }, 2500);
+}
+
 function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
+  setCurrentlyPlayingTrackId(track.id);
+
   // If track has an explicit streamUrl (e.g. instant streaming from search)
   if (track.streamUrl) {
     const applyInstantPlayback = (targetSrc: string) => {
       const needsChange = !audio.src.endsWith(targetSrc) && audio.src !== targetSrc;
       if (needsChange) {
+        isInternalSrcChange = true;
         audio.src = targetSrc;
       }
 
@@ -631,21 +766,28 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
       }
 
       if (autoPlay) {
+        clearInterruptionRetries();
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
-        deactivateSilentAnchor();
-        primeSilentAnchor();
+        activateSilentAnchor(false);
         requestScreenWakeLock();
         restoreTargetVolume();
+        startPlaybackWatchdog();
 
         const p = audio.play();
         if (p !== undefined) {
-          p.catch((err) => {
+          p.then(() => {
+            isInternalSrcChange = false;
+          }).catch((err) => {
+            isInternalSrcChange = false;
             console.warn('[Audio instant play interrupted / autoplay]:', err);
           });
+        } else {
+          isInternalSrcChange = false;
         }
       } else {
         audio.pause();
+        setTimeout(() => { isInternalSrcChange = false; }, 100);
       }
     };
 
@@ -659,6 +801,7 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
   const applyPlayback = (targetSrc: string) => {
     const needsChange = !audio.src.endsWith(targetSrc) && audio.src !== targetSrc;
     if (needsChange) {
+      isInternalSrcChange = true;
       audio.src = targetSrc;
     }
 
@@ -675,11 +818,12 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
     }
 
     if (autoPlay) {
+      clearInterruptionRetries();
       isUserInitiatedPause = false;
       wasInterruptedByExternalApp = false;
-      deactivateSilentAnchor();
-      primeSilentAnchor();
+      activateSilentAnchor(false);
       requestScreenWakeLock();
+      startPlaybackWatchdog();
 
       if ((!startTime || startTime <= 0.1) && usePlayerStore.getState().crossfade > 0) {
         startFadeIn(Math.min(usePlayerStore.getState().crossfade, 2.5));
@@ -689,15 +833,21 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
 
       const p = audio.play();
       if (p !== undefined) {
-        p.catch((err) => {
+        p.then(() => {
+          isInternalSrcChange = false;
+        }).catch((err) => {
+          isInternalSrcChange = false;
           console.warn('[Audio play interrupted / autoplay]:', err);
           if (err.name === 'NotAllowedError' && typeof document !== 'undefined' && document.visibilityState === 'visible') {
             toast.info(tr('Click anywhere to enable audio on this device', 'Нажмите в любом месте для включения звука на этом устройстве'));
           }
         });
+      } else {
+        isInternalSrcChange = false;
       }
     } else {
       audio.pause();
+      setTimeout(() => { isInternalSrcChange = false; }, 100);
     }
   };
 
@@ -719,7 +869,11 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
 // Proactive user-gesture unlock and background/interruption recovery
 if (typeof window !== 'undefined') {
   const unlockAudio = () => {
-    if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
+    primeSilentAnchor();
+    if (usePlayerStore.getState().currentTrack) {
+      activateSilentAnchor(!usePlayerStore.getState().isPlaying);
+    }
+    if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
       audioCtx.resume().catch(() => {});
     }
   };
@@ -791,6 +945,7 @@ async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true)
     }
 
     // 3. Reset HTMLMediaElement cleanly to wipe any MediaError state
+    isInternalSrcChange = true;
     try {
       audio.pause();
     } catch (_) {}
@@ -834,18 +989,22 @@ async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true)
 
     if (autoPlay) {
       checkAndInitAudioGraph();
-      if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
+      if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
         audioCtx.resume().catch(() => {});
       }
 
       try {
         await audio.play();
+        isInternalSrcChange = false;
         usePlayerStore.setState({ isPlaying: true });
+        activateSilentAnchor(false);
+        startPlaybackWatchdog();
         if ('mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'playing';
         }
         networkRetryCount = 0;
       } catch (playErr: any) {
+        isInternalSrcChange = false;
         console.warn('[Play after recovery failed]:', playErr);
         if (playErr.name === 'NotAllowedError') {
           usePlayerStore.setState({ isPlaying: false });
@@ -854,8 +1013,11 @@ async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true)
           }
         }
       }
+    } else {
+      isInternalSrcChange = false;
     }
   } catch (err) {
+    isInternalSrcChange = false;
     console.warn('[Audio Recovery Exception]:', err);
   } finally {
     isRecoveringStream = false;
@@ -897,15 +1059,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   };
 
   audio.onplay = () => {
+    clearInterruptionRetries();
+    isInternalSrcChange = false;
     isUserInitiatedPause = false;
     wasInterruptedByExternalApp = false;
-    deactivateSilentAnchor();
+    activateSilentAnchor(false);
     requestScreenWakeLock();
+    startPlaybackWatchdog();
     set({ isPlaying: true });
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'playing';
     }
-    if (audioCtx && audioCtx.state === 'suspended') {
+    if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
       audioCtx.resume().catch(() => {});
     }
     updateMediaPositionState();
@@ -915,25 +1080,67 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   let isTransitioningTrack = false;
 
   audio.onpause = () => {
-    // If the track reached the end or we are currently transitioning to the next track,
-    // this is a natural EOF pause preceding 'ended' event, NOT an external interruption!
-    const cur = audio.currentTime;
-    const dur = audio.duration;
-    const isNaturalEndOfTrack = audio.ended || (dur > 0 && cur >= dur - 0.8) || isTransitioningTrack;
-
-    if (isNaturalEndOfTrack) {
-      // Natural EOF pause preceding track handover: do not release wakeLock or trigger external interruption
+    // 1. Ignore synthetic pause events fired asynchronously by HTMLMediaElement when changing audio.src or recovering stream
+    if (isInternalSrcChange || isRecoveringStream || isTransitioningTrack || !audio.paused) {
       return;
     }
 
-    releaseScreenWakeLock();
-    if (!isUserInitiatedPause && get().currentTrack) {
-      wasInterruptedByExternalApp = true;
-      console.log('[Audio] External interruption detected (Instagram/phone call/system)');
+    // 2. If the track reached the end, this is a natural EOF pause preceding 'ended', NOT an interruption
+    const cur = audio.currentTime;
+    const dur = (audio.duration && isFinite(audio.duration) && audio.duration > 0) ? audio.duration : get().duration;
+    const isNaturalEndOfTrack = audio.ended || (dur > 0 && cur >= dur - 0.8);
+
+    if (isNaturalEndOfTrack) {
+      return;
     }
 
-    // Anchor audio focus so Spotify cannot hijack media buttons & OS doesn't kill process
-    activateSilentAnchor();
+    // 3. If this pause was NOT explicitly requested by the user (e.g. transient notification, Spotify background probe,
+    // screen lock glitch, or external app interruption):
+    if (!isUserInitiatedPause && get().currentTrack) {
+      wasInterruptedByExternalApp = true;
+      activateSilentAnchor(false);
+      console.log('[Audio] Transient/external pause detected in background. Scheduling auto-recovery...');
+
+      clearInterruptionRetries();
+      const attemptAutoResume = (attemptNum: number) => {
+        if (isUserInitiatedPause || !get().currentTrack || !audio.paused || isRecoveringStream || isTransitioningTrack) {
+          return;
+        }
+        if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
+          audioCtx.resume().catch(() => {});
+        }
+        audio.play().then(() => {
+          console.log(`[Audio] Auto-resumed after transient interruption (attempt ${attemptNum})`);
+          wasInterruptedByExternalApp = false;
+          set({ isPlaying: true });
+          if ('mediaSession' in navigator) {
+            navigator.mediaSession.playbackState = 'playing';
+          }
+          updateMediaPositionState();
+        }).catch(() => {
+          if (attemptNum === 2 && audio.paused && !isUserInitiatedPause) {
+            // Persistent interruption (e.g. active phone call or another foreground media app)
+            releaseScreenWakeLock();
+            activateSilentAnchor(true);
+            set({ isPlaying: false });
+            if ('mediaSession' in navigator) {
+              navigator.mediaSession.playbackState = 'paused';
+            }
+            updateMediaPositionState();
+            useSyncStore.getState().sendPlaybackState({ isPlaying: false });
+          }
+        });
+      };
+
+      interruptionRetryTimeout1 = setTimeout(() => attemptAutoResume(1), 150);
+      interruptionRetryTimeout2 = setTimeout(() => attemptAutoResume(2), 1500);
+      return;
+    }
+
+    // 4. User-initiated pause: hold non-zero silent anchor on standby for 30m so OS keeps PWA alive & Spotify can't hijack buttons
+    stopPlaybackWatchdog();
+    releaseScreenWakeLock();
+    activateSilentAnchor(true);
 
     set({ isPlaying: false });
     if ('mediaSession' in navigator) {
@@ -947,6 +1154,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
   audio.onerror = () => {
     isTransitioningTrack = false;
+    isInternalSrcChange = false;
     const err = audio.error;
     const { currentTrack, isPlaying } = get();
     console.warn('[Audio Error Event]: code =', err?.code, 'message =', err?.message, 'track =', currentTrack?.title);
@@ -962,14 +1170,14 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     const savedPos = audio.currentTime > 0 ? audio.currentTime : get().currentTime;
 
-    if (isNetworkErr && networkRetryCount < 5) {
+    if (isNetworkErr && networkRetryCount < 10) {
       networkRetryCount++;
-      console.warn(`[Audio Error] Network stream interrupted. Attempting auto-reconnect ${networkRetryCount}/5 at ${savedPos.toFixed(1)}s...`);
+      console.warn(`[Audio Error] Network stream interrupted. Attempting auto-reconnect ${networkRetryCount}/10 at ${savedPos.toFixed(1)}s...`);
 
       if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
-      const delay = Math.min(3000, 400 + networkRetryCount * 600);
+      const delay = Math.min(4000, 400 + networkRetryCount * 500);
       errorRecoveryTimeout = setTimeout(() => {
-        recoverAudioStream(savedPos, isPlaying);
+        recoverAudioStream(savedPos, isPlaying || !isUserInitiatedPause);
       }, delay);
       return;
     }
@@ -995,12 +1203,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   };
 
   audio.onplaying = () => {
+    clearInterruptionRetries();
+    isInternalSrcChange = false;
     isTransitioningTrack = false;
     consecutiveErrors = 0;
     networkRetryCount = 0;
     if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
     if (stallTimeout) clearTimeout(stallTimeout);
     if (waitingTimeout) clearTimeout(waitingTimeout);
+    activateSilentAnchor(false);
+    startPlaybackWatchdog();
     set({ isPlaying: true });
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'playing';
@@ -1087,10 +1299,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         duration: (nextTrack.duration_ms || 180000) / 1000,
         queue: [nextTrack]
       });
+      isInternalSrcChange = true;
       audio.src = `/api/stream/${nextTrack.id}`;
       const onReady = () => {
         try { audio.currentTime = savedTime; } catch (_) {}
-        audio.play().catch(() => {});
+        audio.play().then(() => { isInternalSrcChange = false; }).catch(() => { isInternalSrcChange = false; });
       };
       if (audio.readyState >= 1) onReady();
       else audio.addEventListener('loadedmetadata', onReady, { once: true });
@@ -1108,6 +1321,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       isTransitioningTrack = true;
       cancelFade();
       restoreTargetVolume();
+      if (!useSyncStore.getState().isLocalActive) {
+        useSyncStore.setState({ isLocalActive: true });
+      }
       const { repeat, nextTrack } = get();
       if (repeat === 'one') {
         audio.currentTime = 0;
@@ -1140,6 +1356,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     cancelFade();
     restoreTargetVolume();
 
+    if (!useSyncStore.getState().isLocalActive) {
+      useSyncStore.setState({ isLocalActive: true });
+    }
+
     // If instant preview ended and full track has finished downloading on server
     if (get().currentTrack?.isPreview && downloadedInstantTrack) {
       const nextTrack = downloadedInstantTrack;
@@ -1149,10 +1369,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         duration: (nextTrack.duration_ms || 180000) / 1000,
         queue: [nextTrack]
       });
+      isInternalSrcChange = true;
       audio.src = `/api/stream/${nextTrack.id}`;
       const onReady = () => {
         try { audio.currentTime = 29; } catch (_) {}
-        audio.play().catch(() => {});
+        audio.play().then(() => { isInternalSrcChange = false; }).catch(() => { isInternalSrcChange = false; });
         isTransitioningTrack = false;
       };
       if (audio.readyState >= 1) onReady();
@@ -1177,7 +1398,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   if (typeof window !== 'undefined') {
     const handleAppVisibility = () => {
       if (document.visibilityState === 'visible') {
-        if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
+        if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
           audioCtx.resume().catch(() => {});
         }
 
@@ -1219,27 +1440,60 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       navigator.mediaSession.playbackState = get().isPlaying ? 'playing' : 'paused';
 
       navigator.mediaSession.setActionHandler('play', () => {
+        if (!useSyncStore.getState().isLocalActive) {
+          useSyncStore.setState({ isLocalActive: true });
+        }
+        clearInterruptionRetries();
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
-        deactivateSilentAnchor();
+        activateSilentAnchor(false);
         get().resume();
       });
       navigator.mediaSession.setActionHandler('pause', () => {
+        if (!useSyncStore.getState().isLocalActive) {
+          useSyncStore.setState({ isLocalActive: true });
+        }
+        // Some Bluetooth earbuds send AVRCP PAUSE as a toggle even when already paused
+        if (!get().isPlaying && isUserInitiatedPause && audio.paused) {
+          clearInterruptionRetries();
+          isUserInitiatedPause = false;
+          wasInterruptedByExternalApp = false;
+          activateSilentAnchor(false);
+          get().resume();
+          return;
+        }
+        clearInterruptionRetries();
         isUserInitiatedPause = true;
         wasInterruptedByExternalApp = false;
         get().pause();
       });
       try {
         navigator.mediaSession.setActionHandler('stop', () => {
+          clearInterruptionRetries();
           isUserInitiatedPause = true;
           wasInterruptedByExternalApp = false;
           get().pause();
         });
       } catch (_) {}
-      navigator.mediaSession.setActionHandler('previoustrack', () => get().prevTrack());
-      navigator.mediaSession.setActionHandler('nexttrack', () => get().nextTrack());
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        if (!useSyncStore.getState().isLocalActive) {
+          useSyncStore.setState({ isLocalActive: true });
+        }
+        get().prevTrack();
+      });
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        if (!useSyncStore.getState().isLocalActive) {
+          useSyncStore.setState({ isLocalActive: true });
+        }
+        get().nextTrack();
+      });
       navigator.mediaSession.setActionHandler('seekto', (details) => {
-        if (details.seekTime !== undefined && details.seekTime !== null) get().seek(details.seekTime);
+        if (details.seekTime !== undefined && details.seekTime !== null) {
+          if (!useSyncStore.getState().isLocalActive) {
+            useSyncStore.setState({ isLocalActive: true });
+          }
+          get().seek(details.seekTime);
+        }
       });
       try {
         navigator.mediaSession.setActionHandler('seekbackward', (details) => {
@@ -1482,7 +1736,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       });
 
       checkAndInitAudioGraph();
-      if (audioCtx && audioCtx.state === 'suspended') {
+      if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
         audioCtx.resume().catch(() => {});
       }
 
@@ -1492,7 +1746,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       useSyncStore.getState().sendPlaybackState({ currentTime: 0, duration: initialDur, isPlaying: true });
       scheduleNextTrackPrefetch();
       prefetchRecommendationsIfNeeded();
-      prewarmQueueBlobUrls(q, idx + 1, 3);
+      prewarmQueueBlobUrls(q, idx + 1, 5);
     },
 
     playTrackLocally: (track, newQueue, index, startTime, autoPlay = true, playlistId) => {
@@ -1520,7 +1774,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       });
 
       checkAndInitAudioGraph();
-      if (audioCtx && audioCtx.state === 'suspended') {
+      if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
         audioCtx.resume().catch(() => {});
       }
 
@@ -1530,10 +1784,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       useSyncStore.getState().sendPlaybackState();
       scheduleNextTrackPrefetch();
       prefetchRecommendationsIfNeeded();
-      prewarmQueueBlobUrls(q, idx + 1, 3);
+      prewarmQueueBlobUrls(q, idx + 1, 5);
     },
 
     stopLocalPlayback: () => {
+      clearInterruptionRetries();
+      stopPlaybackWatchdog();
       try {
         audio.pause();
       } catch (_) {}
@@ -1580,7 +1836,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       localStorage.setItem(STORAGE_KEY_SHUFFLE, 'true');
 
       checkAndInitAudioGraph();
-      if (audioCtx && audioCtx.state === 'suspended') {
+      if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
         audioCtx.resume().catch(() => {});
       }
 
@@ -1590,7 +1846,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       useSyncStore.getState().sendPlaybackState({ currentTime: 0, duration: initialDur, isPlaying: true });
       scheduleNextTrackPrefetch();
       prefetchRecommendationsIfNeeded();
-      prewarmQueueBlobUrls(shuffledQueue, 1, 3);
+      prewarmQueueBlobUrls(shuffledQueue, 1, 5);
     },
 
     togglePlay: () => {
@@ -1605,11 +1861,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
 
       if (isPlaying) {
+        clearInterruptionRetries();
+        stopPlaybackWatchdog();
         isUserInitiatedPause = true;
         wasInterruptedByExternalApp = false;
         releaseScreenWakeLock();
         audio.pause();
-        activateSilentAnchor();
+        activateSilentAnchor(true);
         set({ isPlaying: false });
         if ('mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'paused';
@@ -1617,13 +1875,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         updateMediaPositionState();
         useSyncStore.getState().sendPlaybackState({ isPlaying: false });
       } else {
+        clearInterruptionRetries();
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
-        deactivateSilentAnchor();
+        activateSilentAnchor(false);
         requestScreenWakeLock();
+        startPlaybackWatchdog();
 
         checkAndInitAudioGraph();
-        if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
+        if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
           audioCtx.resume().catch(() => {});
         }
 
@@ -1653,6 +1913,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     pause: () => {
       cancelFade();
+      clearInterruptionRetries();
+      stopPlaybackWatchdog();
       isUserInitiatedPause = true;
       wasInterruptedByExternalApp = false;
       releaseScreenWakeLock();
@@ -1663,7 +1925,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       } else {
         audio.pause();
       }
-      activateSilentAnchor();
+      activateSilentAnchor(true);
       set({ isPlaying: false });
       if ('mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'paused';
@@ -1676,9 +1938,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const { currentTrack } = get();
       if (!currentTrack) return;
 
+      clearInterruptionRetries();
       isUserInitiatedPause = false;
       wasInterruptedByExternalApp = false;
-      deactivateSilentAnchor();
+      activateSilentAnchor(false);
       requestScreenWakeLock();
 
       const isLocal = useSyncStore.getState().isLocalActive;
@@ -1692,8 +1955,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         return;
       }
 
+      startPlaybackWatchdog();
       checkAndInitAudioGraph();
-      if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
+      if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
         audioCtx.resume().catch(() => {});
       }
 
@@ -1791,6 +2055,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       // End of playback
       isTransitioningTrack = false;
+      stopPlaybackWatchdog();
       set({ isPlaying: false });
       deactivateSilentAnchor();
       releaseScreenWakeLock();
@@ -2045,8 +2310,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           set({ queue: filteredQueue, originalQueue: filteredOriginal, currentIndex: nextIdx });
           playTrack(nextT, filteredQueue, nextIdx);
         } else {
+          stopPlaybackWatchdog();
+          deactivateSilentAnchor();
+          setCurrentlyPlayingTrackId(null);
+          isInternalSrcChange = true;
           audio.pause();
           audio.src = '';
+          setTimeout(() => { isInternalSrcChange = false; }, 100);
           set({
             currentTrack: null,
             queue: [],
@@ -2179,12 +2449,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       if (Object.keys(updates).length > 0) {
         set(updates);
-        ensureAudioGraph();
-        if (updates.eqBands) {
-          updateFilterGains(updates.eqBands);
-        }
-        if (updates.isNormalizerEnabled !== undefined) {
-          updateNormalizer(updates.isNormalizerEnabled);
+        // Only update live WebAudio nodes if the graph was already initialized inside a user gesture.
+        // Never create AudioContext on initial page load before a user gesture, or Chrome will lock <audio> to a suspended context!
+        if (isAudioGraphAttached && audioCtx) {
+          if (updates.eqBands) {
+            updateFilterGains(updates.eqBands);
+          }
+          if (updates.isNormalizerEnabled !== undefined) {
+            updateNormalizer(updates.isNormalizerEnabled);
+          }
         }
       }
     },
@@ -2239,10 +2512,15 @@ if (typeof window !== 'undefined') {
         if (blobUrl) {
           console.log('[Player] Switching to local offline blob URL during network loss');
           const curTime = audio.currentTime;
+          isInternalSrcChange = true;
           audio.src = blobUrl;
           const applySeek = () => {
             try { audio.currentTime = curTime; } catch (_) {}
-            if (state.isPlaying) audio.play().catch(() => {});
+            if (state.isPlaying) {
+              audio.play().then(() => { isInternalSrcChange = false; }).catch(() => { isInternalSrcChange = false; });
+            } else {
+              isInternalSrcChange = false;
+            }
           };
           if (audio.readyState >= 1) applySeek();
           else audio.addEventListener('loadedmetadata', applySeek, { once: true });

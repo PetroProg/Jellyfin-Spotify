@@ -10,6 +10,11 @@ export const DOWNLOAD_QUEUE_KEY = 'jellyfy_download_queue';
 
 // In-memory registry of active Blob URLs for zero-latency instant playback
 const activeBlobUrls = new Map<number, string>();
+let currentlyPlayingTrackId: number | null = null;
+
+export function setCurrentlyPlayingTrackId(trackId: number | null): void {
+  currentlyPlayingTrackId = trackId;
+}
 
 export interface QueuedDownloadJob {
   playlistId: number;
@@ -390,8 +395,8 @@ export async function getCachedTrackUrl(trackId: number): Promise<string | null>
   try {
     const cache = await caches.open(CACHE_NAME);
     let match = await cache.match(`/api/stream/${trackId}`);
-    // If completely offline and not yet in v2 studio cache, fall back to v1 legacy cache so offline playback never fails
-    if (!match && typeof navigator !== 'undefined' && !navigator.onLine) {
+    // Also fall back to legacy cache if present
+    if (!match) {
       const legacyCache = await caches.open(LEGACY_CACHE_NAME);
       match = await legacyCache.match(`/api/stream/${trackId}`);
     }
@@ -405,14 +410,16 @@ export async function getCachedTrackUrl(trackId: number): Promise<string | null>
       addCachedTrackId(trackId);
       const blob = await match.blob();
       if (blob && blob.size > 1024) {
-        // Keep up to 6 blob URLs active in memory for seamless queue prebuffering
-        if (activeBlobUrls.size >= 6) {
-          const oldestKey = activeBlobUrls.keys().next().value;
-          if (oldestKey !== undefined) {
-            try {
-              URL.revokeObjectURL(activeBlobUrls.get(oldestKey)!);
-            } catch (_) {}
-            activeBlobUrls.delete(oldestKey);
+        // Keep up to 30 blob URLs active in memory for seamless queue prebuffering without evicting the playing track
+        if (activeBlobUrls.size >= 30) {
+          for (const key of activeBlobUrls.keys()) {
+            if (key !== currentlyPlayingTrackId && key !== trackId) {
+              try {
+                URL.revokeObjectURL(activeBlobUrls.get(key)!);
+              } catch (_) {}
+              activeBlobUrls.delete(key);
+              break;
+            }
           }
         }
         const blobUrl = URL.createObjectURL(blob);
@@ -435,7 +442,11 @@ export async function isTrackCached(trackId: number): Promise<boolean> {
 
   try {
     const cache = await caches.open(CACHE_NAME);
-    const match = await cache.match(`/api/stream/${trackId}`);
+    let match = await cache.match(`/api/stream/${trackId}`);
+    if (!match) {
+      const legacyCache = await caches.open(LEGACY_CACHE_NAME);
+      match = await legacyCache.match(`/api/stream/${trackId}`);
+    }
     if (match) {
       const contentType = match.headers.get('content-type') || '';
       if (typeof navigator !== 'undefined' && navigator.onLine && contentType.includes('audio/mp4')) {
@@ -443,6 +454,7 @@ export async function isTrackCached(trackId: number): Promise<boolean> {
         removeCachedTrackId(trackId);
         return false;
       }
+      addCachedTrackId(trackId);
       return true;
     }
     return false;

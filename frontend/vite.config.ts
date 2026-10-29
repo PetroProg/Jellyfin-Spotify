@@ -49,21 +49,6 @@ export default defineConfig({
         importScripts: ['sw-custom.js'],
         runtimeCaching: [
           {
-            urlPattern: ({ url }) => url.pathname.startsWith('/api/stream/'),
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'jellyfin-spotify-audio-cache',
-              rangeRequests: true,
-              expiration: {
-                maxEntries: 2500,
-                maxAgeSeconds: 60 * 24 * 60 * 60 // 60 days
-              },
-              cacheableResponse: {
-                statuses: [0, 200]
-              }
-            }
-          },
-          {
             urlPattern: ({ request, url }) => request.destination === 'image' || url.pathname.includes('/cover'),
             handler: 'StaleWhileRevalidate',
             options: {
