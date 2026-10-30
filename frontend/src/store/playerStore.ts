@@ -158,6 +158,27 @@ const loadSavedNormalizer = (): boolean => {
   return val === null ? false : val === 'true';
 };
 
+// Helper to attach hidden <audio> elements to document.body so Chromium never treats them
+// as detached media elements eligible for BackgroundMediaSuspend after 10 minutes in Doze Mode
+function mountHiddenAudioElement(el: HTMLAudioElement, id: string) {
+  if (typeof document === 'undefined') return;
+  try {
+    el.id = id;
+    el.style.display = 'none';
+    el.setAttribute('playsinline', 'true');
+    const append = () => {
+      if (document.body && !el.isConnected) {
+        document.body.appendChild(el);
+      }
+    };
+    if (document.body) {
+      append();
+    } else {
+      window.addEventListener('DOMContentLoaded', append, { once: true });
+    }
+  } catch (_) {}
+}
+
 // Global Audio Instance
 // -1.4 dB True-Peak headroom (0.85 linear) prevents inter-sample Gibbs overshoots (> 0 dBFS in decoded MP3s)
 // from hard-clipping the 16-bit DAC or Bluetooth AAC/LDAC/SBC encoder on loud transients
@@ -167,6 +188,24 @@ audio.preload = 'auto';
 audio.crossOrigin = 'anonymous';
 const initialVolume = loadSavedVolume();
 audio.volume = Math.max(0, Math.min(1, initialVolume * MASTER_HEADROOM));
+mountHiddenAudioElement(audio, 'jellyfy-primary-audio');
+
+// Secondary Preloader Audio Element to pre-parse headers & buffer the next track in DOM
+const nextAudioPreloader = new Audio();
+nextAudioPreloader.preload = 'auto';
+nextAudioPreloader.muted = true;
+nextAudioPreloader.volume = 0;
+mountHiddenAudioElement(nextAudioPreloader, 'jellyfy-next-preloader');
+let preloadedNextTrackUrl: string | null = null;
+
+function preloadNextTrackElement(url: string | null) {
+  if (!url || preloadedNextTrackUrl === url) return;
+  try {
+    preloadedNextTrackUrl = url;
+    nextAudioPreloader.src = url;
+    nextAudioPreloader.load();
+  } catch (_) {}
+}
 
 // Crossfade fade controller
 let fadeInterval: any = null;
@@ -174,7 +213,7 @@ let isFadingIn = false;
 let isFadingOut = false;
 
 // Silent Audio Anchor to maintain Android AudioFocus, bypass Chromium SilentSinkSuspender (30s zero-frame kill),
-// and prevent Spotify from hijacking media buttons or mobile OS killing the process in the background
+// and prevent Spotify from hijacking media buttons or mobile OS killing the process at track boundaries after 10+ minutes
 let silentAnchorUrl: string | null = null;
 let silentAnchorAudio: HTMLAudioElement | null = null;
 let standbyTimeoutTimer: any = null;
@@ -183,15 +222,15 @@ const STANDBY_GRACE_PERIOD_MS = 30 * 60 * 1000; // 30 minutes grace period on pa
 function getSilentAudioUrl(): string {
   if (silentAnchorUrl) return silentAnchorUrl;
   try {
-    // 10-second 8000 Hz mono 16-bit PCM WAV with alternating ±2 LSB dithering.
-    // Chromium's C++ SilentSinkSuspender (media/base/silent_sink_suspender.cc) inspects AudioBus::AreFramesZero()
-    // and closes the physical Android AudioTrack after 30 seconds if frames are 0.0f.
-    // Alternating ±2 LSB at volume 0.01 (-124 dBFS) is 100% physically inaudible (below thermal noise),
-    // but strictly non-zero in IEEE-754 float32 so Chromium never suspends the hardware audio sink!
+    // 60-second 8000 Hz mono 16-bit PCM WAV with alternating ±3 LSB dithering.
+    // 1) Duration 60s (>> Chromium's 5s kMinimumContentDuration) ensures Chromium's MediaSessionImpl
+    //    classifies it as MediaContentType::kPersistent rather than a short transient sound effect.
+    // 2) Alternating ±3 LSB at volume 0.02 (-110 dBFS) is 100% physically inaudible (below 16-bit thermal noise),
+    //    but strictly non-zero in IEEE-754 float32 so Chromium's SilentSinkSuspender never closes the AudioTrack!
     const sampleRate = 8000;
     const numChannels = 1;
     const bitsPerSample = 16;
-    const durationSec = 10;
+    const durationSec = 60;
     const numSamples = durationSec * sampleRate * numChannels;
     const dataSize = numSamples * (bitsPerSample / 8);
     const totalSize = 44 + dataSize;
@@ -217,9 +256,9 @@ function getSilentAudioUrl(): string {
     view.setUint32(36, 0x64617461, false);
     view.setUint32(40, dataSize, true);
 
-    // Fill with non-zero sub-LSB alternating samples (±2 out of 32768)
+    // Fill with non-zero sub-LSB alternating samples (±3 out of 32768)
     for (let i = 0; i < numSamples; i++) {
-      view.setInt16(44 + i * 2, (i & 1) === 0 ? 2 : -2, true);
+      view.setInt16(44 + i * 2, (i & 1) === 0 ? 3 : -3, true);
     }
 
     const blob = new Blob([buffer], { type: 'audio/wav' });
@@ -237,8 +276,11 @@ function primeSilentAnchor() {
       silentAnchorAudio = new Audio(getSilentAudioUrl());
       silentAnchorAudio.loop = true;
       silentAnchorAudio.preload = 'auto';
-      silentAnchorAudio.volume = 0.01;
+      silentAnchorAudio.volume = 0.02;
       silentAnchorAudio.onerror = () => {};
+      mountHiddenAudioElement(silentAnchorAudio, 'jellyfy-silent-anchor');
+    } else if (!silentAnchorAudio.isConnected) {
+      mountHiddenAudioElement(silentAnchorAudio, 'jellyfy-silent-anchor');
     }
   } catch (_) {}
 }
@@ -655,6 +697,29 @@ function checkAndInitAudioGraph() {
   }
 }
 
+// Track transition & request coordination
+let isTransitioningTrack = false;
+let lastTrackTransitionWallTime = 0;
+let currentPlayRequestId = 0;
+let transitionSafetyTimeout: any = null;
+
+function markTrackTransitionStart() {
+  isTransitioningTrack = true;
+  lastTrackTransitionWallTime = Date.now();
+  if (transitionSafetyTimeout) clearTimeout(transitionSafetyTimeout);
+  transitionSafetyTimeout = setTimeout(() => {
+    isTransitioningTrack = false;
+  }, 5000);
+}
+
+function markTrackTransitionEnd() {
+  isTransitioningTrack = false;
+  if (transitionSafetyTimeout) {
+    clearTimeout(transitionSafetyTimeout);
+    transitionSafetyTimeout = null;
+  }
+}
+
 // Background Playback Health Watchdog
 let playbackWatchdogTimer: any = null;
 let lastWatchdogMediaTime = -1;
@@ -694,20 +759,27 @@ function startPlaybackWatchdog() {
       silentAnchorAudio.play().catch(() => {});
     }
 
-    if (isRecoveringStream || isInternalSrcChange) {
+    // Never interfere while a track transition or stream recovery is actively in progress
+    if (
+      isRecoveringStream ||
+      isInternalSrcChange ||
+      isTransitioningTrack ||
+      Date.now() - lastTrackTransitionWallTime < 3500
+    ) {
       lastWatchdogMediaTime = audio.currentTime || 0;
       lastWatchdogWallTime = Date.now();
       return;
     }
 
-    // 3. Check if track reached or passed EOF in background without firing timeupdate/ended
+    // 3. Check if track genuinely ended in background without firing onended
     const cur = audio.currentTime || 0;
-    const dur = (audio.duration && isFinite(audio.duration) && audio.duration > 0) ? audio.duration : store.duration;
-    if (!store.currentTrack.isPreview && dur > 3 && (audio.ended || cur >= dur - 0.25)) {
-      console.log('[Watchdog] Track reached EOF in background, advancing queue...');
+    if (!store.currentTrack.isPreview && audio.ended) {
+      console.log('[Watchdog] Track ended in background, advancing queue...');
+      markTrackTransitionStart();
       if (store.repeat === 'one') {
         audio.currentTime = 0;
         audio.play().catch(() => {});
+        markTrackTransitionEnd();
       } else {
         store.nextTrack();
       }
@@ -742,7 +814,15 @@ function startPlaybackWatchdog() {
 }
 
 function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
+  const reqId = ++currentPlayRequestId;
   setCurrentlyPlayingTrackId(track.id);
+  markTrackTransitionStart();
+
+  // Ensure persistent 60s DOM-mounted anchor is playing BEFORE mutating audio.src
+  // so Chromium's MediaWebContentsObserver never sees 0 playing media elements during track handover!
+  if (autoPlay) {
+    activateSilentAnchor(false);
+  }
 
   // If track has an explicit streamUrl (e.g. instant streaming from search)
   if (track.streamUrl) {
@@ -769,7 +849,6 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
         clearInterruptionRetries();
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
-        activateSilentAnchor(false);
         requestScreenWakeLock();
         restoreTargetVolume();
         startPlaybackWatchdog();
@@ -777,16 +856,30 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
         const p = audio.play();
         if (p !== undefined) {
           p.then(() => {
-            isInternalSrcChange = false;
+            if (reqId === currentPlayRequestId) {
+              isInternalSrcChange = false;
+              markTrackTransitionEnd();
+            }
           }).catch((err) => {
+            if (reqId !== currentPlayRequestId) return;
             isInternalSrcChange = false;
             console.warn('[Audio instant play interrupted / autoplay]:', err);
+            setTimeout(() => {
+              if (reqId !== currentPlayRequestId || isUserInitiatedPause || !audio.paused) return;
+              audio.play().catch(() => {
+                if (reqId === currentPlayRequestId && !isUserInitiatedPause) {
+                  recoverAudioStream(startTime || 0, true);
+                }
+              });
+            }, 250);
           });
         } else {
           isInternalSrcChange = false;
+          markTrackTransitionEnd();
         }
       } else {
         audio.pause();
+        markTrackTransitionEnd();
         setTimeout(() => { isInternalSrcChange = false; }, 100);
       }
     };
@@ -821,7 +914,6 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
       clearInterruptionRetries();
       isUserInitiatedPause = false;
       wasInterruptedByExternalApp = false;
-      activateSilentAnchor(false);
       requestScreenWakeLock();
       startPlaybackWatchdog();
 
@@ -834,24 +926,48 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
       const p = audio.play();
       if (p !== undefined) {
         p.then(() => {
-          isInternalSrcChange = false;
+          if (reqId === currentPlayRequestId) {
+            isInternalSrcChange = false;
+            markTrackTransitionEnd();
+          }
         }).catch((err) => {
+          if (reqId !== currentPlayRequestId) return;
           isInternalSrcChange = false;
           console.warn('[Audio play interrupted / autoplay]:', err);
           if (err.name === 'NotAllowedError' && typeof document !== 'undefined' && document.visibilityState === 'visible') {
+            markTrackTransitionEnd();
             toast.info(tr('Click anywhere to enable audio on this device', 'Нажмите в любом месте для включения звука на этом устройстве'));
+            return;
           }
+          // Automatic retry after 200ms if play() was interrupted at track boundary in background
+          setTimeout(() => {
+            if (reqId !== currentPlayRequestId || isUserInitiatedPause || !audio.paused) return;
+            if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
+              audioCtx.resume().catch(() => {});
+            }
+            audio.play().then(() => {
+              if (reqId === currentPlayRequestId) {
+                markTrackTransitionEnd();
+              }
+            }).catch(() => {
+              if (reqId === currentPlayRequestId && !isUserInitiatedPause) {
+                recoverAudioStream(startTime || 0, true);
+              }
+            });
+          }, 200);
         });
       } else {
         isInternalSrcChange = false;
+        markTrackTransitionEnd();
       }
     } else {
       audio.pause();
+      markTrackTransitionEnd();
       setTimeout(() => { isInternalSrcChange = false; }, 100);
     }
   };
 
-  // 1. If synchronous blob URL is already available in memory, play directly!
+  // 1. If synchronous blob URL is already available in memory, play directly (0ms latency, zero network)!
   if (syncBlobUrl) {
     applyPlayback(syncBlobUrl);
     return;
@@ -860,9 +976,17 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
   // 2. Play immediately with streamUrl to maintain audio hardware session without asynchronous delay
   applyPlayback(streamUrl);
 
-  // If track is in local offline cache, pre-warm or load blob in background
-  if (isTrackDownloadedLocally(track.id)) {
-    getCachedTrackUrl(track.id).catch(() => {});
+  // 3. Simultaneously check CacheStorage: if the track is cached locally and network stream hasn't started playing yet
+  // (e.g. phone is in Doze mode after 10m), seamlessly swap to the local Blob URL!
+  if (track.id > 0) {
+    getCachedTrackUrl(track.id).then((blobUrl) => {
+      if (blobUrl && reqId === currentPlayRequestId && autoPlay && !isUserInitiatedPause) {
+        if (audio.paused || audio.readyState < 2 || audio.error !== null) {
+          console.log(`[Player] Upgrading stalled/pending network stream for "${track.title}" to local cached Blob URL`);
+          applyPlayback(blobUrl);
+        }
+      }
+    }).catch(() => {});
   }
 }
 
@@ -1077,8 +1201,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     useSyncStore.getState().sendPlaybackState({ isPlaying: true });
   };
 
-  let isTransitioningTrack = false;
-
   audio.onpause = () => {
     // 1. Ignore synthetic pause events fired asynchronously by HTMLMediaElement when changing audio.src or recovering stream
     if (isInternalSrcChange || isRecoveringStream || isTransitioningTrack || !audio.paused) {
@@ -1088,7 +1210,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     // 2. If the track reached the end, this is a natural EOF pause preceding 'ended', NOT an interruption
     const cur = audio.currentTime;
     const dur = (audio.duration && isFinite(audio.duration) && audio.duration > 0) ? audio.duration : get().duration;
-    const isNaturalEndOfTrack = audio.ended || (dur > 0 && cur >= dur - 0.8);
+    const isNaturalEndOfTrack = audio.ended || (dur > 0 && cur >= dur - 1.2);
 
     if (isNaturalEndOfTrack) {
       return;
@@ -1153,7 +1275,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   let consecutiveErrors = 0;
 
   audio.onerror = () => {
-    isTransitioningTrack = false;
+    markTrackTransitionEnd();
     isInternalSrcChange = false;
     const err = audio.error;
     const { currentTrack, isPlaying } = get();
@@ -1205,7 +1327,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   audio.onplaying = () => {
     clearInterruptionRetries();
     isInternalSrcChange = false;
-    isTransitioningTrack = false;
+    markTrackTransitionEnd();
     consecutiveErrors = 0;
     networkRetryCount = 0;
     if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
@@ -1218,10 +1340,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       navigator.mediaSession.playbackState = 'playing';
     }
     updateMediaPositionState();
+    // Restart prefetch schedule once playback is actively flowing (after any initial onwaiting event)
+    scheduleNextTrackPrefetch();
   };
 
   audio.onwaiting = () => {
-    cancelActivePrefetch();
+    // Only abort if a background prefetch is actively downloading right now;
+    // do not kill the scheduled timer on initial track load!
+    if (isPrefetching) {
+      cancelActivePrefetch();
+    }
     if (get().isPlaying && 'mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'playing';
     }
@@ -1236,7 +1364,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   };
 
   audio.onstalled = () => {
-    cancelActivePrefetch();
+    if (isPrefetching) {
+      cancelActivePrefetch();
+    }
     if (!get().isPlaying) return;
     if (stallTimeout) clearTimeout(stallTimeout);
     stallTimeout = setTimeout(() => {
@@ -1269,6 +1399,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
 
     set(update);
+
+    // Event-driven next-track prefetching: immune to Chrome's 5-minute background setTimeout throttling!
+    if (cur >= 6 && !isPrefetching) {
+      triggerEventDrivenPrefetch();
+    }
 
     const crossfade = get().crossfade;
     const effectiveDur = update.duration || get().duration;
@@ -1309,16 +1444,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       else audio.addEventListener('loadedmetadata', onReady, { once: true });
     }
 
-    // Gapless pre-roll transition: start next track slightly before EOF (0.35s) so the audio decoder never idles out
-    // and OS background audio session doesn't suspend or drop WakeLock.
+    // Gapless pre-roll transition using actual media duration (dur) so metadata discrepancies never cut off or miss EOF:
+    // start next track slightly before EOF (0.3s) so the audio decoder never idles out in Doze Mode.
+    const mediaDur = (dur && !isNaN(dur) && isFinite(dur) && dur > 3) ? dur : 0;
     if (
       !isTransitioningTrack &&
       !get().currentTrack?.isPreview &&
-      effectiveDur > 3 &&
-      cur >= effectiveDur - 0.35 &&
+      mediaDur > 3 &&
+      cur >= mediaDur - 0.3 &&
       !audio.paused
     ) {
-      isTransitioningTrack = true;
+      markTrackTransitionStart();
       cancelFade();
       restoreTargetVolume();
       if (!useSyncStore.getState().isLocalActive) {
@@ -1328,7 +1464,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (repeat === 'one') {
         audio.currentTime = 0;
         audio.play().catch(() => {});
-        isTransitioningTrack = false;
+        markTrackTransitionEnd();
       } else {
         nextTrack();
       }
@@ -1336,7 +1472,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
 
     const now = Date.now();
-    if (now - lastSyncTime > 1500) {
+    // Throttle sync updates to 10s when app is hidden in background (2s when visible) to minimize background radio/CPU wakeups
+    const syncIntervalMs = isAppVisible ? 2000 : 10000;
+    if (now - lastSyncTime > syncIntervalMs) {
       lastSyncTime = now;
       updateMediaPositionState(cur, update.duration || get().duration);
       if (useSyncStore.getState().isLocalActive) {
@@ -1350,8 +1488,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   audio.oncanplay = handleAudioDuration;
 
   audio.onended = () => {
-    if (isTransitioningTrack) return;
-    isTransitioningTrack = true;
+    if (isTransitioningTrack && Date.now() - lastTrackTransitionWallTime < 2500) return;
+    markTrackTransitionStart();
 
     cancelFade();
     restoreTargetVolume();
@@ -1374,7 +1512,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const onReady = () => {
         try { audio.currentTime = 29; } catch (_) {}
         audio.play().then(() => { isInternalSrcChange = false; }).catch(() => { isInternalSrcChange = false; });
-        isTransitioningTrack = false;
+        markTrackTransitionEnd();
       };
       if (audio.readyState >= 1) onReady();
       else audio.addEventListener('loadedmetadata', onReady, { once: true });
@@ -1388,7 +1526,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (useSyncStore.getState().isLocalActive) {
         useSyncStore.getState().sendPlaybackState({ currentTime: 0, isPlaying: true });
       }
-      isTransitioningTrack = false;
+      markTrackTransitionEnd();
     } else {
       nextTrack();
     }
@@ -1513,72 +1651,110 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
   const isBufferSafeForPrefetch = (): boolean => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
-    if (!audio.duration || !isFinite(audio.duration) || audio.duration <= 0) return false;
-
     const cur = audio.currentTime;
-    // Don't prefetch during the first 8 seconds to give the active track 100% bandwidth
-    if (cur < 8) return false;
+    // Don't prefetch during the first 6 seconds to give the active track 100% bandwidth
+    if (cur < 6) return false;
+
+    // If playing from a local blob URL, network bandwidth is 100% free!
+    if (audio.src.startsWith('blob:')) return true;
+
+    if (!audio.duration || !isFinite(audio.duration) || audio.duration <= 0) {
+      return cur >= 12;
+    }
 
     for (let i = 0; i < audio.buffered.length; i++) {
       if (audio.buffered.start(i) <= cur && cur <= audio.buffered.end(i)) {
         const bufferedAhead = audio.buffered.end(i) - cur;
-        // Current track must have at least 20 seconds buffered ahead (or reached EOF)
-        return bufferedAhead >= 20 || audio.buffered.end(i) >= (audio.duration - 1);
+        // Current track must have at least 15 seconds buffered ahead (or reached EOF)
+        return bufferedAhead >= 15 || audio.buffered.end(i) >= (audio.duration - 1);
       }
     }
-    return false;
+    return cur >= 15 && audio.readyState >= 3;
+  };
+
+  let lastPrefetchCheckTime = 0;
+
+  const triggerEventDrivenPrefetch = async () => {
+    if (isPrefetching) return;
+    const now = Date.now();
+    if (now - lastPrefetchCheckTime < 2500) return;
+    lastPrefetchCheckTime = now;
+
+    const { queue, currentIndex, currentTrack, isPlaying, repeat } = get();
+    if (!isPlaying || !currentTrack || !queue || queue.length === 0 || currentIndex < 0) return;
+
+    // Collect up to 2 upcoming tracks to pre-buffer into Blob RAM
+    const upcomingIndices: number[] = [];
+    if (currentIndex + 1 < queue.length) {
+      upcomingIndices.push(currentIndex + 1);
+      if (currentIndex + 2 < queue.length) {
+        upcomingIndices.push(currentIndex + 2);
+      }
+    } else if (repeat === 'all' && queue.length > 0) {
+      upcomingIndices.push(0);
+    }
+
+    if (upcomingIndices.length === 0) return;
+
+    // Check if any upcoming track still needs to be loaded into synchronous Blob RAM
+    let targetTrack: Track | null = null;
+    let isImmediateNext = false;
+
+    for (let i = 0; i < upcomingIndices.length; i++) {
+      const idx = upcomingIndices[i];
+      const candidate = queue[idx];
+      if (!candidate || candidate.id <= 0) continue;
+
+      const existingBlob = getSynchronousBlobUrl(candidate.id);
+      if (existingBlob) {
+        if (i === 0) {
+          preloadNextTrackElement(existingBlob);
+        }
+        continue;
+      }
+
+      targetTrack = candidate;
+      isImmediateNext = i === 0;
+      break;
+    }
+
+    if (!targetTrack) return;
+    if (!isBufferSafeForPrefetch()) return;
+
+    isPrefetching = true;
+    prefetchAbortController = new AbortController();
+
+    try {
+      const cached = await isTrackCached(targetTrack.id);
+      if (!cached) {
+        console.log(`[Smart Prefetch] Pre-downloading upcoming track into offline cache: "${targetTrack.title}"`);
+        await cacheTrackOffline(targetTrack, 35000, prefetchAbortController.signal);
+      }
+      const blobUrl = await getCachedTrackUrl(targetTrack.id);
+      if (isImmediateNext) {
+        preloadNextTrackElement(blobUrl || `/api/stream/${targetTrack.id}`);
+      }
+      if (blobUrl) {
+        console.log(`[Smart Prefetch] Track "${targetTrack.title}" ready in RAM as 0ms Blob URL`);
+      }
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        console.warn('[Smart Prefetch] Prefetch error:', err);
+      }
+    } finally {
+      isPrefetching = false;
+      prefetchAbortController = null;
+    }
   };
 
   const scheduleNextTrackPrefetch = () => {
-    cancelActivePrefetch();
-
-    let attempts = 0;
-    const maxAttempts = 15;
-
-    const attemptPrefetch = async () => {
-      if (isPrefetching) return;
-      const { queue, currentIndex, currentTrack, isPlaying } = get();
-      if (!isPlaying || !currentTrack || !queue || currentIndex < 0) return;
-
-      if (!isBufferSafeForPrefetch()) {
-        attempts++;
-        if (attempts < maxAttempts) {
-          prefetchTimeout = setTimeout(attemptPrefetch, 3000);
-        }
-        return;
-      }
-
-      const nextIndex = currentIndex + 1;
-      if (nextIndex >= queue.length) return;
-      const nextTrack = queue[nextIndex];
-      if (!nextTrack) return;
-
-      const cached = await isTrackCached(nextTrack.id);
-      if (cached) {
-        getCachedTrackUrl(nextTrack.id).catch(() => {});
-        return;
-      }
-
-      isPrefetching = true;
-      prefetchAbortController = new AbortController();
-
-      try {
-        console.log(`[Smart Prefetch] WAN buffer is healthy. Pre-buffering next track: "${nextTrack.title}"`);
-        await cacheTrackOffline(nextTrack, 35000, prefetchAbortController.signal);
-        await getCachedTrackUrl(nextTrack.id);
-        console.log(`[Smart Prefetch] Next track "${nextTrack.title}" ready as local Blob URL`);
-      } catch (err: any) {
-        if (err?.name !== 'AbortError') {
-          console.warn('[Smart Prefetch] Prefetch error:', err);
-        }
-      } finally {
-        isPrefetching = false;
-        prefetchAbortController = null;
-      }
-    };
-
-    // First check after 8 seconds of steady playback
-    prefetchTimeout = setTimeout(attemptPrefetch, 8000);
+    if (prefetchTimeout) {
+      clearTimeout(prefetchTimeout);
+      prefetchTimeout = null;
+    }
+    prefetchTimeout = setTimeout(() => {
+      triggerEventDrivenPrefetch();
+    }, 6500);
   };
 
   let isPrefetchingRecommendations = false;
@@ -2054,7 +2230,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
 
       // End of playback
-      isTransitioningTrack = false;
+      markTrackTransitionEnd();
       stopPlaybackWatchdog();
       set({ isPlaying: false });
       deactivateSilentAnchor();

@@ -91,6 +91,9 @@ let wsInstance: WebSocket | null = null;
 let pingInterval: any = null;
 let syncThrottleTimer: any = null;
 let passiveTickInterval: any = null;
+let lastSentTrackId: number | null = null;
+let lastSentQueueRef: Track[] | null = null;
+let lastSentOrigQueueRef: Track[] | null = null;
 
 export const useSyncStore = create<SyncState>((set, get) => {
   const initialDev = detectDevice();
@@ -122,6 +125,9 @@ export const useSyncStore = create<SyncState>((set, get) => {
         wsInstance = ws;
 
         ws.onopen = () => {
+          lastSentTrackId = null;
+          lastSentQueueRef = null;
+          lastSentOrigQueueRef = null;
           set({ isConnected: true });
           const { deviceId, deviceName, deviceType } = get();
           const player = usePlayerStore.getState();
@@ -436,29 +442,49 @@ export const useSyncStore = create<SyncState>((set, get) => {
 
       if (syncThrottleTimer) clearTimeout(syncThrottleTimer);
       syncThrottleTimer = setTimeout(() => {
+        if (!wsInstance || wsInstance.readyState !== WebSocket.OPEN) return;
+        // Avoid clogging background socket buffer on slow cellular connections
+        if (wsInstance.bufferedAmount > 65536) return;
+
         const player = usePlayerStore.getState();
-        const payload = {
-          track: player.currentTrack,
+        const curTrackId = player.currentTrack?.id ?? null;
+        const includeTrack = curTrackId !== lastSentTrackId || extra?.track !== undefined;
+        const includeQueue = player.queue !== lastSentQueueRef || extra?.queue !== undefined;
+        const includeOrigQueue = player.originalQueue !== lastSentOrigQueueRef || extra?.originalQueue !== undefined;
+
+        const payload: any = {
           isPlaying: player.isPlaying,
           currentTime: player.currentTime,
           duration: player.duration,
-          queue: player.queue,
-          originalQueue: player.originalQueue,
           currentIndex: player.currentIndex,
           shuffle: player.shuffle,
           repeat: player.repeat,
           volume: player.volume,
-          ...extra,
         };
 
-        if (wsInstance && wsInstance.readyState === WebSocket.OPEN) {
-          wsInstance.send(
-            JSON.stringify({
-              type: 'PLAYBACK_STATE',
-              state: payload,
-            })
-          );
+        if (includeTrack) {
+          payload.track = player.currentTrack;
+          lastSentTrackId = curTrackId;
         }
+        if (includeQueue) {
+          payload.queue = player.queue;
+          lastSentQueueRef = player.queue;
+        }
+        if (includeOrigQueue) {
+          payload.originalQueue = player.originalQueue;
+          lastSentOrigQueueRef = player.originalQueue;
+        }
+
+        if (extra) {
+          Object.assign(payload, extra);
+        }
+
+        wsInstance.send(
+          JSON.stringify({
+            type: 'PLAYBACK_STATE',
+            state: payload,
+          })
+        );
       }, 50);
     },
 
