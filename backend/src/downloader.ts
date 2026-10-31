@@ -21,7 +21,8 @@ const queue: QueueItem[] = [];
 let isWorkerRunning = false;
 
 function sanitizeFilename(name: string): string {
-  return name.replace(/[\\/:*?"<>|]/g, '_').trim();
+  if (!name) return 'track';
+  return String(name).replace(/[\\/:*?"<>|]/g, '_').trim() || 'track';
 }
 
 export function resolveAudioFilePath(targetDir: string, safeTitle: string): string | null {
@@ -146,6 +147,74 @@ export function isTrackBlacklistedForUser(
   } catch (err: any) {
     console.error('[Blacklist Check Error]', err.message);
     return false;
+  }
+}
+
+export function filterBlacklistedTracksForUser<T extends { title: string; artist: string; spotify_id?: string }>(
+  userId: number,
+  tracks: T[]
+): T[] {
+  if (!userId || !tracks || tracks.length === 0) return tracks;
+  try {
+    const rows: any[] = db.prepare(`
+      SELECT title, artist, spotify_id FROM blacklist WHERE user_id = ?
+    `).all(userId);
+    if (!rows || rows.length === 0) return tracks;
+
+    const cleanTitle = (s: string) =>
+      s
+        .toLowerCase()
+        .replace(/[\(\[][^\)\]]*(feat|ft|with|remix|version|bonus|edit)[^\)\]]*[\)\]]/gi, '')
+        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+        .trim();
+
+    const preparedRules = rows.map((b) => {
+      const bTitle = (b.title || '').toLowerCase().trim();
+      const bArtist = (b.artist || '').toLowerCase().trim();
+      const bPrimary = bArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
+      return {
+        spotifyId: b.spotify_id || null,
+        title: bTitle,
+        cleanTitle: cleanTitle(bTitle),
+        artist: bArtist,
+        primaryArtist: bPrimary,
+        isArtistOnly: bTitle === '*'
+      };
+    });
+
+    return tracks.filter((t) => {
+      if (!t || !t.title) return true;
+      const lTitle = t.title.toLowerCase().trim();
+      const lArtist = (t.artist || '').toLowerCase().trim();
+      const primaryArtist = lArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
+      const cTitle = cleanTitle(lTitle);
+      const spotifyId = t.spotify_id || (t as any).spotifyId;
+
+      return !preparedRules.some((b) => {
+        if (spotifyId && b.spotifyId && b.spotifyId === spotifyId) return true;
+        if (b.isArtistOnly && (b.artist === lArtist || b.artist === primaryArtist || lArtist.startsWith(b.artist))) {
+          return true;
+        }
+
+        const artistMatches =
+          !b.artist ||
+          b.artist === '*' ||
+          b.artist === lArtist ||
+          b.artist === primaryArtist ||
+          b.primaryArtist === primaryArtist ||
+          lArtist.startsWith(b.artist);
+
+        if (!artistMatches) return false;
+
+        if (b.title === lTitle) return true;
+        if (cTitle && b.cleanTitle === cTitle) return true;
+
+        return false;
+      });
+    });
+  } catch (err: any) {
+    console.error('[Filter Blacklisted Error]', err.message);
+    return tracks;
   }
 }
 

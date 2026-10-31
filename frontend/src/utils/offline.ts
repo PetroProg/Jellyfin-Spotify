@@ -157,13 +157,15 @@ export function getAllPlaylistsCache(): Playlist[] {
 export function saveOfflinePlaylistData(
   playlist: Playlist,
   tracks: Track[],
-  markDownloaded = false
+  markDownloaded = false,
+  version?: string
 ): void {
   try {
     const key = `${OFFLINE_PLAYLIST_PREFIX}${playlist.id}`;
     const payload = {
       playlist,
       tracks,
+      version: version || (playlist as any)?.version,
       updatedAt: Date.now(),
     };
     localStorage.setItem(key, JSON.stringify(payload));
@@ -178,7 +180,7 @@ export function saveOfflinePlaylistData(
 
 export function getOfflinePlaylistData(
   playlistId: number
-): { playlist: Playlist; tracks: Track[] } | null {
+): { playlist: Playlist; tracks: Track[]; version?: string } | null {
   try {
     const raw = localStorage.getItem(`${OFFLINE_PLAYLIST_PREFIX}${playlistId}`);
     return raw ? JSON.parse(raw) : null;

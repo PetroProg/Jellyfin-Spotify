@@ -69,9 +69,20 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
 
   const loadLikes = async () => {
     try {
-      const data = await apiRequest<{ tracks: Track[] }>('/likes');
+      const cachedVer = localStorage.getItem('jellyfy_cached_liked_version') || '';
+      const data = await apiRequest<{ upToDate?: boolean; version?: string; tracks?: Track[] }>(
+        cachedVer ? `/likes?version=${encodeURIComponent(cachedVer)}` : '/likes'
+      );
+
+      if (data.upToDate) {
+        return;
+      }
+
       const loadedTracks = data.tracks || [];
       setTracks(loadedTracks);
+      if (data.version) {
+        localStorage.setItem('jellyfy_cached_liked_version', data.version);
+      }
       localStorage.setItem(CACHED_LIKED_TRACKS_KEY, JSON.stringify(loadedTracks));
 
       // Synchronize playerStore's likedTrackIds so all UI components, buttons and context menus are in sync
@@ -87,8 +98,9 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
         description: 'Ваша медиатека сохраненных композиций',
         created_at: new Date().toISOString(),
         track_count: loadedTracks.length,
+        version: data.version,
       };
-      saveOfflinePlaylistData(likedPl, loadedTracks);
+      saveOfflinePlaylistData(likedPl, loadedTracks, false, data.version);
 
       if (useOfflineStore.getState().isDownloaded(LIKED_PLAYLIST_ID)) {
         useOfflineStore.getState().syncPlaylist(LIKED_PLAYLIST_ID, loadedTracks, likedPl);

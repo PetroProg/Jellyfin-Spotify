@@ -31,7 +31,8 @@ import {
   reDownloadAllTracksInHighQuality,
   getUpgradeProgress,
   cancelBlacklistedDownloads,
-  isTrackBlacklistedForUser
+  isTrackBlacklistedForUser,
+  filterBlacklistedTracksForUser
 } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
@@ -646,10 +647,20 @@ server.post('/api/daily-mixes/:id/save', { preHandler: [(server as any).authenti
   }
 });
 
+function getUserBlacklistVersion(userId: number): string {
+  try {
+    const row: any = db.prepare('SELECT COUNT(*) as c, MAX(created_at) as m FROM blacklist WHERE user_id = ?').get(userId);
+    return `${row?.c || 0}_${row?.m || ''}`;
+  } catch (_) {
+    return '0_';
+  }
+}
+
 // ----------------- PLAYLISTS -----------------
 server.get('/api/playlists', { preHandler: [(server as any).authenticate] }, async (req: any) => {
-  const playlists = db.prepare(`
-    SELECT p.*, COUNT(pt.track_id) as track_count
+  const blVer = getUserBlacklistVersion(req.user.id);
+  const rawPlaylists: any[] = db.prepare(`
+    SELECT p.*, COUNT(pt.track_id) as track_count, COALESCE(MAX(pt.position), 0) as max_pos, COALESCE(MAX(pt.added_at), '') as max_added
     FROM playlists p
     LEFT JOIN playlist_tracks pt ON p.id = pt.playlist_id
     WHERE p.user_id = ? 
@@ -660,6 +671,12 @@ server.get('/api/playlists', { preHandler: [(server as any).authenticate] }, asy
     GROUP BY p.id
     ORDER BY p.created_at DESC
   `).all(req.user.id);
+
+  const playlists = rawPlaylists.map(p => ({
+    ...p,
+    version: `v_${p.id}_${p.track_count || 0}_${p.max_pos || 0}_${p.max_added || ''}_${p.name}_${p.cover_url || ''}_${blVer}`
+  }));
+
   return { playlists };
 });
 
@@ -683,28 +700,24 @@ server.post('/api/playlists', { preHandler: [(server as any).authenticate] }, as
 });
 
 server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
-  const playlistId = req.params.id;
-  const playlist = db.prepare('SELECT * FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
+  const playlistId = Number(req.params.id);
+  const playlist: any = db.prepare('SELECT * FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
   if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
 
-  const tracks = db.prepare(`
-    SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, pt.added_at, pt.position
-    FROM playlist_tracks pt
-    JOIN tracks t ON pt.track_id = t.id
-    WHERE pt.playlist_id = ?
-      AND NOT EXISTS (
-        SELECT 1 FROM blacklist b
-        WHERE b.user_id = ?
-          AND (
-            (b.spotify_id IS NOT NULL AND b.spotify_id != '' AND b.spotify_id = t.spotify_id)
-            OR (LOWER(b.title) = LOWER(t.title) AND (LOWER(b.artist) = LOWER(t.artist) OR LOWER(b.title) = '*'))
-            OR (b.title = '*' AND (LOWER(b.artist) = LOWER(t.artist) OR LOWER(t.artist) LIKE LOWER(b.artist) || '%'))
-          )
-      )
-    ORDER BY pt.position ASC
-  `).all(playlistId, req.user.id);
+  const stats: any = db.prepare(`
+    SELECT COUNT(*) as count, COALESCE(MAX(position), 0) as maxPos, COALESCE(MAX(added_at), '') as maxAdded
+    FROM playlist_tracks WHERE playlist_id = ?
+  `).get(playlistId);
 
-  const validTracks = tracks.filter((t: any) => !isTrackBlacklistedForUser(req.user.id, t.title, t.artist, t.spotify_id));
+  const currentCount = Number(stats?.count) || 0;
+  const currentMaxPos = Number(stats?.maxPos) || 0;
+  const currentMaxAdded = String(stats?.maxAdded || '');
+  const blVer = getUserBlacklistVersion(req.user.id);
+  const currentVersion = `v_${playlistId}_${currentCount}_${currentMaxPos}_${currentMaxAdded}_${playlist.name}_${playlist.cover_url || ''}_${blVer}`;
+
+  const clientVersion = req.query.version;
+  const knownCount = req.query.knownCount !== undefined ? Number(req.query.knownCount) : -1;
+  const knownMaxPos = req.query.knownMaxPos !== undefined ? Number(req.query.knownMaxPos) : -1;
 
   const activeJob: any = db.prepare(`
     SELECT * FROM download_jobs
@@ -712,7 +725,55 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
     ORDER BY created_at DESC LIMIT 1
   `).get(playlistId);
 
-  return { playlist, tracks: validTracks, activeJob: activeJob || null };
+  // If client already has latest version: 0ms instant response without querying tracks table
+  if (clientVersion && clientVersion === currentVersion) {
+    return { upToDate: true, version: currentVersion, playlist, activeJob: activeJob || null };
+  }
+
+  // Delta append check: if tracks were strictly appended after knownMaxPos
+  if (knownCount > 0 && knownMaxPos >= 0 && currentCount > knownCount && currentMaxPos > knownMaxPos) {
+    const minPosRow: any = db.prepare(`
+      SELECT MIN(position) as minPos, COUNT(*) as appendedCount
+      FROM playlist_tracks WHERE playlist_id = ? AND position > ?
+    `).get(playlistId, knownMaxPos);
+
+    if (minPosRow && minPosRow.appendedCount === (currentCount - knownCount)) {
+      const rawAdded: any[] = db.prepare(`
+        SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, pt.added_at, pt.position
+        FROM playlist_tracks pt
+        JOIN tracks t ON pt.track_id = t.id
+        WHERE pt.playlist_id = ? AND pt.position > ?
+        ORDER BY pt.position ASC
+      `).all(playlistId, knownMaxPos) as any[];
+
+      const validAddedTracks = filterBlacklistedTracksForUser(req.user.id, rawAdded);
+      return {
+        delta: true,
+        version: currentVersion,
+        playlist,
+        addedTracks: validAddedTracks,
+        activeJob: activeJob || null
+      };
+    }
+  }
+
+  // Full fetch: single batch query for tracks + 1 query for blacklist filtering
+  const rawTracks: any[] = db.prepare(`
+    SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, pt.added_at, pt.position
+    FROM playlist_tracks pt
+    JOIN tracks t ON pt.track_id = t.id
+    WHERE pt.playlist_id = ?
+    ORDER BY pt.position ASC
+  `).all(playlistId) as any[];
+
+  const validTracks = filterBlacklistedTracksForUser(req.user.id, rawTracks);
+
+  return {
+    version: currentVersion,
+    playlist,
+    tracks: validTracks,
+    activeJob: activeJob || null
+  };
 });
 
 server.put('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
@@ -1547,23 +1608,30 @@ server.get('/api/tracks/upgrade-quality/status', { preHandler: [(server as any).
 
 // ----------------- LIKES -----------------
 server.get('/api/likes', { preHandler: [(server as any).authenticate] }, async (req: any) => {
-  const tracks = db.prepare(`
+  const blVer = getUserBlacklistVersion(req.user.id);
+  const stats: any = db.prepare(`
+    SELECT COUNT(*) as count, COALESCE(MAX(created_at), '') as maxAdded
+    FROM liked_tracks WHERE user_id = ?
+  `).get(req.user.id);
+
+  const currentCount = Number(stats?.count) || 0;
+  const currentMaxAdded = String(stats?.maxAdded || '');
+  const currentVersion = `v_likes_${req.user.id}_${currentCount}_${currentMaxAdded}_${blVer}`;
+
+  if (req.query.version && req.query.version === currentVersion) {
+    return { upToDate: true, version: currentVersion };
+  }
+
+  const rawTracks: any[] = db.prepare(`
     SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, lt.created_at as added_at
     FROM liked_tracks lt
     JOIN tracks t ON lt.track_id = t.id
     WHERE lt.user_id = ?
-      AND NOT EXISTS (
-        SELECT 1 FROM blacklist b
-        WHERE b.user_id = lt.user_id
-          AND (
-            (b.spotify_id IS NOT NULL AND b.spotify_id != '' AND b.spotify_id = t.spotify_id)
-            OR (LOWER(b.title) = LOWER(t.title) AND (LOWER(b.artist) = LOWER(t.artist) OR LOWER(b.title) = '*'))
-            OR (b.title = '*' AND (LOWER(b.artist) = LOWER(t.artist) OR LOWER(t.artist) LIKE LOWER(b.artist) || '%'))
-          )
-      )
     ORDER BY lt.created_at DESC
-  `).all(req.user.id);
-  return { tracks };
+  `).all(req.user.id) as any[];
+
+  const validTracks = filterBlacklistedTracksForUser(req.user.id, rawTracks);
+  return { version: currentVersion, tracks: validTracks };
 });
 
 server.post('/api/likes/:trackId', { preHandler: [(server as any).authenticate] }, async (req: any) => {

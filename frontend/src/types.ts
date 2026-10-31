@@ -36,6 +36,7 @@ export interface Playlist {
   accent_color?: string;
   seed_artists?: string[];
   activeJob?: DownloadJob | null;
+  version?: string;
 }
 
 export interface DownloadJob {
