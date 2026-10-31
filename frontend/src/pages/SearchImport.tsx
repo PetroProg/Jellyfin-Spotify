@@ -298,7 +298,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
       const res = await apiRequest<{ success: boolean; track: Track }>('/tracks/download-single', {
         method: 'POST',
         body: JSON.stringify({ track: st }),
-        timeoutMs: 120000,
+        timeoutMs: 300000,
       });
 
       if (res.success && res.track) {
@@ -353,6 +353,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
           track: st,
           isLikedOnly: true,
         }),
+        timeoutMs: 300000,
       });
 
       if (res.success && res.track) {

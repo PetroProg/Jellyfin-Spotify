@@ -114,7 +114,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
             track: spotifyTrack,
             isLikedOnly: true,
           }),
-          timeoutMs: 120000,
+          timeoutMs: 300000,
         });
 
         if (res.success && res.track) {
@@ -218,7 +218,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
             track: spotifyTrack,
             playlistId: playlist.id,
           }),
-          timeoutMs: 120000,
+          timeoutMs: 300000,
         });
 
         if (res.success && res.track) {
@@ -292,7 +292,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
               track: spotifyTrack,
               playlistId: res.id,
             }),
-            timeoutMs: 120000,
+            timeoutMs: 300000,
           });
           if (dlRes.success && dlRes.track) {
             setActiveTrack(dlRes.track);

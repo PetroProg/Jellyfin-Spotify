@@ -40,13 +40,54 @@ export function cleanupPartialFiles(targetDir: string, safeTitle: string) {
     if (!fs.existsSync(targetDir)) return;
     const files = fs.readdirSync(targetDir);
     for (const f of files) {
-      if (f.startsWith(safeTitle) && (f.endsWith('.part') || f.endsWith('.ytdl') || f.endsWith('.temp') || f.endsWith('.mp3') || f.endsWith('.m4a') || f.endsWith('.opus'))) {
+      if (
+        f.startsWith(safeTitle) &&
+        (f.endsWith('.part') ||
+          f.endsWith('.ytdl') ||
+          f.endsWith('.temp') ||
+          f.endsWith('.mp3') ||
+          f.endsWith('.m4a') ||
+          f.endsWith('.opus') ||
+          f.endsWith('.webm') ||
+          f.endsWith('.webp') ||
+          f.endsWith('.png') ||
+          f.endsWith('.jpg'))
+      ) {
         try {
           fs.unlinkSync(path.join(targetDir, f));
         } catch (_) {}
       }
     }
   } catch (_) {}
+}
+
+function killProcessGroup(proc: ReturnType<typeof spawn>, signal: NodeJS.Signals = 'SIGKILL') {
+  try {
+    if (proc.pid) {
+      process.kill(-proc.pid, signal);
+    }
+  } catch (_) {}
+  try {
+    proc.kill(signal);
+  } catch (_) {}
+}
+
+const MAX_CONCURRENT_SINGLE_DOWNLOADS = 2;
+let activeSingleDownloads = 0;
+const singleDownloadWaitQueue: Array<() => void> = [];
+
+async function runWithSingleDownloadSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeSingleDownloads >= MAX_CONCURRENT_SINGLE_DOWNLOADS) {
+    await new Promise<void>((resolve) => singleDownloadWaitQueue.push(resolve));
+  }
+  activeSingleDownloads++;
+  try {
+    return await fn();
+  } finally {
+    activeSingleDownloads--;
+    const next = singleDownloadWaitQueue.shift();
+    if (next) next();
+  }
 }
 
 export function isTrackBlacklistedForUser(
@@ -517,18 +558,20 @@ export async function findBestStudioAudioSource(artist: string, title: string, d
   try {
     const raw = await new Promise<string>((resolve) => {
       const proc = spawn('yt-dlp', [
+        '--js-runtimes', 'node',
         '--dump-json',
         '--flat-playlist',
         '--default-search', 'ytsearch10',
         '--',
         searchQuery
-      ]);
+      ], { detached: true });
       let stdout = '';
       proc.stdout.on('data', d => stdout += d.toString());
+      proc.stderr.on('data', () => {});
       proc.on('close', () => resolve(stdout));
       proc.on('error', () => resolve(''));
       setTimeout(() => {
-        try { proc.kill('SIGKILL'); } catch (_) {}
+        killProcessGroup(proc, 'SIGKILL');
         resolve(stdout);
       }, 15000);
     });
@@ -596,6 +639,115 @@ export async function findBestStudioAudioSource(artist: string, title: string, d
   }
 
   return `ytsearch1:${cleanArtist} - ${cleanTitle} audio`;
+}
+
+async function executeYtDlpMp3Download(
+  sourceUrl: string,
+  outputTemplate: string,
+  targetDir: string,
+  safeTitle: string,
+  timeoutMs: number,
+  lowCpuPriority: boolean
+): Promise<{ ok: boolean; timedOut: boolean }> {
+  return new Promise((resolve) => {
+    let isSettled = false;
+    const finish = (ok: boolean, timedOut: boolean = false) => {
+      if (!isSettled) {
+        isSettled = true;
+        clearTimeout(timer);
+        resolve({ ok, timedOut });
+      }
+    };
+
+    const ytDlpArgs = [
+      '--js-runtimes', 'node',
+      '--no-playlist',
+      '--force-overwrites',
+      '--no-continue',
+      '-f', 'bestaudio[acodec=opus]/bestaudio/best',
+      '--extract-audio',
+      '--audio-format', 'mp3',
+      '--audio-quality', '320k',
+      '--postprocessor-args', 'ExtractAudio:-af volume=-1.8dB -ar 48000 -compression_level 7',
+      '--embed-thumbnail',
+      '--add-metadata',
+      '-o', outputTemplate,
+      '--',
+      sourceUrl
+    ];
+
+    const cmd = lowCpuPriority ? 'nice' : 'yt-dlp';
+    const args = lowCpuPriority ? ['-n', '19', 'ionice', '-c', '3', 'yt-dlp', ...ytDlpArgs] : ytDlpArgs;
+
+    const proc = spawn(cmd, args, {
+      detached: true,
+      stdio: 'ignore'
+    });
+
+    const timer = setTimeout(() => {
+      console.warn(`[yt-dlp timeout] "${safeTitle}" timed out after ${Math.round(timeoutMs / 1000)}s. Killing process tree.`);
+      killProcessGroup(proc, 'SIGKILL');
+      cleanupPartialFiles(targetDir, safeTitle);
+      finish(false, true);
+    }, timeoutMs);
+
+    proc.on('close', (code) => {
+      const found = resolveAudioFilePath(targetDir, safeTitle);
+      if (code === 0 && found && fs.existsSync(found)) {
+        finish(true, false);
+      } else {
+        cleanupPartialFiles(targetDir, safeTitle);
+        finish(false, false);
+      }
+    });
+
+    proc.on('error', () => {
+      cleanupPartialFiles(targetDir, safeTitle);
+      finish(false, false);
+    });
+  });
+}
+
+async function downloadAudioWithFallback(
+  artist: string,
+  title: string,
+  durationMs: number | undefined,
+  outputTemplate: string,
+  targetDir: string,
+  safeTitle: string,
+  timeoutMs: number,
+  lowCpuPriority: boolean
+): Promise<boolean> {
+  const primaryUrl = await findBestStudioAudioSource(artist, title, durationMs);
+  const firstAttempt = await executeYtDlpMp3Download(
+    primaryUrl,
+    outputTemplate,
+    targetDir,
+    safeTitle,
+    timeoutMs,
+    lowCpuPriority
+  );
+  if (firstAttempt.ok) return true;
+
+  // If primary video ID was unavailable/age-restricted (and didn't time out), retry once via search fallback
+  const cleanArtist = (artist || '').replace(/^[- \t]+/, '').replace(/[\\/:*?"<>|]/g, ' ').trim();
+  const cleanTitle = (title || '').replace(/^[- \t]+/, '').replace(/[\\/:*?"<>|]/g, ' ').trim();
+  const fallbackQuery = `ytsearch1:${cleanArtist} - ${cleanTitle} audio`;
+
+  if (!firstAttempt.timedOut && primaryUrl !== fallbackQuery) {
+    console.warn(`[yt-dlp retry] Primary source ${primaryUrl} failed for "${artist} - ${title}". Retrying with search fallback...`);
+    const secondAttempt = await executeYtDlpMp3Download(
+      fallbackQuery,
+      outputTemplate,
+      targetDir,
+      safeTitle,
+      timeoutMs,
+      lowCpuPriority
+    );
+    return secondAttempt.ok;
+  }
+
+  return false;
 }
 
 async function downloadSingleTrack(item: QueueItem): Promise<void> {
@@ -688,138 +840,88 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
   const safeTitle = sanitizeFilename(track.title);
   const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
 
-  // Level 1 & 2: Smart Studio Candidate Selection
-  const audioSourceUrl = await findBestStudioAudioSource(track.artist, track.title, track.duration_ms);
+  const downloadedOk = await downloadAudioWithFallback(
+    track.artist,
+    track.title,
+    track.duration_ms,
+    outputTemplate,
+    targetDir,
+    safeTitle,
+    120000,
+    true
+  );
 
-  await new Promise<void>((resolve) => {
-    let isSettled = false;
-    const safeResolve = () => {
-      if (!isSettled) {
-        isSettled = true;
-        clearTimeout(timeoutTimer);
-        resolve();
-      }
-    };
+  if (!downloadedOk) {
+    console.warn(`[yt-dlp] Failed to download "${track.artist} - ${track.title}"`);
+    return;
+  }
 
-    // Launch yt-dlp with Format 251 (48kHz Opus Master) -> 320 kbps 48kHz MP3 with -1.8dB True-Peak headroom
-    const ytDlpProcess = spawn('nice', [
-      '-n', '19',
-      'ionice', '-c', '3',
-      'yt-dlp',
-      '--no-playlist',
-      '--force-overwrites',
-      '-f', 'bestaudio[acodec=opus]/bestaudio/best',
-      '--extract-audio',
-      '--audio-format', 'mp3',
-      '--audio-quality', '320k',
-      '--postprocessor-args', 'ExtractAudio:-af aresample=resampler=soxr:precision=28,volume=-1.8dB -ar 48000',
-      '--embed-thumbnail',
-      '--add-metadata',
-      '-o', outputTemplate,
-      '--',
-      audioSourceUrl
-    ]);
+  // Find saved file (.mp3 preferred studio 320k, or format fallback)
+  const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.mp3`);
 
-    // 100-second per-track safety timeout
-    const timeoutTimer = setTimeout(() => {
-      if (!isSettled) {
-        console.warn(`[yt-dlp timeout] Track "${track.artist} - ${track.title}" timed out after 100s. Killing process.`);
-        try { ytDlpProcess.kill('SIGTERM'); } catch (_) {}
-        setTimeout(() => {
-          try { ytDlpProcess.kill('SIGKILL'); } catch (_) {}
-          cleanupPartialFiles(targetDir, safeTitle);
-        }, 3000);
-        safeResolve();
-      }
-    }, 100000);
+  // Verify audio file validity & duration
+  const probe = await probeAudioFile(finalFile, track.duration_ms);
+  if (track.duration_ms > 30000 && probe.valid && !probe.isHighQuality && probe.reason?.includes('Обрезан')) {
+    console.warn(`[yt-dlp truncated audio detected] "${track.artist} - ${track.title}": probed ${probe.durationSec}s vs expected ${track.duration_ms / 1000}s. Discarding.`);
+    try { fs.unlinkSync(finalFile); } catch (_) {}
+    return;
+  }
 
-    ytDlpProcess.on('close', async (code) => {
-      if (isSettled) return;
+  try {
+    const doubleCheck: any = db.prepare(`
+      SELECT * FROM tracks 
+      WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+         OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+      LIMIT 1
+    `).get(track.id, track.title, track.artist);
 
-      if (code === 0) {
-        // Find saved file (.mp3 preferred studio 320k, or format fallback)
-        const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.mp3`);
+    let trackId = doubleCheck?.id;
+    const actualDurationMs = (probe.valid && probe.durationSec > 0)
+      ? Math.round(probe.durationSec * 1000)
+      : (track.duration_ms || 180000);
 
-        // Verify audio file validity & duration
-        const probe = await probeAudioFile(finalFile, track.duration_ms);
-        if (track.duration_ms > 30000 && probe.valid && !probe.isHighQuality && probe.reason?.includes('Обрезан')) {
-          console.warn(`[yt-dlp truncated audio detected] "${track.artist} - ${track.title}": probed ${probe.durationSec}s vs expected ${track.duration_ms / 1000}s. Discarding.`);
-          try { fs.unlinkSync(finalFile); } catch (_) {}
-          safeResolve();
-          return;
-        }
+    if (!trackId) {
+      const info = db.prepare(`
+        INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        track.title,
+        track.artist,
+        track.album,
+        actualDurationMs,
+        finalFile,
+        track.cover_url || '',
+        track.id
+      );
+      trackId = info.lastInsertRowid;
+    } else if (probe.valid && probe.durationSec > 0) {
+      db.prepare('UPDATE tracks SET duration_ms = ? WHERE id = ?').run(actualDurationMs, trackId);
+    }
 
-        try {
-          const doubleCheck: any = db.prepare(`
-            SELECT * FROM tracks 
-            WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
-               OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
-            LIMIT 1
-          `).get(track.id, track.title, track.artist);
+    if (isTrackBlacklistedForUser(item.userId, details.title || track.title, details.artist || track.artist, track.id)) {
+      console.log(`[Downloader] Track "${track.artist} - ${track.title}" was blacklisted during download. Skipping playlist link.`);
+    } else if (item.isLikedOnly || !playlistId) {
+      db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, trackId);
+      broadcastToUser(item.userId, { type: 'LIKES_UPDATED', trackId, liked: true });
+    } else {
+      db.prepare(`
+        INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
+        VALUES (?, ?, ?)
+      `).run(playlistId, trackId, position);
+    }
 
-          let trackId = doubleCheck?.id;
-          const actualDurationMs = (probe.valid && probe.durationSec > 0)
-            ? Math.round(probe.durationSec * 1000)
-            : (track.duration_ms || 180000);
+    const doneCount = playlistId
+      ? (db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId) as any)?.cnt || 0
+      : (db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(item.userId) as any)?.cnt || 0;
 
-          if (!trackId) {
-            const info = db.prepare(`
-              INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id)
-              VALUES (?, ?, ?, ?, ?, ?, ?)
-            `).run(
-              track.title,
-              track.artist,
-              track.album,
-              actualDurationMs,
-              finalFile,
-              track.cover_url || '',
-              track.id
-            );
-            trackId = info.lastInsertRowid;
-          } else if (probe.valid && probe.durationSec > 0) {
-            db.prepare('UPDATE tracks SET duration_ms = ? WHERE id = ?').run(actualDurationMs, trackId);
-          }
-
-          if (isTrackBlacklistedForUser(item.userId, details.title || track.title, details.artist || track.artist, track.id)) {
-            console.log(`[Downloader] Track "${track.artist} - ${track.title}" was blacklisted during download. Skipping playlist link.`);
-          } else if (item.isLikedOnly || !playlistId) {
-            db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, trackId);
-            broadcastToUser(item.userId, { type: 'LIKES_UPDATED', trackId, liked: true });
-          } else {
-            db.prepare(`
-              INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
-              VALUES (?, ?, ?)
-            `).run(playlistId, trackId, position);
-          }
-
-          const doneCount = playlistId
-            ? (db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId) as any)?.cnt || 0
-            : (db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(item.userId) as any)?.cnt || 0;
-
-          db.prepare(`
-            UPDATE download_jobs
-            SET downloaded_tracks = ?
-            WHERE id = ?
-          `).run(doneCount, jobId);
-        } catch (dbErr: any) {
-          console.error('[DB Insert Error after download]', dbErr.message);
-        }
-
-        safeResolve();
-      } else {
-        console.warn(`[yt-dlp] Process exited with code ${code} for "${track.artist} - ${track.title}"`);
-        cleanupPartialFiles(targetDir, safeTitle);
-        safeResolve(); // Continue with next track even if one failed
-      }
-    });
-
-    ytDlpProcess.on('error', (err) => {
-      if (isSettled) return;
-      console.warn(`[yt-dlp spawn error]:`, err.message);
-      cleanupPartialFiles(targetDir, safeTitle);
-      safeResolve();
-    });
-  });
+    db.prepare(`
+      UPDATE download_jobs
+      SET downloaded_tracks = ?
+      WHERE id = ?
+    `).run(doneCount, jobId);
+  } catch (dbErr: any) {
+    console.error('[DB Insert Error after download]', dbErr.message);
+  }
 }
 
 const inFlightSingleDownloads = new Map<string, Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean; liked?: boolean }>>();
@@ -959,56 +1061,27 @@ async function downloadSingleSpotifyTrackDirectInternal(
     const safeTitle = sanitizeFilename(track.title);
     const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
 
-    // Level 1 & 2: Smart Studio Candidate Selection
-    const audioSourceUrl = await findBestStudioAudioSource(track.artist, track.title, track.duration_ms);
-
-    // 4. Download with yt-dlp (320 kbps high fidelity audio)
-    const success = await new Promise<boolean>((resolve) => {
-      let isSettled = false;
-      const finish = (result: boolean) => {
-        if (!isSettled) {
-          isSettled = true;
-          clearTimeout(timer);
-          resolve(result);
+    // 4. Acquire concurrency slot (max 2 concurrent downloads on 2-core CPU) and download
+    const success = await runWithSingleDownloadSlot(async () => {
+      // Re-check if downloaded while waiting in queue
+      const mp3Candidate = path.join(targetDir, `${safeTitle}.mp3`);
+      if (fs.existsSync(mp3Candidate)) {
+        const preProbe = await probeAudioFile(mp3Candidate, track.duration_ms);
+        if (preProbe.valid && preProbe.durationSec > 15) {
+          return true;
         }
-      };
+      }
 
-      const ytDlpProcess = spawn('nice', [
-        '-n', '19',
-        'ionice', '-c', '3',
-        'yt-dlp',
-        '--no-playlist',
-        '--force-overwrites',
-        '-f', 'bestaudio[acodec=opus]/bestaudio/best',
-        '--extract-audio',
-        '--audio-format', 'mp3',
-        '--audio-quality', '320k',
-        '--postprocessor-args', 'ExtractAudio:-af aresample=resampler=soxr:precision=28,volume=-1.8dB -ar 48000',
-        '--embed-thumbnail',
-        '--add-metadata',
-        '-o', outputTemplate,
-        '--',
-        audioSourceUrl
-      ]);
-
-      const timer = setTimeout(() => {
-        try { ytDlpProcess.kill('SIGKILL'); } catch (_) {}
-        cleanupPartialFiles(targetDir, safeTitle);
-        finish(false);
-      }, 90000);
-
-      ytDlpProcess.on('close', (code) => {
-        if (code === 0) finish(true);
-        else {
-          cleanupPartialFiles(targetDir, safeTitle);
-          finish(false);
-        }
-      });
-
-      ytDlpProcess.on('error', () => {
-        cleanupPartialFiles(targetDir, safeTitle);
-        finish(false);
-      });
+      return await downloadAudioWithFallback(
+        track.artist,
+        track.title,
+        track.duration_ms,
+        outputTemplate,
+        targetDir,
+        safeTitle,
+        150000,
+        false
+      );
     });
 
     if (!success) {
@@ -1152,56 +1225,16 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
         const tempPrefix = `${safeTitle}.upg.${Date.now()}`;
         const tempOutputTemplate = path.join(targetDir, `${tempPrefix}.%(ext)s`);
 
-        const audioSourceUrl = await findBestStudioAudioSource(tr.artist, tr.title, tr.duration_ms);
-
-        const ok = await new Promise<boolean>((resolve) => {
-          let settled = false;
-          const finish = (result: boolean) => {
-            if (!settled) {
-              settled = true;
-              clearTimeout(timer);
-              resolve(result);
-            }
-          };
-
-          const proc = spawn('nice', [
-            '-n', '19',
-            'ionice', '-c', '3',
-            'yt-dlp',
-            '--no-playlist',
-            '--force-overwrites',
-            '--no-continue',
-            '-f', 'bestaudio[acodec=opus]/bestaudio/best',
-            '--extract-audio',
-            '--audio-format', 'mp3',
-            '--audio-quality', '320k',
-            '--postprocessor-args', 'ExtractAudio:-af aresample=resampler=soxr:precision=28,volume=-1.8dB -ar 48000',
-            '--embed-thumbnail',
-            '--add-metadata',
-            '-o', tempOutputTemplate,
-            '--',
-            audioSourceUrl
-          ]);
-
-          const timer = setTimeout(() => {
-            try { proc.kill('SIGKILL'); } catch (_) {}
-            cleanupPartialFiles(targetDir, tempPrefix);
-            finish(false);
-          }, 90000);
-
-          proc.on('close', code => {
-            const tempFound = resolveAudioFilePath(targetDir, tempPrefix);
-            if (code === 0 && tempFound && fs.existsSync(tempFound)) finish(true);
-            else {
-              cleanupPartialFiles(targetDir, tempPrefix);
-              finish(false);
-            }
-          });
-          proc.on('error', () => {
-            cleanupPartialFiles(targetDir, tempPrefix);
-            finish(false);
-          });
-        });
+        const ok = await downloadAudioWithFallback(
+          tr.artist,
+          tr.title,
+          tr.duration_ms,
+          tempOutputTemplate,
+          targetDir,
+          tempPrefix,
+          120000,
+          true
+        );
 
         if (ok) {
           const tempFound = resolveAudioFilePath(targetDir, tempPrefix);
