@@ -30,6 +30,9 @@ import {
   downloadSingleSpotifyTrackDirect,
   reDownloadAllTracksInHighQuality,
   getUpgradeProgress,
+  getQualityAuditStats,
+  stopQualityUpgrade,
+  queueTrackQualityUpgrade,
   cancelBlacklistedDownloads,
   isTrackBlacklistedForUser,
   filterBlacklistedTracksForUser
@@ -1502,6 +1505,8 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
   `).get(track.id, track.title, track.artist);
 
   if (existing && fs.existsSync(existing.file_path)) {
+    // Opportunistically queue quality upgrade in background if legacy .m4a or low bitrate
+    queueTrackQualityUpgrade(existing);
     return {
       isExisting: true,
       isPreview: false,
@@ -1598,12 +1603,20 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
   };
 });
 
+server.get('/api/tracks/quality-stats', { preHandler: [(server as any).authenticate] }, async () => {
+  return getQualityAuditStats();
+});
+
 server.post('/api/tracks/upgrade-quality', { preHandler: [(server as any).authenticate] }, async () => {
   return await reDownloadAllTracksInHighQuality();
 });
 
 server.get('/api/tracks/upgrade-quality/status', { preHandler: [(server as any).authenticate] }, async () => {
   return getUpgradeProgress();
+});
+
+server.post('/api/tracks/upgrade-quality/stop', { preHandler: [(server as any).authenticate] }, async () => {
+  return { stopped: stopQualityUpgrade() };
 });
 
 // ----------------- LIKES -----------------

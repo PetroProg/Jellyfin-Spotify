@@ -234,5 +234,11 @@ try {
   console.warn('[DB Migration Warning]:', e.message);
 }
 
+// Audio bitrate tracking column
+try {
+  db.exec('ALTER TABLE tracks ADD COLUMN bitrate INTEGER DEFAULT NULL;');
+} catch (_) {}
+
+
 
 

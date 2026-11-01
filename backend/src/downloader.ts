@@ -4,7 +4,7 @@ import fs from 'fs';
 import { db } from './db';
 import { refreshJellyfinLibrary } from './jellyfin';
 import { SpotifyTrack, resolveSpotifyTrackDetails, fetchSpotifyPlaylist, resolveDeezerTrackInfo } from './spotify';
-import { broadcastToUser } from './sync';
+import { broadcastToUser, broadcastToAll } from './sync';
 
 const MUSIC_DIR = process.env.MUSIC_DIR || path.join(process.cwd(), 'music');
 
@@ -863,6 +863,9 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       db.prepare('UPDATE tracks SET cover_url = ? WHERE id = ?').run(details.cover_url, existing.id);
     }
 
+    // Opportunistically queue quality upgrade in background if legacy .m4a or low bitrate
+    queueTrackQualityUpgrade(existing);
+
     // Check blacklist before linking to playlist or liked_tracks
     if (isTrackBlacklistedForUser(item.userId, details.title || track.title, details.artist || track.artist, track.id)) {
       console.log(`[Downloader] Skipping blacklisted existing track "${track.artist} - ${track.title}" for user ${item.userId}`);
@@ -951,8 +954,8 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
 
     if (!trackId) {
       const info = db.prepare(`
-        INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id, bitrate)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         track.title,
         track.artist,
@@ -960,11 +963,12 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
         actualDurationMs,
         finalFile,
         track.cover_url || '',
-        track.id
+        track.id,
+        probe.bitrateKbps || 320
       );
       trackId = info.lastInsertRowid;
     } else if (probe.valid && probe.durationSec > 0) {
-      db.prepare('UPDATE tracks SET duration_ms = ? WHERE id = ?').run(actualDurationMs, trackId);
+      db.prepare('UPDATE tracks SET duration_ms = ?, bitrate = ? WHERE id = ?').run(actualDurationMs, probe.bitrateKbps || 320, trackId);
     }
 
     if (isTrackBlacklistedForUser(item.userId, details.title || track.title, details.artist || track.artist, track.id)) {
@@ -1112,6 +1116,8 @@ async function downloadSingleSpotifyTrackDirectInternal(
 
     if (existing) {
       attachToPlaylist(existing);
+      // Opportunistically queue quality upgrade in background if legacy .m4a or low bitrate
+      queueTrackQualityUpgrade(existing);
       return {
         success: true,
         track: existing,
@@ -1182,8 +1188,8 @@ async function downloadSingleSpotifyTrackDirectInternal(
 
     if (!newTrack) {
       const info = db.prepare(`
-        INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id, bitrate)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         track.title,
         track.artist,
@@ -1191,11 +1197,12 @@ async function downloadSingleSpotifyTrackDirectInternal(
         actualDurationMs,
         finalFile,
         track.cover_url || '',
-        track.id
+        track.id,
+        probe.bitrateKbps || 320
       );
       newTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
     } else if (probe.valid && probe.durationSec > 0) {
-      db.prepare('UPDATE tracks SET duration_ms = ? WHERE id = ?').run(actualDurationMs, newTrack.id);
+      db.prepare('UPDATE tracks SET duration_ms = ?, bitrate = ? WHERE id = ?').run(actualDurationMs, probe.bitrateKbps || 320, newTrack.id);
       newTrack.duration_ms = actualDurationMs;
     }
 
@@ -1224,6 +1231,16 @@ export interface UpgradeProgress {
   errorCount: number;
 }
 
+export interface QualityStats {
+  total: number;
+  studioCount: number;
+  lowQualityCount: number;
+  m4aCount: number;
+  unverifiedCount: number;
+  isRunning: boolean;
+  progress: UpgradeProgress;
+}
+
 const upgradeProgress: UpgradeProgress = {
   isRunning: false,
   total: 0,
@@ -1235,8 +1252,181 @@ const upgradeProgress: UpgradeProgress = {
   errorCount: 0
 };
 
+let shouldStopUpgrade = false;
+
 export function getUpgradeProgress(): UpgradeProgress {
   return { ...upgradeProgress };
+}
+
+export function stopQualityUpgrade(): boolean {
+  if (upgradeProgress.isRunning) {
+    shouldStopUpgrade = true;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Safely downloads studio 320k 48kHz audio and atomically replaces the existing track file.
+ */
+export async function upgradeSingleTrackFile(tr: any): Promise<boolean> {
+  const artistFolder = sanitizeFilename(tr.artist || 'Unknown Artist');
+  const targetDir = path.join(MUSIC_DIR, artistFolder);
+  if (!fs.existsSync(targetDir)) {
+    fs.mkdirSync(targetDir, { recursive: true });
+  }
+  const safeTitle = sanitizeFilename(tr.title);
+  const tempPrefix = `${safeTitle}.upg.${Date.now()}`;
+  const tempOutputTemplate = path.join(targetDir, `${tempPrefix}.%(ext)s`);
+
+  const ok = await downloadAudioWithFallback(
+    tr.artist,
+    tr.title,
+    tr.duration_ms,
+    tempOutputTemplate,
+    targetDir,
+    tempPrefix,
+    120000,
+    true
+  );
+
+  if (!ok) {
+    return false;
+  }
+
+  const tempFound = resolveAudioFilePath(targetDir, tempPrefix);
+  if (!tempFound) {
+    return false;
+  }
+  const newProbe = await probeAudioFile(tempFound, tr.duration_ms);
+
+  if (tr.duration_ms > 45000 && newProbe.valid && !newProbe.isHighQuality && newProbe.reason?.includes('Обрезан')) {
+    console.warn(`[Upgrade Quality] Downloaded file for "${tr.artist} - ${tr.title}" was truncated (${newProbe.durationSec}s). Keeping existing file.`);
+    try { fs.unlinkSync(tempFound); } catch (_) {}
+    return false;
+  }
+
+  // Safely and atomically replace destination file!
+  const newExt = path.extname(tempFound);
+  const destinationFile = path.join(targetDir, `${safeTitle}${newExt}`);
+  try {
+    if (tr.file_path && fs.existsSync(tr.file_path) && tr.file_path !== destinationFile) {
+      fs.unlinkSync(tr.file_path);
+    } else if (fs.existsSync(destinationFile)) {
+      fs.unlinkSync(destinationFile);
+    }
+    fs.renameSync(tempFound, destinationFile);
+  } catch (renErr: any) {
+    console.warn('[Upgrade Quality Rename Error]', renErr.message);
+  }
+
+  if (!tr.cover_url || tr.cover_url.includes('mosaic.scdn.co')) {
+    try {
+      const dz = await resolveDeezerTrackInfo(tr.artist, tr.title);
+      if (dz.cover_url) {
+        db.prepare('UPDATE tracks SET cover_url = ? WHERE id = ?').run(dz.cover_url, tr.id);
+      }
+    } catch (_) {}
+  }
+  const updatedDur = Math.round(newProbe.durationSec * 1000) || tr.duration_ms;
+  const newBitrate = newProbe.bitrateKbps || 320;
+  db.prepare('UPDATE tracks SET file_path = ?, duration_ms = ?, bitrate = ? WHERE id = ?').run(destinationFile, updatedDur, newBitrate, tr.id);
+
+  broadcastToAll({
+    type: 'TRACK_QUALITY_UPGRADED',
+    trackId: tr.id,
+    bitrate: newBitrate,
+    filePath: destinationFile
+  });
+
+  return true;
+}
+
+// Opportunistic healer queue for touched tracks
+const pendingUpgrades = new Set<number>();
+let isSingleUpgradeProcessing = false;
+
+export function queueTrackQualityUpgrade(track: any): void {
+  if (!track || !track.id) return;
+  // If already confirmed high quality (MP3 and bitrate >= 250), nothing to do
+  if (track.file_path && track.file_path.endsWith('.mp3') && track.bitrate && track.bitrate >= 250) {
+    return;
+  }
+  if (pendingUpgrades.has(track.id) || upgradeProgress.isRunning) {
+    return;
+  }
+
+  pendingUpgrades.add(track.id);
+
+  setTimeout(async () => {
+    try {
+      if (isSingleUpgradeProcessing || upgradeProgress.isRunning) {
+        pendingUpgrades.delete(track.id);
+        return;
+      }
+      isSingleUpgradeProcessing = true;
+      const probe = await probeAudioFile(track.file_path, track.duration_ms);
+      if (probe.isHighQuality) {
+        db.prepare('UPDATE tracks SET bitrate = ? WHERE id = ?').run(probe.bitrateKbps || 320, track.id);
+      } else {
+        console.log(`[Opportunistic Healer] Upgrading touched low-quality track: "${track.artist} - ${track.title}" (Reason: ${probe.reason || 'Legacy format'})`);
+        await upgradeSingleTrackFile(track);
+      }
+    } catch (err: any) {
+      console.warn(`[Opportunistic Healer Error] on track ${track.id}:`, err.message);
+    } finally {
+      pendingUpgrades.delete(track.id);
+      isSingleUpgradeProcessing = false;
+    }
+  }, 1000);
+}
+
+// Background lightweight crawler to populate bitrate for unverified mp3 tracks
+let isProbingUnverified = false;
+export async function populateUnverifiedBitrates(): Promise<void> {
+  if (isProbingUnverified || upgradeProgress.isRunning) return;
+  isProbingUnverified = true;
+  try {
+    const unverified = db.prepare("SELECT id, file_path, duration_ms FROM tracks WHERE file_path LIKE '%.mp3' AND bitrate IS NULL LIMIT 25").all() as any[];
+    for (const t of unverified) {
+      if (upgradeProgress.isRunning) break;
+      const probe = await probeAudioFile(t.file_path, t.duration_ms);
+      if (probe.valid) {
+        db.prepare('UPDATE tracks SET bitrate = ? WHERE id = ?').run(probe.bitrateKbps || (probe.isHighQuality ? 320 : 128), t.id);
+      }
+    }
+  } catch (_) {}
+  finally {
+    isProbingUnverified = false;
+  }
+}
+
+export function getQualityAuditStats(): QualityStats {
+  const totalRow: any = db.prepare('SELECT COUNT(*) as cnt FROM tracks').get();
+  const m4aRow: any = db.prepare("SELECT COUNT(*) as cnt FROM tracks WHERE file_path LIKE '%.m4a'").get();
+  const studioRow: any = db.prepare("SELECT COUNT(*) as cnt FROM tracks WHERE file_path LIKE '%.mp3' AND bitrate >= 250").get();
+  const lowBitrateRow: any = db.prepare("SELECT COUNT(*) as cnt FROM tracks WHERE file_path LIKE '%.mp3' AND bitrate IS NOT NULL AND bitrate < 250").get();
+  const unverifiedRow: any = db.prepare("SELECT COUNT(*) as cnt FROM tracks WHERE file_path LIKE '%.mp3' AND bitrate IS NULL").get();
+
+  const total = totalRow?.cnt || 0;
+  const m4aCount = m4aRow?.cnt || 0;
+  const knownLow = lowBitrateRow?.cnt || 0;
+  const studioCount = studioRow?.cnt || 0;
+  const unverifiedCount = unverifiedRow?.cnt || 0;
+
+  if (unverifiedCount > 0 && !upgradeProgress.isRunning) {
+    populateUnverifiedBitrates().catch(() => {});
+  }
+
+  return {
+    total,
+    studioCount,
+    lowQualityCount: m4aCount + knownLow,
+    m4aCount,
+    unverifiedCount,
+    isRunning: upgradeProgress.isRunning,
+    progress: getUpgradeProgress()
+  };
 }
 
 export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boolean; message: string }> {
@@ -1244,10 +1434,18 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
     return { started: false, message: 'Процесс обновления уже выполняется' };
   }
 
+  shouldStopUpgrade = false;
+
   const allTracks = db.prepare(`
-    SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.file_path, t.cover_url, t.spotify_id
+    SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.file_path, t.cover_url, t.spotify_id, t.bitrate
     FROM tracks t
     ORDER BY
+      CASE 
+        WHEN t.file_path LIKE '%.m4a' THEN 0
+        WHEN t.bitrate IS NOT NULL AND t.bitrate < 250 THEN 1
+        WHEN t.bitrate IS NULL THEN 2
+        ELSE 3
+      END ASC,
       CASE WHEN EXISTS (SELECT 1 FROM liked_tracks lt WHERE lt.track_id = t.id)
              OR EXISTS (SELECT 1 FROM playlist_tracks pt WHERE pt.track_id = t.id)
            THEN 0 ELSE 1 END ASC,
@@ -1262,89 +1460,46 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
   upgradeProgress.skippedCount = 0;
   upgradeProgress.errorCount = 0;
 
+  broadcastToAll({ type: 'UPGRADE_PROGRESS', progress: getUpgradeProgress() });
+
   // Background worker loop
   (async () => {
     console.log(`[Upgrade Quality] Starting smart selective high-fidelity upgrade of ${allTracks.length} tracks...`);
     for (let i = 0; i < allTracks.length; i++) {
+      if (shouldStopUpgrade) {
+        console.log('[Upgrade Quality] Upgrade stopped by user request.');
+        break;
+      }
+
       const tr = allTracks[i];
       upgradeProgress.current = i + 1;
       upgradeProgress.currentTrack = `${tr.artist} - ${tr.title}`;
 
+      // Fast check: if already confirmed 320k in database and file exists
+      if (tr.bitrate && tr.bitrate >= 250 && tr.file_path && tr.file_path.endsWith('.mp3') && fs.existsSync(tr.file_path)) {
+        upgradeProgress.skippedCount++;
+        upgradeProgress.successCount++;
+        continue;
+      }
+
       try {
-        // Step 1: Probe existing file to see if already high quality (320 kbps & full duration)
         const probe = await probeAudioFile(tr.file_path, tr.duration_ms);
 
         if (probe.isHighQuality) {
           // Already 320 kbps (or >= 250 kbps) and full duration!
+          db.prepare('UPDATE tracks SET bitrate = ? WHERE id = ?').run(probe.bitrateKbps || 320, tr.id);
           upgradeProgress.skippedCount++;
           upgradeProgress.successCount++;
-          console.log(`[Upgrade Quality] [${i + 1}/${allTracks.length}] Skipping "${tr.artist} - ${tr.title}" (already ${probe.bitrateKbps} kbps, full duration ${Math.round(probe.durationSec)}s)`);
-          await new Promise(r => setTimeout(r, 20));
           continue;
         }
 
         console.log(`[Upgrade Quality] [${i + 1}/${allTracks.length}] Upgrading "${tr.artist} - ${tr.title}" (Reason: ${probe.reason || 'Missing or low bitrate'})...`);
+        broadcastToAll({ type: 'UPGRADE_PROGRESS', progress: getUpgradeProgress() });
 
-        const artistFolder = sanitizeFilename(tr.artist || 'Unknown Artist');
-        const targetDir = path.join(MUSIC_DIR, artistFolder);
-        if (!fs.existsSync(targetDir)) {
-          fs.mkdirSync(targetDir, { recursive: true });
-        }
-        const safeTitle = sanitizeFilename(tr.title);
-        const tempPrefix = `${safeTitle}.upg.${Date.now()}`;
-        const tempOutputTemplate = path.join(targetDir, `${tempPrefix}.%(ext)s`);
-
-        const ok = await downloadAudioWithFallback(
-          tr.artist,
-          tr.title,
-          tr.duration_ms,
-          tempOutputTemplate,
-          targetDir,
-          tempPrefix,
-          120000,
-          true
-        );
-
+        const ok = await upgradeSingleTrackFile(tr);
         if (ok) {
-          const tempFound = resolveAudioFilePath(targetDir, tempPrefix);
-          if (!tempFound) {
-            upgradeProgress.errorCount++;
-            continue;
-          }
-          const newProbe = await probeAudioFile(tempFound, tr.duration_ms);
-
-          if (tr.duration_ms > 45000 && newProbe.valid && !newProbe.isHighQuality && newProbe.reason?.includes('Обрезан')) {
-            console.warn(`[Upgrade Quality] Downloaded file for "${tr.artist} - ${tr.title}" was truncated (${newProbe.durationSec}s). Keeping existing file.`);
-            try { fs.unlinkSync(tempFound); } catch (_) {}
-            upgradeProgress.errorCount++;
-          } else {
-            // Safely and atomically replace destination file!
-            const newExt = path.extname(tempFound);
-            const destinationFile = path.join(targetDir, `${safeTitle}${newExt}`);
-            try {
-              if (tr.file_path && fs.existsSync(tr.file_path) && tr.file_path !== destinationFile) {
-                fs.unlinkSync(tr.file_path);
-              } else if (fs.existsSync(destinationFile)) {
-                fs.unlinkSync(destinationFile);
-              }
-              fs.renameSync(tempFound, destinationFile);
-            } catch (renErr: any) {
-              console.warn('[Upgrade Quality Rename Error]', renErr.message);
-            }
-
-            if (!tr.cover_url || tr.cover_url.includes('mosaic.scdn.co')) {
-              try {
-                const dz = await resolveDeezerTrackInfo(tr.artist, tr.title);
-                if (dz.cover_url) {
-                  db.prepare('UPDATE tracks SET cover_url = ? WHERE id = ?').run(dz.cover_url, tr.id);
-                }
-              } catch (_) {}
-            }
-            const updatedDur = Math.round(newProbe.durationSec * 1000) || tr.duration_ms;
-            db.prepare('UPDATE tracks SET file_path = ?, duration_ms = ? WHERE id = ?').run(destinationFile, updatedDur, tr.id);
-            upgradeProgress.upgradedCount++;
-            upgradeProgress.successCount++;
-          }
+          upgradeProgress.upgradedCount++;
+          upgradeProgress.successCount++;
         } else {
           upgradeProgress.errorCount++;
         }
@@ -1353,6 +1508,7 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
         upgradeProgress.errorCount++;
       }
 
+      broadcastToAll({ type: 'UPGRADE_PROGRESS', progress: getUpgradeProgress() });
       // Small cooldown to prevent CPU throttling
       await new Promise(r => setTimeout(r, 600));
     }
@@ -1360,9 +1516,11 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
     upgradeProgress.isRunning = false;
     upgradeProgress.currentTrack = '';
     console.log(`[Upgrade Quality Completed] Upgraded: ${upgradeProgress.upgradedCount}, Already High Quality: ${upgradeProgress.skippedCount}, Errors: ${upgradeProgress.errorCount}`);
+    broadcastToAll({ type: 'UPGRADE_PROGRESS', progress: getUpgradeProgress() });
     await refreshJellyfinLibrary();
   })().catch(err => {
     upgradeProgress.isRunning = false;
+    broadcastToAll({ type: 'UPGRADE_PROGRESS', progress: getUpgradeProgress() });
     console.error('[Upgrade Quality Fatal]', err);
   });
 

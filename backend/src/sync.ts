@@ -469,3 +469,19 @@ export function isUserPlayingMusic(userId: number): boolean {
   return !!(playback && playback.isPlaying);
 }
 
+export function isAnyUserPlayingMusic(): boolean {
+  for (const playback of userPlayback.values()) {
+    if (playback && playback.isPlaying) return true;
+  }
+  return false;
+}
+
+export function broadcastToAll(message: any) {
+  for (const clients of userClients.values()) {
+    for (const client of clients.values()) {
+      safeSend(client.ws, message);
+    }
+  }
+}
+
+

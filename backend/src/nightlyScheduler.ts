@@ -1,6 +1,7 @@
 import { db } from './db';
 import { getOrGenerateDailyMixes, getTodayDateKey, getUserTimezone } from './dailyMix';
-import { isUserOnline, isUserPlayingMusic } from './sync';
+import { isUserOnline, isUserPlayingMusic, isAnyUserPlayingMusic } from './sync';
+import { upgradeSingleTrackFile, getUpgradeProgress } from './downloader';
 
 let schedulerInterval: NodeJS.Timeout | null = null;
 let isJobRunning = false;
@@ -109,11 +110,61 @@ export async function checkAndRunNightlyMixes(): Promise<void> {
         console.error(`[Nightly Scheduler Error for ${user.username}]:`, err.message || err);
       }
     }
+
+    // Run nightly quality healer if between 02:00 and 05:00 AM server time and nobody is playing music
+    const serverHour = new Date().getHours();
+    if (serverHour >= 2 && serverHour <= 5 && !isAnyUserPlayingMusic()) {
+      await checkAndRunNightlyQualityHealer(15);
+    }
   } catch (err: any) {
     console.error('[Nightly Scheduler Error]:', err.message || err);
   } finally {
     isJobRunning = false;
   }
+}
+
+/**
+ * Automatically heals low-quality/legacy tracks (up to 15 per night) during 02:00-05:00 AM window
+ * while no users are listening to music, ensuring 100% studio quality library over time.
+ */
+export async function checkAndRunNightlyQualityHealer(maxTracksPerNight = 15): Promise<number> {
+  if (isAnyUserPlayingMusic()) {
+    return 0;
+  }
+  const currentProgress = getUpgradeProgress();
+  if (currentProgress.isRunning) {
+    return 0;
+  }
+
+  const candidates = db.prepare(`
+    SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.file_path, t.cover_url, t.spotify_id, t.bitrate
+    FROM tracks t
+    WHERE t.file_path LIKE '%.m4a' OR (t.bitrate IS NOT NULL AND t.bitrate < 250)
+    ORDER BY
+      CASE WHEN EXISTS (SELECT 1 FROM liked_tracks lt WHERE lt.track_id = t.id)
+             OR EXISTS (SELECT 1 FROM playlist_tracks pt WHERE pt.track_id = t.id)
+           THEN 0 ELSE 1 END ASC,
+      t.id DESC
+    LIMIT ?
+  `).all(maxTracksPerNight) as any[];
+
+  if (candidates.length === 0) {
+    return 0;
+  }
+
+  console.log(`[Nightly Quality Healer] Starting nightly healing for ${candidates.length} low-quality/legacy tracks...`);
+  let healed = 0;
+  for (const tr of candidates) {
+    if (isAnyUserPlayingMusic()) {
+      console.log('[Nightly Quality Healer] User started listening. Pausing healing until next idle window.');
+      break;
+    }
+    const ok = await upgradeSingleTrackFile(tr);
+    if (ok) healed++;
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  console.log(`[Nightly Quality Healer] Finished tonight: healed ${healed}/${candidates.length} tracks to 320 kbps studio quality.`);
+  return healed;
 }
 
 /**

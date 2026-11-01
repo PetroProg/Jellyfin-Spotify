@@ -28,7 +28,8 @@ import {
   Sparkles,
   Upload,
   Database,
-  Sliders
+  Sliders,
+  Disc
 } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { usePlayerStore } from '../store/playerStore';
@@ -63,6 +64,25 @@ interface DailyMixSchedule {
   totalTracks: number;
   isOnline: boolean;
   isPlaying: boolean;
+}
+
+interface QualityStats {
+  total: number;
+  studioCount: number;
+  lowQualityCount: number;
+  m4aCount: number;
+  unverifiedCount: number;
+  isRunning: boolean;
+  progress: {
+    isRunning: boolean;
+    total: number;
+    current: number;
+    currentTrack: string;
+    successCount: number;
+    upgradedCount: number;
+    skippedCount: number;
+    errorCount: number;
+  };
 }
 
 export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
@@ -104,6 +124,61 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const [loadingSchedule, setLoadingSchedule] = useState(false);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [manualGenerating, setManualGenerating] = useState(false);
+
+  // Audio Quality & Library Upgrade State
+  const [qualityStats, setQualityStats] = useState<QualityStats | null>(null);
+  const [loadingQualityStats, setLoadingQualityStats] = useState(false);
+  const [startingUpgrade, setStartingUpgrade] = useState(false);
+  const [stoppingUpgrade, setStoppingUpgrade] = useState(false);
+
+  const loadQualityStats = async () => {
+    try {
+      setLoadingQualityStats(true);
+      const data = await apiRequest<QualityStats>('/tracks/quality-stats');
+      setQualityStats(data);
+    } catch (e) {
+      console.warn('Could not fetch quality stats:', e);
+    } finally {
+      setLoadingQualityStats(false);
+    }
+  };
+
+  const handleStartUpgrade = async () => {
+    const ok = await confirmDialog({
+      title: t('Upgrade All Audio to Studio Quality?', 'Обновить все треки до студийного качества?'),
+      message: t(
+        'The server will scan your library and re-download any old or low-bitrate songs in crisp 320 kbps (48,000 Hz) studio master with normalized sound (-1.8dB). All playlists, likes, and history will be preserved.',
+        'Сервер проверит медиатеку и перезагрузит все старые треки в студийном качестве 320 kbps (48 000 Гц) с выравниванием громкости (-1.8dB). Все ваши плейлисты, лайки и история останутся нетронутыми.'
+      ),
+      confirmText: t('Start Upgrade', 'Начать обновление'),
+      cancelText: t('Cancel', 'Отмена')
+    });
+    if (!ok) return;
+
+    try {
+      setStartingUpgrade(true);
+      const res = await apiRequest<{ started: boolean; message: string }>('/tracks/upgrade-quality', { method: 'POST' });
+      toast.info(res.message || t('Audio quality upgrade started in background', 'Фоновое обновление качества аудио запущено'));
+      await loadQualityStats();
+    } catch (err: any) {
+      toast.error(err.message || t('Failed to start upgrade', 'Не удалось запустить обновление'));
+    } finally {
+      setStartingUpgrade(false);
+    }
+  };
+
+  const handleStopUpgrade = async () => {
+    try {
+      setStoppingUpgrade(true);
+      await apiRequest('/tracks/upgrade-quality/stop', { method: 'POST' });
+      toast.info(t('Quality upgrade will stop after current track', 'Обновление качества остановится после текущего трека'));
+      await loadQualityStats();
+    } catch (err: any) {
+      toast.error(err.message || t('Failed to stop upgrade', 'Не удалось остановить процесс'));
+    } finally {
+      setStoppingUpgrade(false);
+    }
+  };
 
   // Account Deletion Modal
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -247,6 +322,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     loadBlacklist();
     loadSpotifyStatus();
     loadMixSchedule();
+    loadQualityStats();
 
     const params = new URLSearchParams(window.location.search);
     const spSuccess = params.get('spotify_connected');
@@ -287,6 +363,17 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     const timer = setInterval(pollLikedJob, 2500);
     return () => clearInterval(timer);
   }, [spotifyStatus?.isConnected]);
+
+  useEffect(() => {
+    if (!qualityStats?.isRunning && !qualityStats?.progress?.isRunning) return;
+    const interval = setInterval(async () => {
+      try {
+        const data = await apiRequest<QualityStats>('/tracks/quality-stats');
+        setQualityStats(data);
+      } catch (_) {}
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [qualityStats?.isRunning, qualityStats?.progress?.isRunning]);
 
   const scrollToTop = () => {
     containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1113,6 +1200,154 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
                   )}
                 </span>
               </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Audio Quality & Library Upgrade */}
+        <section className="bg-cat-mantle p-6 rounded-3xl border border-cat-mauve/30 shadow-lg">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-xl bg-cat-mauve/20 text-cat-mauve">
+                <Disc className={`w-5 h-5 ${(qualityStats?.isRunning || qualityStats?.progress?.isRunning) ? 'animate-[spin_4s_linear_infinite]' : ''}`} />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="font-bold text-base text-cat-text">
+                    {t('Studio Audio Quality & Upgrade', 'Качество аудио и апгрейд библиотеки')}
+                  </h2>
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-cat-green/20 text-cat-green border border-cat-green/30">
+                    <CheckCircle2 className="w-3 h-3" /> 320 kbps • 48 kHz
+                  </span>
+                </div>
+                <p className="text-xs text-cat-subtext0 mt-0.5">
+                  {t(
+                    'All new songs are downloaded in studio 320 kbps MP3 (48,000 Hz, volume -1.8dB). Here you can inspect and upgrade older tracks.',
+                    'Все новые песни скачиваются в студийном 320 kbps MP3 (48 000 Гц, -1.8dB). Здесь можно проверить медиатеку и обновить старые треки.'
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 self-start sm:self-center">
+              {qualityStats?.isRunning || qualityStats?.progress?.isRunning ? (
+                <button
+                  type="button"
+                  onClick={handleStopUpgrade}
+                  disabled={stoppingUpgrade}
+                  className="px-4 py-2 rounded-2xl bg-cat-red/20 hover:bg-cat-red/30 text-cat-red font-bold text-xs border border-cat-red/30 active:scale-95 transition-all flex items-center gap-2 cursor-pointer"
+                >
+                  {stoppingUpgrade ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                  <span>{t('Stop', 'Остановить')}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleStartUpgrade}
+                  disabled={startingUpgrade || ((qualityStats?.lowQualityCount ?? 0) === 0 && (qualityStats?.m4aCount ?? 0) === 0)}
+                  className="px-4 py-2 rounded-2xl bg-cat-mauve hover:opacity-90 text-cat-base font-bold text-xs shadow-md active:scale-95 transition-all flex items-center gap-2 disabled:opacity-40 cursor-pointer"
+                >
+                  {startingUpgrade ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-3.5 h-3.5" />
+                  )}
+                  <span>{t('Upgrade Old Tracks', 'Обновить старые треки')}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Library Quality Stats Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 my-4">
+            <div className="p-3.5 rounded-2xl bg-cat-surface0/40 border border-cat-surface1/30">
+              <span className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider block">
+                {t('Total Tracks', 'Всего треков')}
+              </span>
+              <span className="text-lg font-bold text-cat-text mt-0.5 block">
+                {qualityStats?.total ?? '...'}
+              </span>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-cat-surface0/40 border border-cat-surface1/30">
+              <span className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider block">
+                {t('Studio 320k', 'Студийные 320k')}
+              </span>
+              <span className="text-lg font-bold text-cat-green mt-0.5 block">
+                {qualityStats?.studioCount ?? '...'}
+              </span>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-cat-surface0/40 border border-cat-surface1/30">
+              <span className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider block">
+                {t('Legacy .m4a', 'Старый формат .m4a')}
+              </span>
+              <span className={`text-lg font-bold mt-0.5 block ${(qualityStats?.m4aCount || 0) > 0 ? 'text-cat-peach' : 'text-cat-text'}`}>
+                {qualityStats?.m4aCount ?? '...'}
+              </span>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-cat-surface0/40 border border-cat-surface1/30">
+              <span className="text-[11px] font-semibold text-cat-subtext0 uppercase tracking-wider block">
+                {t('Need Upgrade', 'Требуют апгрейда')}
+              </span>
+              <span className={`text-lg font-bold mt-0.5 block ${(qualityStats?.lowQualityCount || 0) > 0 ? 'text-cat-red font-extrabold' : 'text-cat-green'}`}>
+                {qualityStats?.lowQualityCount ?? '...'}
+              </span>
+            </div>
+          </div>
+
+          {/* Active Progress Bar */}
+          {(qualityStats?.isRunning || qualityStats?.progress?.isRunning) && (
+            <div className="p-4 rounded-2xl bg-cat-surface0/50 border border-cat-mauve/40 space-y-3 mt-3">
+              <div className="flex items-center justify-between text-xs font-semibold">
+                <span className="text-cat-text flex items-center gap-2 truncate">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-cat-mauve shrink-0" />
+                  <span className="truncate">
+                    {qualityStats?.progress?.currentTrack || t('Preparing...', 'Подготовка...')}
+                  </span>
+                </span>
+                <span className="text-cat-mauve font-mono shrink-0 ml-2">
+                  {qualityStats?.progress?.current || 0} / {qualityStats?.progress?.total || 0}
+                  {' '}({qualityStats?.progress?.total ? Math.round(((qualityStats?.progress?.current || 0) / qualityStats.progress.total) * 100) : 0}%)
+                </span>
+              </div>
+
+              <div className="w-full bg-cat-surface1/60 rounded-full h-2 overflow-hidden">
+                <div
+                  className="bg-cat-mauve h-full transition-all duration-300 rounded-full"
+                  style={{
+                    width: `${qualityStats?.progress?.total ? Math.round(((qualityStats?.progress?.current || 0) / qualityStats.progress.total) * 100) : 0}%`
+                  }}
+                />
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-cat-subtext0 pt-1">
+                <span className="text-cat-green">
+                  ✓ {t('Upgraded:', 'Обновлено:')} {qualityStats?.progress?.upgradedCount || 0}
+                </span>
+                <span className="text-cat-subtext0">
+                  ⏭ {t('Already 320k:', 'Уже 320k:')} {qualityStats?.progress?.skippedCount || 0}
+                </span>
+                {(qualityStats?.progress?.errorCount || 0) > 0 && (
+                  <span className="text-cat-red">
+                    ⚠ {t('Errors:', 'Ошибок:')} {qualityStats?.progress?.errorCount}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Status note */}
+          <div className="p-3.5 rounded-2xl bg-cat-surface0/20 border border-cat-surface1/20 flex items-start gap-2.5 text-xs text-cat-subtext0 leading-relaxed mt-3">
+            <Sparkles className="w-4 h-4 text-cat-mauve shrink-0 mt-0.5" />
+            <div>
+              <span>
+                {t(
+                  'Automated healing active: whenever you touch or play a song, or during the nightly idle window (02:00–05:00 AM), old tracks are automatically upgraded to 320 kbps in the background.',
+                  'Автоматическое улучшение активно: при прослушивании старых песен или ночью во время покоя (02:00–05:00) они автоматически бесшовно обновляются до 320 kbps без прерывания музыки.'
+                )}
+              </span>
             </div>
           </div>
         </section>
