@@ -217,7 +217,7 @@ let isFadingOut = false;
 let silentAnchorUrl: string | null = null;
 let silentAnchorAudio: HTMLAudioElement | null = null;
 let standbyTimeoutTimer: any = null;
-const STANDBY_GRACE_PERIOD_MS = 30 * 60 * 1000; // 30 minutes grace period on pause
+const STANDBY_GRACE_PERIOD_MS = 10 * 60 * 1000; // 10 minutes grace period on pause
 
 function getSilentAudioUrl(): string {
   if (silentAnchorUrl) return silentAnchorUrl;
@@ -318,7 +318,7 @@ function activateSilentAnchor(forPause: boolean = false) {
 
   if (forPause) {
     standbyTimeoutTimer = setTimeout(() => {
-      console.log('[SilentAnchor] 30m grace period expired. Releasing anchor.');
+      console.log('[SilentAnchor] 10m grace period expired. Releasing anchor.');
       deactivateSilentAnchor();
     }, STANDBY_GRACE_PERIOD_MS);
   }
@@ -359,14 +359,50 @@ function releaseScreenWakeLock() {
   }
 }
 
-// Track interruptions by external apps (like Instagram, TikTok, phone calls)
+// Track interruptions by external apps (like Instagram, Telegram audio, phone calls)
 let isUserInitiatedPause = false;
 let wasInterruptedByExternalApp = false;
 let isInternalSrcChange = false;
 let interruptionRetryTimeout1: any = null;
 let interruptionRetryTimeout2: any = null;
 
+// External pause timeout (10 minutes)
+const EXTERNAL_PAUSE_TIMEOUT_MS = 10 * 60 * 1000;
+let externalPauseTimer: any = null;
+let externalInterruptedAt = 0;
+
+function clearExternalPauseTimer() {
+  if (externalPauseTimer) {
+    clearTimeout(externalPauseTimer);
+    externalPauseTimer = null;
+  }
+}
+
+function startExternalPauseTimer() {
+  clearExternalPauseTimer();
+  externalInterruptedAt = Date.now();
+  console.log('[Audio] External sound interruption started. Holding pause standby state for 10 minutes...');
+  externalPauseTimer = setTimeout(() => {
+    console.log('[Audio] External pause 10-minute timeout expired. Fully suspending playback standby.');
+    wasInterruptedByExternalApp = false;
+    externalInterruptedAt = 0;
+    isUserInitiatedPause = true;
+    deactivateSilentAnchor();
+    releaseScreenWakeLock();
+    stopPlaybackWatchdog();
+    if (audioCtx && (audioCtx.state as string) !== 'closed') {
+      audioCtx.suspend().catch(() => {});
+    }
+  }, EXTERNAL_PAUSE_TIMEOUT_MS);
+}
+
+function isExternalPauseValid(): boolean {
+  if (!wasInterruptedByExternalApp || !externalInterruptedAt) return false;
+  return (Date.now() - externalInterruptedAt) < EXTERNAL_PAUSE_TIMEOUT_MS;
+}
+
 function clearInterruptionRetries() {
+  clearExternalPauseTimer();
   if (interruptionRetryTimeout1) {
     clearTimeout(interruptionRetryTimeout1);
     interruptionRetryTimeout1 = null;
@@ -741,7 +777,7 @@ function startPlaybackWatchdog() {
 
   playbackWatchdogTimer = setInterval(() => {
     const store = usePlayerStore.getState();
-    if (!store.isPlaying || isUserInitiatedPause || !store.currentTrack) {
+    if (!store.isPlaying || isUserInitiatedPause || wasInterruptedByExternalApp || !store.currentTrack) {
       stopPlaybackWatchdog();
       return;
     }
@@ -788,8 +824,8 @@ function startPlaybackWatchdog() {
       return;
     }
 
-    // 4. If audio is unexpectedly paused while store.isPlaying && !isUserInitiatedPause
-    if (audio.paused && !audio.ended) {
+    // 4. If audio is unexpectedly paused while store.isPlaying && !isUserInitiatedPause && !wasInterruptedByExternalApp
+    if (audio.paused && !audio.ended && !wasInterruptedByExternalApp) {
       console.log('[Watchdog] Audio unexpectedly paused in background, resuming...');
       audio.play().then(() => {
         if ('mediaSession' in navigator) {
@@ -1216,50 +1252,30 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       return;
     }
 
-    // 3. If this pause was NOT explicitly requested by the user (e.g. transient notification, Spotify background probe,
-    // screen lock glitch, or external app interruption):
+    // 3. External app sound interruption (Telegram voice, Instagram Reels, phone call, etc.):
+    // Yield audio focus immediately to the external sound! Do NOT force-play back!
     if (!isUserInitiatedPause && get().currentTrack) {
       wasInterruptedByExternalApp = true;
-      activateSilentAnchor(false);
-      console.log('[Audio] Transient/external pause detected in background. Scheduling auto-recovery...');
-
       clearInterruptionRetries();
-      const attemptAutoResume = (attemptNum: number) => {
-        if (isUserInitiatedPause || !get().currentTrack || !audio.paused || isRecoveringStream || isTransitioningTrack) {
-          return;
-        }
-        if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
-          audioCtx.resume().catch(() => {});
-        }
-        audio.play().then(() => {
-          console.log(`[Audio] Auto-resumed after transient interruption (attempt ${attemptNum})`);
-          wasInterruptedByExternalApp = false;
-          set({ isPlaying: true });
-          if ('mediaSession' in navigator) {
-            navigator.mediaSession.playbackState = 'playing';
-          }
-          updateMediaPositionState();
-        }).catch(() => {
-          if (attemptNum === 2 && audio.paused && !isUserInitiatedPause) {
-            // Persistent interruption (e.g. active phone call or another foreground media app)
-            releaseScreenWakeLock();
-            activateSilentAnchor(true);
-            set({ isPlaying: false });
-            if ('mediaSession' in navigator) {
-              navigator.mediaSession.playbackState = 'paused';
-            }
-            updateMediaPositionState();
-            useSyncStore.getState().sendPlaybackState({ isPlaying: false });
-          }
-        });
-      };
+      stopPlaybackWatchdog();
+      releaseScreenWakeLock();
+      deactivateSilentAnchor(); // Completely silence background anchor so it does not fight for AudioFocus!
 
-      interruptionRetryTimeout1 = setTimeout(() => attemptAutoResume(1), 150);
-      interruptionRetryTimeout2 = setTimeout(() => attemptAutoResume(2), 1500);
+      console.log('[Audio] External sound started (Telegram/Instagram/video). Pausing music with 10-minute timeout...');
+      set({ isPlaying: false });
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'paused';
+      }
+      updateMediaPositionState();
+      useSyncStore.getState().sendPlaybackState({ isPlaying: false });
+
+      // Start 10-minute standby timer for external interruption
+      startExternalPauseTimer();
       return;
     }
 
-    // 4. User-initiated pause: hold non-zero silent anchor on standby for 30m so OS keeps PWA alive & Spotify can't hijack buttons
+    // 4. User-initiated pause: hold non-zero silent anchor on standby so OS keeps PWA alive
+    clearExternalPauseTimer();
     stopPlaybackWatchdog();
     releaseScreenWakeLock();
     activateSilentAnchor(true);
@@ -1540,9 +1556,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           audioCtx.resume().catch(() => {});
         }
 
-        // Auto-resume after closing Instagram or other audio-stealing apps
-        if (wasInterruptedByExternalApp && get().currentTrack) {
-          console.log('[Audio] Returning from Instagram/external app. Restoring playback automatically...');
+        // Auto-resume after closing Instagram, Telegram, or other audio-stealing apps within 10-minute timeout
+        if (wasInterruptedByExternalApp && isExternalPauseValid() && get().currentTrack) {
+          console.log('[Audio] Returning from external app within 10 minutes. Restoring playback automatically...');
+          clearExternalPauseTimer();
           wasInterruptedByExternalApp = false;
           isUserInitiatedPause = false;
           get().resume();
