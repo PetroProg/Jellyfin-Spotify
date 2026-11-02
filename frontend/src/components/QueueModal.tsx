@@ -46,6 +46,16 @@ export const QueueModal: React.FC = () => {
     }
   }, [isQueueOpen, currentTrack]);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setQueueOpen(false);
+    };
+    if (isQueueOpen) {
+      window.addEventListener('keydown', handleKeyDown);
+    }
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isQueueOpen, setQueueOpen]);
+
   if (!isQueueOpen) return null;
 
   const upcomingTracks = queue.slice(currentIndex + 1);
@@ -117,7 +127,7 @@ export const QueueModal: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end">
+    <div className="fixed inset-0 z-[70] flex justify-end">
       {/* Backdrop */}
       <div
         className="fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity animate-in fade-in"
@@ -125,7 +135,7 @@ export const QueueModal: React.FC = () => {
       />
 
       {/* Drawer / Modal Container */}
-      <div className="relative w-full max-w-md md:max-w-lg h-full bg-cat-mantle/95 backdrop-blur-xl border-l border-cat-surface0/60 shadow-2xl flex flex-col z-10 select-none animate-in slide-in-from-right duration-200">
+      <div className="relative w-full max-w-md md:max-w-lg h-full bg-cat-mantle/95 backdrop-blur-xl border-l border-cat-surface0/60 shadow-2xl flex flex-col z-10 select-none animate-in slide-in-from-right duration-200 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(0.5rem,env(safe-area-inset-top))]">
         {/* Header */}
         <div className="p-4 sm:p-5 border-b border-cat-surface0/50 flex items-center justify-between">
           <div className="flex items-center gap-3">

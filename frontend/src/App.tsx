@@ -383,9 +383,6 @@ export const App: React.FC = () => {
         </main>
       </div>
 
-      {/* Global Responsive Play Queue Drawer & Modal */}
-      <QueueModal />
-
       {/* Global Download Bar for Server & Offline Downloads */}
       <GlobalDownloadBar
         onOpenPlaylist={handleSelectPlaylist}
@@ -409,6 +406,9 @@ export const App: React.FC = () => {
 
       {/* Mobile Full-Screen Now Playing Modal */}
       <FullPlayer />
+
+      {/* Global Responsive Play Queue Drawer & Modal (z-[70], always displays on top of FullPlayer) */}
+      <QueueModal />
 
       {/* Create Playlist Modal */}
       {showCreateModal && (
