@@ -782,7 +782,7 @@ async function executeYtDlpMp3Download(
       '--extract-audio',
       '--audio-format', 'mp3',
       '--audio-quality', '320k',
-      '--postprocessor-args', 'ExtractAudio:-af volume=-1.8dB -ar 48000 -compression_level 7',
+      '--postprocessor-args', 'ExtractAudio:-af loudnorm=I=-14:LRA=11:TP=-1.5 -ar 48000 -compression_level 7',
       '--embed-thumbnail',
       '--add-metadata',
       '-o', outputTemplate

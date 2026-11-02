@@ -538,37 +538,130 @@ export async function resolveSpotifyTrackCover(trackId: string): Promise<string 
   return details.cover_url;
 }
 
-export async function searchSpotifyTracks(query: string, limit: number = 5): Promise<SpotifyTrack[]> {
-  const token = await getAccessToken();
-  if (!token) return [];
-
+export async function searchDeezerTracks(query: string, limit: number = 8): Promise<SpotifyTrack[]> {
   try {
-    const res = await fetch(`https://api.spotify.com/v1/search?type=track&limit=${limit}&q=${encodeURIComponent(query)}`, {
-      headers: { Authorization: `Bearer ${token}` }
+    const res = await fetch(`https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=${limit}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      signal: AbortSignal.timeout(6000)
     });
-    if (!res.ok) {
-      console.warn('[Spotify Search HTTP Error]', res.status, res.statusText);
-      return [];
-    }
-
+    if (!res.ok) return [];
     const data: any = await res.json();
     const tracks: SpotifyTrack[] = [];
-    for (const t of data.tracks?.items || []) {
-      if (!t) continue;
+    for (const item of data.data || []) {
+      if (!item || !item.id || !item.title) continue;
       tracks.push({
-        id: t.id,
-        title: t.name,
-        artist: t.artists?.map((a: any) => a.name).join(', ') || 'Unknown Artist',
-        album: t.album?.name || '',
-        duration_ms: t.duration_ms || 180000,
-        cover_url: t.album?.images?.[0]?.url || ''
+        id: `dz_${item.id}`,
+        title: item.title,
+        artist: item.artist?.name || 'Unknown Artist',
+        album: item.album?.title || '',
+        duration_ms: (item.duration || 180) * 1000,
+        cover_url: item.album?.cover_xl || item.album?.cover_big || item.album?.cover_medium || ''
       });
     }
     return tracks;
   } catch (err: any) {
-    console.warn('[Spotify Search Error]', err.message);
+    console.warn('[Deezer Search Error]', err.message);
     return [];
   }
+}
+
+export async function searchItunesTracks(query: string, limit: number = 8): Promise<SpotifyTrack[]> {
+  try {
+    const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&entity=song&limit=${limit}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      signal: AbortSignal.timeout(6000)
+    });
+    if (!res.ok) return [];
+    const data: any = await res.json();
+    const tracks: SpotifyTrack[] = [];
+    for (const item of data.results || []) {
+      if (!item || !item.trackId || !item.trackName) continue;
+      let cover = item.artworkUrl100 || '';
+      if (cover) {
+        cover = cover.replace('100x100bb.jpg', '600x600bb.jpg');
+      }
+      tracks.push({
+        id: `it_${item.trackId}`,
+        title: item.trackName,
+        artist: item.artistName || 'Unknown Artist',
+        album: item.collectionName || '',
+        duration_ms: item.trackTimeMillis || 180000,
+        cover_url: cover
+      });
+    }
+    return tracks;
+  } catch (err: any) {
+    console.warn('[iTunes Search Error]', err.message);
+    return [];
+  }
+}
+
+export async function searchExternalTracks(query: string, limit: number = 8, userId?: number): Promise<SpotifyTrack[]> {
+  const cleanQ = (query || '').trim();
+  if (!cleanQ) return [];
+
+  const results: SpotifyTrack[] = [];
+  const seenKeys = new Set<string>();
+
+  const addUnique = (list: SpotifyTrack[]) => {
+    for (const t of list) {
+      if (!t.title || !t.artist) continue;
+      const key = `${t.title.toLowerCase().trim()} - ${t.artist.toLowerCase().trim()}`;
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        results.push(t);
+        if (results.length >= limit) break;
+      }
+    }
+  };
+
+  // 1. Try Spotify if user has connected token or client credentials
+  try {
+    let token = userId ? await getUserSpotifyToken(userId) : null;
+    if (!token) {
+      token = await getAccessToken();
+    }
+    if (token) {
+      const res = await fetch(`https://api.spotify.com/v1/search?type=track&limit=${limit}&q=${encodeURIComponent(cleanQ)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(4000)
+      });
+      if (res.ok) {
+        const data: any = await res.json();
+        const spotifyList: SpotifyTrack[] = [];
+        for (const t of data.tracks?.items || []) {
+          if (!t) continue;
+          spotifyList.push({
+            id: t.id,
+            title: t.name,
+            artist: t.artists?.map((a: any) => a.name).join(', ') || 'Unknown Artist',
+            album: t.album?.name || '',
+            duration_ms: t.duration_ms || 180000,
+            cover_url: t.album?.images?.[0]?.url || ''
+          });
+        }
+        addUnique(spotifyList);
+      }
+    }
+  } catch (_) {}
+
+  // 2. If Spotify returned insufficient results (or 403 Forbidden), query Deezer API (open, no auth, 100M+ tracks)
+  if (results.length < limit) {
+    const dzList = await searchDeezerTracks(cleanQ, limit);
+    addUnique(dzList);
+  }
+
+  // 3. If still below limit, query Apple Music / iTunes API
+  if (results.length < limit) {
+    const itunesList = await searchItunesTracks(cleanQ, limit);
+    addUnique(itunesList);
+  }
+
+  return results.slice(0, limit);
+}
+
+export async function searchSpotifyTracks(query: string, limit: number = 8, userId?: number): Promise<SpotifyTrack[]> {
+  return await searchExternalTracks(query, limit, userId);
 }
 
 export async function fetchSpotifyLikedSongs(userId: number): Promise<SpotifyPlaylistData> {

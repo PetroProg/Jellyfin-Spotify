@@ -1442,12 +1442,12 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
     LIMIT 5
   `).all(`%${query}%`, `%${query}%`, `%${query}%`, query, `${query}%`);
 
-  // 2. Search Spotify API (up to 5 tracks)
+  // 2. Search External Music APIs (Spotify OAuth / Deezer / iTunes, up to 8 tracks)
   let spotifyRaw: any[] = [];
   try {
-    spotifyRaw = await searchSpotifyTracks(query, 5);
+    spotifyRaw = await searchSpotifyTracks(query, 8, req.user?.id);
   } catch (err: any) {
-    console.warn('[Search Spotify Error]', err.message);
+    console.warn('[Search External Error]', err.message);
   }
 
   // Map each Spotify track and check if already downloaded

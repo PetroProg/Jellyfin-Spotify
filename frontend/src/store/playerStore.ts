@@ -159,8 +159,8 @@ const loadSavedEqPreset = (): string => {
 
 const loadSavedNormalizer = (): boolean => {
   const val = localStorage.getItem(STORAGE_KEY_NORMALIZER);
-  // Default to false: Pure Bit-Perfect Direct Stream for high-end headphones (Bose, etc.)
-  return val === null ? false : val === 'true';
+  // Default to true: automatic volume leveling so all tracks have uniform loudness
+  return val === null ? true : val === 'true';
 };
 
 // Helper to attach hidden <audio> elements to document.body so Chromium never treats them
@@ -559,11 +559,15 @@ function updateDspRouting(bands: number[], isNormalizer: boolean) {
 
 function applyHeadroom(bands: number[]) {
   if (!audioCtx || !preAmpGainNode) return;
+  const isNorm = usePlayerStore.getState().isNormalizerEnabled;
   const maxBoost = Math.max(0, ...bands);
   // Account for adjacent low-shelf (60Hz) + peaking (230Hz) filter overlap so bass boosts never clip 0 dBFS
   const lowOverlap = (bands[0] > 0 && bands[1] > 0) ? Math.min(bands[0], bands[1]) * 0.35 : 0;
   const headroomDb = maxBoost > 0 ? -Math.min(maxBoost * 0.65 + lowOverlap, 6.0) : 0;
-  const preAmpLinear = Math.pow(10, headroomDb / 20);
+  // If normalizer is active, add gentle makeup gain (+2.5 dB) so quieter tracks are lifted to reference level
+  const makeupDb = isNorm ? 2.5 : 0;
+  const totalDb = headroomDb + makeupDb;
+  const preAmpLinear = Math.pow(10, totalDb / 20);
   preAmpGainNode.gain.setTargetAtTime(preAmpLinear, audioCtx.currentTime, 0.02);
 }
 
@@ -573,11 +577,13 @@ function syncCompressorMode(bands: number[], isNormalizer: boolean) {
   const maxBoost = Math.max(0, ...bands);
 
   if (isNormalizer) {
-    compressorNode.threshold.setTargetAtTime(-14, now, 0.02);
-    compressorNode.knee.setTargetAtTime(12, now, 0.02);
-    compressorNode.ratio.setTargetAtTime(2.0, now, 0.02);
-    compressorNode.attack.setTargetAtTime(0.03, now, 0.02);
-    compressorNode.release.setTargetAtTime(0.25, now, 0.02);
+    // EBU R128-aligned automatic broadcast leveler:
+    // Soft knee (16 dB), ratio (3.0), fast attack (0.015s), smooth release (0.3s), threshold -18 dB
+    compressorNode.threshold.setTargetAtTime(-18, now, 0.02);
+    compressorNode.knee.setTargetAtTime(16, now, 0.02);
+    compressorNode.ratio.setTargetAtTime(3.0, now, 0.02);
+    compressorNode.attack.setTargetAtTime(0.015, now, 0.02);
+    compressorNode.release.setTargetAtTime(0.3, now, 0.02);
   } else if (maxBoost > 0) {
     // Transparent True-Peak Safety Ceiling when EQ boost is active: prevents bass transients from clipping > 0 dBFS
     compressorNode.threshold.setTargetAtTime(-2.0, now, 0.02);
@@ -606,6 +612,7 @@ function updateFilterGains(bands: number[]) {
 function updateNormalizer(enabled: boolean) {
   if (!audioCtx || !compressorNode) return;
   const bands = usePlayerStore.getState().eqBands;
+  applyHeadroom(bands);
   syncCompressorMode(bands, enabled);
   updateDspRouting(bands, enabled);
 }
@@ -1872,36 +1879,29 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       let q: Track[];
       let idx: number;
-      let orig = newQueue ? [...newQueue] : get().originalQueue;
+      let orig = newQueue ? [...newQueue] : (get().originalQueue && get().originalQueue.length > 0 ? get().originalQueue : get().queue);
+
+      // When user clicks a specific track in a list (or starts a new playlist/album),
+      // disable shuffle so tracks play in natural order. Shuffle is ONLY active when the Shuffle button is clicked!
+      const shouldTurnOffShuffle = index !== undefined || (newQueue && newQueue !== get().queue);
+      if (shouldTurnOffShuffle && get().shuffle) {
+        try { localStorage.setItem(STORAGE_KEY_SHUFFLE, 'false'); } catch (_) {}
+      }
+      const nextShuffle = shouldTurnOffShuffle ? false : get().shuffle;
 
       if (newQueue && newQueue !== get().queue) {
         // User started playback from a new list/playlist view
-        if (get().shuffle && newQueue.length > 1) {
-          const clickedIdx = (index !== undefined && index >= 0 && index < newQueue.length && newQueue[index].id === track.id)
-            ? index
-            : newQueue.findIndex((t) => t.id === track.id);
-          const chosenTrack = clickedIdx !== -1 ? newQueue[clickedIdx] : track;
-          const remaining = clickedIdx !== -1
-            ? newQueue.filter((_, i) => i !== clickedIdx)
-            : newQueue.filter((t) => t.id !== track.id);
-
-          for (let i = remaining.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
-          }
-
-          q = [chosenTrack, ...remaining];
+        q = [...newQueue];
+        idx = (index !== undefined && index >= 0 && index < q.length && q[index].id === track.id)
+          ? index
+          : q.findIndex((t) => t.id === track.id);
+        if (idx === -1) {
+          q = [track, ...q];
           idx = 0;
-        } else {
-          q = [...newQueue];
-          idx = index !== undefined ? index : q.findIndex((t) => t.id === track.id);
-          if (idx === -1) {
-            q = [track, ...q];
-            idx = 0;
-          }
         }
+        orig = [...newQueue];
       } else {
-        // Navigating within existing active queue (QueuePanel, nextTrack, prevTrack, etc.)
+        // Navigating within existing active queue (QueueModal, nextTrack, prevTrack, etc.)
         q = get().queue;
         idx = index !== undefined ? index : q.findIndex((t) => t.id === track.id);
         if (idx === -1) {
@@ -1919,8 +1919,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           currentIndex: idx,
           currentPlaylistId: playlistId !== undefined ? playlistId : get().currentPlaylistId,
           userQueuedCount: (newQueue && newQueue !== get().queue) ? 0 : get().userQueuedCount,
+          shuffle: nextShuffle,
           isPlaying: true,
         });
+        if (shouldTurnOffShuffle) {
+          useSyncStore.getState().sendPlaybackState({ shuffle: false });
+        }
         return;
       }
 
@@ -1935,10 +1939,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         currentIndex: idx,
         currentPlaylistId: playlistId !== undefined ? playlistId : get().currentPlaylistId,
         userQueuedCount: (newQueue && newQueue !== get().queue) ? 0 : get().userQueuedCount,
+        shuffle: nextShuffle,
         isPlaying: true,
         currentTime: 0,
         duration: initialDur,
       });
+
+      if (shouldTurnOffShuffle) {
+        useSyncStore.getState().sendPlaybackState({ shuffle: false });
+      }
 
       checkAndInitAudioGraph();
       if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {

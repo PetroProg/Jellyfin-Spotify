@@ -256,11 +256,11 @@ export const EqualizerModal: React.FC = () => {
           <div className="flex items-center gap-3">
             <Volume2 className="w-5 h-5 text-cat-mauve flex-shrink-0" />
             <div>
-              <p className="text-xs font-bold text-cat-text">{t('Loudness Normalization', 'Нормализация громкости')}</p>
+              <p className="text-xs font-bold text-cat-text">{t('Loudness Normalization (EBU R128)', 'Нормализация громкости (EBU R128)')}</p>
               <p className="text-[11px] text-cat-subtext0 mt-0.5 leading-relaxed">
                 {t(
-                  'Gentle volume leveling. For maximum dynamic range and drum punch in Bose headphones, keep OFF.',
-                  'Мягкое выравнивание уровня. Для максимального панча и широкой динамики в наушниках Bose рекомендуется держать ВЫКЛ.'
+                  'Automated volume leveling to -14 LUFS (Spotify standard). All songs play at equal comfortable loudness.',
+                  'Автоматическое выравнивание громкости под стандарт -14 LUFS (как в Spotify). Все песни играют с одинаковым комфортным уровнем звука.'
                 )}
               </p>
             </div>
