@@ -1,12 +1,22 @@
 import React from 'react';
-import { Play, Pause, SkipForward, Music2, Radio } from 'lucide-react';
+import { Play, Pause, SkipForward, Music2, Radio, ListMusic } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { useSyncStore } from '../store/syncStore';
 import { useI18nStore } from '../store/i18nStore';
 
 export const MiniPlayer: React.FC = () => {
   const { t } = useI18nStore();
-  const { currentTrack, isPlaying, togglePlay, nextTrack, currentTime, duration, setFullPlayerOpen } = usePlayerStore();
+  const {
+    currentTrack,
+    isPlaying,
+    togglePlay,
+    nextTrack,
+    currentTime,
+    duration,
+    setFullPlayerOpen,
+    isQueueOpen,
+    setQueueOpen
+  } = usePlayerStore();
   const { isLocalActive, activeDeviceName } = useSyncStore();
 
   if (!currentTrack) return null;
@@ -61,6 +71,15 @@ export const MiniPlayer: React.FC = () => {
 
         {/* Playback Controls */}
         <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => setQueueOpen(true)}
+            title={t('Play Queue', 'Очередь воспроизведения')}
+            className={`w-8 h-8 flex items-center justify-center active:scale-95 transition-all rounded-full ${
+              isQueueOpen ? 'text-cat-peach bg-cat-peach/15' : 'text-cat-subtext0 hover:text-cat-text'
+            }`}
+          >
+            <ListMusic className="w-4 h-4" />
+          </button>
           <button
             onClick={togglePlay}
             className="w-9 h-9 rounded-full bg-cat-mauve text-cat-base flex items-center justify-center hover:opacity-90 active:scale-95 transition-all shadow-md"

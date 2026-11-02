@@ -69,6 +69,11 @@ interface PlayerState {
   toggleSmartShuffle: () => void;
   toggleRepeat: () => void;
   setFullPlayerOpen: (open: boolean) => void;
+  isQueueOpen: boolean;
+  setQueueOpen: (open: boolean) => void;
+  userQueuedCount: number;
+  reorderQueue: (fromIndex: number, toIndex: number) => void;
+  clearUpcomingQueue: () => void;
   addToQueue: (track: Track) => void;
   removeFromQueue: (index: number) => void;
   likedTrackIds: number[];
@@ -1823,6 +1828,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     repeat: 'off',
     volume: initialVolume,
     isFullPlayerOpen: false,
+    isQueueOpen: false,
+    userQueuedCount: 0,
+    setQueueOpen: (open: boolean) => {
+      set({ isQueueOpen: open });
+    },
 
     isEqualizerOpen: false,
     eqBands: loadSavedEqBands(),
@@ -1908,6 +1918,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           originalQueue: orig,
           currentIndex: idx,
           currentPlaylistId: playlistId !== undefined ? playlistId : get().currentPlaylistId,
+          userQueuedCount: (newQueue && newQueue !== get().queue) ? 0 : get().userQueuedCount,
           isPlaying: true,
         });
         return;
@@ -1923,6 +1934,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         originalQueue: orig,
         currentIndex: idx,
         currentPlaylistId: playlistId !== undefined ? playlistId : get().currentPlaylistId,
+        userQueuedCount: (newQueue && newQueue !== get().queue) ? 0 : get().userQueuedCount,
         isPlaying: true,
         currentTime: 0,
         duration: initialDur,
@@ -2186,8 +2198,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         return;
       }
 
-      const { queue, currentIndex, repeat, smartShuffle, playTrack, currentPlaylistId } = get();
+      const { queue, currentIndex, repeat, smartShuffle, playTrack, currentPlaylistId, userQueuedCount } = get();
       if (queue.length === 0) return;
+
+      if (userQueuedCount > 0) {
+        set({ userQueuedCount: Math.max(0, userQueuedCount - 1) });
+      }
 
       let nextIndex = currentIndex + 1;
 
@@ -2364,12 +2380,73 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     addToQueue: (track: Track) => {
-      const { queue } = get();
-      set({ queue: [...queue, track] });
+      const { queue, currentIndex, userQueuedCount, originalQueue } = get();
+      if (!queue || queue.length === 0) {
+        get().playTrack(track, [track], 0);
+        toast.success(tr(`"${track.title}" started playing`, `«${track.title}» играет`));
+        return;
+      }
+
+      // Insert right after currently playing song + previously user-queued items
+      const insertIndex = Math.min(queue.length, currentIndex + 1 + (userQueuedCount || 0));
+      const newQueue = [...queue];
+      newQueue.splice(insertIndex, 0, track);
+
+      const newOrig = [...originalQueue];
+      const origInsertIndex = Math.min(newOrig.length, insertIndex);
+      newOrig.splice(origInsertIndex, 0, track);
+
+      set({
+        queue: newQueue,
+        originalQueue: newOrig,
+        userQueuedCount: (userQueuedCount || 0) + 1
+      });
+
+      toast.success(tr(`"${track.title}" will play next`, `«${track.title}» будет играть следующим`));
+
+      try {
+        useSyncStore.getState().sendPlaybackState({ queue: newQueue });
+      } catch (_) {}
+    },
+
+    reorderQueue: (fromIndex: number, toIndex: number) => {
+      const { queue, currentIndex, currentTrack } = get();
+      if (fromIndex < 0 || fromIndex >= queue.length || toIndex < 0 || toIndex >= queue.length || fromIndex === toIndex) {
+        return;
+      }
+      const newQueue = [...queue];
+      const [moved] = newQueue.splice(fromIndex, 1);
+      newQueue.splice(toIndex, 0, moved);
+
+      // Recalculate currentIndex so currentTrack index remains locked to playing song
+      let newIdx = currentIndex;
+      if (currentTrack) {
+        const found = newQueue.findIndex((t, i) => (t.id && t.id === currentTrack.id) || (i === currentIndex && t.title === currentTrack.title));
+        if (found !== -1) {
+          newIdx = found;
+        }
+      }
+
+      set({ queue: newQueue, currentIndex: newIdx });
+      try {
+        useSyncStore.getState().sendPlaybackState({ queue: newQueue });
+      } catch (_) {}
+    },
+
+    clearUpcomingQueue: () => {
+      const { queue, currentIndex } = get();
+      if (currentIndex < 0 || currentIndex >= queue.length) return;
+      const newQueue = queue.slice(0, currentIndex + 1);
+      set({ queue: newQueue, userQueuedCount: 0 });
+      try {
+        useSyncStore.getState().sendPlaybackState({ queue: newQueue });
+      } catch (_) {}
+      toast.success(tr('Upcoming queue cleared', 'Очередь очищена'));
     },
 
     removeFromQueue: (index: number) => {
-      const { queue, currentIndex } = get();
+      const { queue, currentIndex, userQueuedCount } = get();
+      if (index < 0 || index >= queue.length) return;
       const updated = queue.filter((_, i) => i !== index);
       let newIdx = currentIndex;
       if (index < currentIndex) {
@@ -2377,7 +2454,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       } else if (index === currentIndex && index >= updated.length) {
         newIdx = Math.max(0, updated.length - 1);
       }
-      set({ queue: updated, currentIndex: newIdx });
+
+      let newQueuedCount = userQueuedCount;
+      if (index > currentIndex && index <= currentIndex + userQueuedCount) {
+        newQueuedCount = Math.max(0, userQueuedCount - 1);
+      }
+
+      set({ queue: updated, currentIndex: newIdx, userQueuedCount: newQueuedCount });
+      try {
+        useSyncStore.getState().sendPlaybackState({ queue: updated });
+      } catch (_) {}
     },
 
     likedTrackIds: loadSavedLikedIds(),

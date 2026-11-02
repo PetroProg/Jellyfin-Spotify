@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   ChevronDown, Heart, Shuffle, SkipBack, Play, Pause, 
   SkipForward, Repeat, Repeat1, Music2, Sparkles, FolderPlus,
-  SlidersHorizontal, Ban, Radio
+  SlidersHorizontal, Ban, Radio, ListMusic
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { useSyncStore } from '../store/syncStore';
@@ -35,6 +35,7 @@ export const FullPlayer: React.FC = () => {
     loadLikes,
     setEqualizerOpen,
     blacklistTrack,
+    setQueueOpen,
   } = usePlayerStore();
 
   const { isLocalActive, activeDeviceName, setDevicePickerOpen } = useSyncStore();
@@ -119,6 +120,13 @@ export const FullPlayer: React.FC = () => {
           </span>
         </div>
         <div className="flex items-center gap-1 -mr-2">
+          <button
+            onClick={() => setQueueOpen(true)}
+            title={t('Play Queue', 'Очередь воспроизведения')}
+            className="p-2 text-cat-subtext0 hover:text-cat-peach active:scale-95 transition-all cursor-pointer"
+          >
+            <ListMusic className="w-5 h-5" />
+          </button>
           <button
             onClick={() => setEqualizerOpen(true)}
             title={t('Studio Audio & Equalizer', 'Студийный звук & Эквалайзер')}
@@ -263,12 +271,21 @@ export const FullPlayer: React.FC = () => {
           </span>
         </button>
 
-        <button
-          onClick={() => setDevicePickerOpen(true)}
-          className="text-xs text-cat-mauve font-bold hover:underline shrink-0"
-        >
-          {t('Devices', 'Устройства')}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setQueueOpen(true)}
+            title={t('Play Queue', 'Очередь воспроизведения')}
+            className="p-1 rounded-lg text-cat-subtext0 hover:text-cat-peach transition-colors"
+          >
+            <ListMusic className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setDevicePickerOpen(true)}
+            className="text-xs text-cat-mauve font-bold hover:underline shrink-0"
+          >
+            {t('Devices', 'Устройства')}
+          </button>
+        </div>
       </div>
 
       <AddToPlaylistModal

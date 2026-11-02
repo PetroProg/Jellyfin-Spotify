@@ -5,6 +5,7 @@ import { upgradeSingleTrackFile, getUpgradeProgress } from './downloader';
 
 let schedulerInterval: NodeJS.Timeout | null = null;
 let isJobRunning = false;
+let lastNightlyHealerDate: string | null = null;
 
 interface UserNightlyConfig {
   id: number;
@@ -111,9 +112,11 @@ export async function checkAndRunNightlyMixes(): Promise<void> {
       }
     }
 
-    // Run nightly quality healer if between 02:00 and 05:00 AM server time and nobody is playing music
+    // Run nightly quality healer once per night between 02:00 and 05:00 AM server time when nobody is playing music
     const serverHour = new Date().getHours();
-    if (serverHour >= 2 && serverHour <= 5 && !isAnyUserPlayingMusic()) {
+    const todayDate = new Date().toISOString().slice(0, 10);
+    if (serverHour >= 2 && serverHour <= 5 && !isAnyUserPlayingMusic() && lastNightlyHealerDate !== todayDate) {
+      lastNightlyHealerDate = todayDate;
       await checkAndRunNightlyQualityHealer(15);
     }
   } catch (err: any) {

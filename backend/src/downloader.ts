@@ -619,42 +619,88 @@ async function runWorkerLoop() {
 
 export async function findBestStudioAudioSource(artist: string, title: string, durationMs?: number): Promise<string> {
   const targetSec = durationMs ? Math.round(durationMs / 1000) : 0;
-  // Security: strip leading dashes/flags to prevent argument injection
-  const cleanArtist = (artist || '').replace(/^[- \t]+/, '').replace(/[\\/:*?"<>|]/g, ' ').trim();
-  const cleanTitle = (title || '').replace(/^[- \t]+/, '').replace(/[\\/:*?"<>|]/g, ' ').trim();
-  const searchQuery = `ytsearch10:${cleanArtist} ${cleanTitle}`;
+  // Security: strip leading dashes/flags to prevent argument injection, normalize unicode
+  const cleanArtist = (artist || '')
+    .replace(/[∅Ø]/g, 'O')
+    .replace(/^[- \t]+/, '')
+    .replace(/[\\/:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const cleanTitle = (title || '')
+    .replace(/[∅Ø]/g, 'O')
+    .replace(/^[- \t]+/, '')
+    .replace(/[\\/:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const cleanTitleNoFeat = cleanTitle.replace(/\s*\((feat|ft)\.?\s+[^)]+\)/gi, '').trim();
 
-  try {
-    const raw = await new Promise<string>((resolve) => {
-      const proc = spawn('yt-dlp', [
-        '--js-runtimes', 'node',
+  // Helper to query yt-dlp flat playlist / dump json
+  const fetchCandidates = async (queryOrUrl: string, defaultSearch?: string, timeoutMs: number = 22000): Promise<any[]> => {
+    return new Promise<any[]>((resolve) => {
+      const isUrl = queryOrUrl.startsWith('http://') || queryOrUrl.startsWith('https://');
+      const args = [
         '--dump-json',
-        '--flat-playlist',
-        '--default-search', 'ytsearch10',
-        '--',
-        searchQuery
-      ], { detached: true });
+        '--flat-playlist'
+      ];
+      if (!isUrl && defaultSearch) {
+        args.push('--default-search', defaultSearch);
+      }
+      args.push('--', queryOrUrl);
+
+      const proc = spawn('yt-dlp', args, { detached: true });
       let stdout = '';
       proc.stdout.on('data', d => stdout += d.toString());
       proc.stderr.on('data', () => {});
-      proc.on('close', () => resolve(stdout));
-      proc.on('error', () => resolve(''));
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         killProcessGroup(proc, 'SIGKILL');
-        resolve(stdout);
-      }, 15000);
-    });
+        resolve([]);
+      }, timeoutMs);
 
-    const candidates: any[] = [];
-    for (const line of raw.trim().split('\n')) {
-      if (!line) continue;
-      try {
-        const item = JSON.parse(line);
+      proc.on('close', () => {
+        clearTimeout(timer);
+        const list: any[] = [];
+        for (const line of stdout.trim().split('\n')) {
+          if (!line) continue;
+          try {
+            const item = JSON.parse(line);
+            if (item && item.id) list.push(item);
+          } catch (_) {}
+        }
+        resolve(list);
+      });
+      proc.on('error', () => {
+        clearTimeout(timer);
+        resolve([]);
+      });
+    });
+  };
+
+  try {
+    // 1. YouTube Music search (uncensored, pristine studio audio tracks, bypasses SafeSearch on "Sex", "Drugs", "Порнофильмы", etc.)
+    const ytmQuery = `${cleanArtist} ${cleanTitleNoFeat || cleanTitle}`;
+    let items = await fetchCandidates(`https://music.youtube.com/search?q=${encodeURIComponent(ytmQuery)}`);
+
+    // 2. If YTM returned nothing, try standard YouTube search
+    if (items.length === 0) {
+      items = await fetchCandidates(`${cleanArtist} - ${cleanTitle} audio`, 'ytsearch8');
+    }
+
+    // 3. Fallback: simple search without "audio"
+    if (items.length === 0) {
+      items = await fetchCandidates(`${cleanArtist} ${cleanTitleNoFeat || cleanTitle}`, 'ytsearch6');
+    }
+
+    if (items.length > 0) {
+      // Score candidates
+      let bestItem: any = null;
+      let bestScore = -99999;
+
+      for (const item of items) {
         const dur = Number(item.duration) || 0;
-        const diff = targetSec > 0 ? Math.abs(dur - targetSec) : 0;
+        const diff = targetSec > 0 && dur > 0 ? Math.abs(dur - targetSec) : 0;
         let score = 0;
 
-        if (targetSec > 0) {
+        if (targetSec > 0 && dur > 0) {
           if (diff <= 2) score += 50;
           else if (diff <= 5) score += 35;
           else if (diff <= 10) score += 20;
@@ -691,23 +737,23 @@ export async function findBestStudioAudioSource(artist: string, title: string, d
           }
         }
 
-        candidates.push({ id: item.id, score, dur, diff, title: item.title });
-      } catch (_) {}
-    }
+        if (score > bestScore) {
+          bestScore = score;
+          bestItem = item;
+        }
+      }
 
-    if (candidates.length > 0) {
-      candidates.sort((a, b) => b.score - a.score);
-      const best = candidates[0];
-      if (best.id) {
-        console.log(`[Studio Audio Match] "${cleanArtist} - ${cleanTitle}": selected ${best.id} ("${best.title}", diff=${best.diff}s, score=${best.score})`);
-        return `https://www.youtube.com/watch?v=${best.id}`;
+      const selected = bestItem || items[0];
+      if (selected?.id) {
+        console.log(`[Studio Audio Match] "${cleanArtist} - ${cleanTitle}": selected ${selected.id} ("${selected.title}", diff=${targetSec > 0 && selected.duration ? Math.abs(selected.duration - targetSec) : 0}s, score=${bestScore})`);
+        return `https://www.youtube.com/watch?v=${selected.id}`;
       }
     }
   } catch (err: any) {
     console.warn('[Studio Audio Search Fallback]:', err.message);
   }
 
-  return `ytsearch1:${cleanArtist} - ${cleanTitle} audio`;
+  return `ytsearch1:${cleanArtist} - ${cleanTitle}`;
 }
 
 async function executeYtDlpMp3Download(
@@ -730,7 +776,6 @@ async function executeYtDlpMp3Download(
 
     const ytDlpArgs = [
       '--js-runtimes', 'node',
-      '--no-playlist',
       '--force-overwrites',
       '--no-continue',
       '-f', 'bestaudio[acodec=opus]/bestaudio/best',
@@ -740,17 +785,27 @@ async function executeYtDlpMp3Download(
       '--postprocessor-args', 'ExtractAudio:-af volume=-1.8dB -ar 48000 -compression_level 7',
       '--embed-thumbnail',
       '--add-metadata',
-      '-o', outputTemplate,
-      '--',
-      sourceUrl
+      '-o', outputTemplate
     ];
+
+    // Only pass --no-playlist when NOT running a ytsearch query (yt-dlp treats search as a playlist!)
+    if (!sourceUrl.startsWith('ytsearch')) {
+      ytDlpArgs.push('--no-playlist');
+    }
+
+    ytDlpArgs.push('--', sourceUrl);
 
     const cmd = lowCpuPriority ? 'nice' : 'yt-dlp';
     const args = lowCpuPriority ? ['-n', '19', 'ionice', '-c', '3', 'yt-dlp', ...ytDlpArgs] : ytDlpArgs;
 
+    let stderrOutput = '';
     const proc = spawn(cmd, args, {
       detached: true,
-      stdio: 'ignore'
+      stdio: ['ignore', 'ignore', 'pipe']
+    });
+
+    proc.stderr?.on('data', d => {
+      stderrOutput = (stderrOutput + d.toString()).slice(-600);
     });
 
     const timer = setTimeout(() => {
@@ -765,12 +820,16 @@ async function executeYtDlpMp3Download(
       if (code === 0 && found && fs.existsSync(found)) {
         finish(true, false);
       } else {
+        if (stderrOutput) {
+          console.warn(`[yt-dlp error] "${safeTitle}" (exit code ${code}):`, stderrOutput.trim());
+        }
         cleanupPartialFiles(targetDir, safeTitle);
         finish(false, false);
       }
     });
 
-    proc.on('error', () => {
+    proc.on('error', (err: any) => {
+      console.warn(`[yt-dlp spawn error] "${safeTitle}":`, err?.message || err);
       cleanupPartialFiles(targetDir, safeTitle);
       finish(false, false);
     });
@@ -798,10 +857,10 @@ async function downloadAudioWithFallback(
   );
   if (firstAttempt.ok) return true;
 
-  // If primary video ID was unavailable/age-restricted (and didn't time out), retry once via search fallback
-  const cleanArtist = (artist || '').replace(/^[- \t]+/, '').replace(/[\\/:*?"<>|]/g, ' ').trim();
-  const cleanTitle = (title || '').replace(/^[- \t]+/, '').replace(/[\\/:*?"<>|]/g, ' ').trim();
-  const fallbackQuery = `ytsearch1:${cleanArtist} - ${cleanTitle} audio`;
+  // If primary source failed (and didn't hard-timeout), retry once via clean ytsearch fallback
+  const cleanArtist = (artist || '').replace(/[∅Ø]/g, 'O').replace(/^[- \t]+/, '').replace(/[\\/:*?"<>|]/g, ' ').trim();
+  const cleanTitle = (title || '').replace(/[∅Ø]/g, 'O').replace(/^[- \t]+/, '').replace(/[\\/:*?"<>|]/g, ' ').trim();
+  const fallbackQuery = `ytsearch1:${cleanArtist} - ${cleanTitle}`;
 
   if (!firstAttempt.timedOut && primaryUrl !== fallbackQuery) {
     console.warn(`[yt-dlp retry] Primary source ${primaryUrl} failed for "${artist} - ${title}". Retrying with search fallback...`);

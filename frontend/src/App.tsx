@@ -8,7 +8,7 @@ import { BottomNav } from './components/BottomNav';
 import { MiniPlayer } from './components/MiniPlayer';
 import { FullPlayer } from './components/FullPlayer';
 import { DesktopPlayer } from './components/DesktopPlayer';
-import { QueuePanel } from './components/QueuePanel';
+import { QueueModal } from './components/QueueModal';
 import { GlobalDownloadBar } from './components/GlobalDownloadBar';
 import { Home } from './pages/Home';
 import { PlaylistView } from './pages/PlaylistView';
@@ -45,7 +45,7 @@ export const App: React.FC = () => {
     return cached.length > 0 ? cached : getAllOfflinePlaylists();
   });
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
-  const [isQueueOpen, setIsQueueOpen] = useState(false);
+  const { isQueueOpen, setQueueOpen } = usePlayerStore();
   
   // Create Playlist Modal
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -153,7 +153,7 @@ export const App: React.FC = () => {
       }
 
       if (modalsRef.current.isQueueOpen) {
-        setIsQueueOpen(false);
+        setQueueOpen(false);
         return;
       }
 
@@ -208,7 +208,7 @@ export const App: React.FC = () => {
     }
 
     if (isQueueOpen) {
-      setIsQueueOpen(false);
+      setQueueOpen(false);
       return;
     }
 
@@ -381,10 +381,10 @@ export const App: React.FC = () => {
 
           {currentTab === 'settings' && <Settings onBack={handleBack} />}
         </main>
-
-        {/* Right Desktop Queue & Recommendations Panel */}
-        {isQueueOpen && <QueuePanel />}
       </div>
+
+      {/* Global Responsive Play Queue Drawer & Modal */}
+      <QueueModal />
 
       {/* Global Download Bar for Server & Offline Downloads */}
       <GlobalDownloadBar
@@ -395,7 +395,7 @@ export const App: React.FC = () => {
       />
 
       {/* Desktop Bottom Player */}
-      <DesktopPlayer onToggleQueue={() => setIsQueueOpen(!isQueueOpen)} />
+      <DesktopPlayer onToggleQueue={() => setQueueOpen(!isQueueOpen)} />
 
       {/* Mobile Floating Mini Player */}
       <MiniPlayer />

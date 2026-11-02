@@ -39,6 +39,8 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
     loadLikes,
     setEqualizerOpen,
     blacklistTrack,
+    isQueueOpen,
+    setQueueOpen,
   } = usePlayerStore();
 
   const { isLocalActive, activeDeviceName, setDevicePickerOpen } = useSyncStore();
@@ -252,15 +254,18 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
           <Radio className="w-4 h-4" />
         </button>
 
-        {onToggleQueue && (
-          <button
-            onClick={onToggleQueue}
-            title={t('Play Queue', 'Очередь воспроизведения')}
-            className="p-1.5 rounded-lg hover:text-cat-text transition-colors"
-          >
-            <ListMusic className="w-4 h-4" />
-          </button>
-        )}
+        <button
+          onClick={() => {
+            if (onToggleQueue) onToggleQueue();
+            else setQueueOpen(!isQueueOpen);
+          }}
+          title={t('Play Queue', 'Очередь воспроизведения')}
+          className={`p-1.5 rounded-lg transition-colors cursor-pointer active:scale-95 ${
+            isQueueOpen ? 'text-cat-peach bg-cat-peach/15' : 'text-cat-subtext0 hover:text-cat-text'
+          }`}
+        >
+          <ListMusic className="w-4 h-4" />
+        </button>
 
         <div className="flex items-center gap-2">
           <button
