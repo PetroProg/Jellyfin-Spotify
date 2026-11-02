@@ -909,6 +909,13 @@ server.post('/api/playlists/:id/tracks', { preHandler: [(server as any).authenti
   return { success: true };
 });
 
+server.get('/api/tracks/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const trackId = Number(req.params.id);
+  const track: any = db.prepare('SELECT id, title, artist, album, duration_ms, cover_url, file_path, spotify_id FROM tracks WHERE id = ?').get(trackId);
+  if (!track) return reply.status(404).send({ error: 'Трек не найден' });
+  return { track };
+});
+
 server.get('/api/tracks/:id/playlists', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const trackId = Number(req.params.id);
   const playlists = db.prepare(`
@@ -1623,13 +1630,14 @@ server.post('/api/tracks/upgrade-quality/stop', { preHandler: [(server as any).a
 server.get('/api/likes', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const blVer = getUserBlacklistVersion(req.user.id);
   const stats: any = db.prepare(`
-    SELECT COUNT(*) as count, COALESCE(MAX(created_at), '') as maxAdded
+    SELECT COUNT(*) as count, COALESCE(MAX(created_at), '') as maxAdded, COALESCE(TOTAL(track_id), 0) as idSum
     FROM liked_tracks WHERE user_id = ?
   `).get(req.user.id);
 
   const currentCount = Number(stats?.count) || 0;
   const currentMaxAdded = String(stats?.maxAdded || '');
-  const currentVersion = `v_likes_${req.user.id}_${currentCount}_${currentMaxAdded}_${blVer}`;
+  const idSum = Math.round(Number(stats?.idSum) || 0);
+  const currentVersion = `v_likes_${req.user.id}_${currentCount}_${idSum}_${currentMaxAdded}_${blVer}`;
 
   if (req.query.version && req.query.version === currentVersion) {
     return { upToDate: true, version: currentVersion };

@@ -2528,9 +2528,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(updated));
         } catch (_) {}
 
-        const targetTrack = trackObj || (get().currentTrack?.id === trackId ? get().currentTrack : get().queue.find((t) => t.id === trackId));
+        let targetTrack = trackObj || (get().currentTrack?.id === trackId ? get().currentTrack : get().queue.find((t) => t.id === trackId));
 
         if (finalLiked) {
+          if (!targetTrack && shouldTrackBeCachedOffline(trackId, -1, updated)) {
+            try {
+              const fetched = await apiRequest<{ track: Track }>(`/tracks/${trackId}`);
+              if (fetched?.track) {
+                targetTrack = fetched.track;
+              }
+            } catch (_) {}
+          }
+
           if (targetTrack) {
             // Auto-cache track if Liked Songs or any containing playlist is downloaded on this device!
             if (shouldTrackBeCachedOffline(trackId, -1, updated)) {
