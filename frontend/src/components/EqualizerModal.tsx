@@ -251,16 +251,47 @@ export const EqualizerModal: React.FC = () => {
           </span>
         </div>
 
+        {/* Quick Bass & Audiophile Controls */}
+        <div className="flex items-center gap-2 mb-4">
+          <button
+            onClick={() => setEqPreset('bass')}
+            className={`flex-1 py-2 px-3.5 rounded-2xl flex items-center justify-center gap-2 text-xs font-bold transition-all shadow-sm cursor-pointer active:scale-95 ${
+              eqPreset === 'bass'
+                ? 'bg-gradient-to-r from-cat-peach to-cat-red text-cat-base shadow-cat-peach/25'
+                : 'bg-cat-surface0/70 hover:bg-cat-surface0 text-cat-text border border-cat-peach/30 hover:border-cat-peach/60'
+            }`}
+          >
+            <span>🔥</span>
+            <span>{t('Ultra Bass Boost', 'Усиление глубокого баса')}</span>
+            {eqPreset === 'bass' && <span className="text-[10px] bg-cat-base/30 px-1.5 py-0.2 rounded-full font-bold">ON</span>}
+          </button>
+
+          <button
+            onClick={() => {
+              setEqPreset('flat');
+              if (isNormalizerEnabled) toggleNormalizer();
+            }}
+            className={`py-2 px-3.5 rounded-2xl text-xs font-semibold transition-all cursor-pointer active:scale-95 border ${
+              isBitPerfectDirect
+                ? 'bg-cat-green text-cat-base border-cat-green shadow-sm'
+                : 'bg-cat-surface0/60 hover:bg-cat-surface0 text-cat-subtext0 hover:text-cat-text border-cat-surface1/30'
+            }`}
+            title={t('Original Bit-Perfect sound without EQ', 'Оригинальный чистый звук без обработки')}
+          >
+            {t('Bit-Perfect', 'Чистый звук')}
+          </button>
+        </div>
+
         {/* Section 1: Loudness Normalization */}
         <div className="bg-cat-surface0/40 border border-cat-surface1/20 rounded-2xl p-3.5 mb-5 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <Volume2 className="w-5 h-5 text-cat-mauve flex-shrink-0" />
             <div>
-              <p className="text-xs font-bold text-cat-text">{t('Loudness Normalization (EBU R128)', 'Нормализация громкости (EBU R128)')}</p>
+              <p className="text-xs font-bold text-cat-text">{t('Loudness Normalization', 'Нормализация громкости')}</p>
               <p className="text-[11px] text-cat-subtext0 mt-0.5 leading-relaxed">
                 {t(
-                  'Automated volume leveling to -14 LUFS (Spotify standard). All songs play at equal comfortable loudness.',
-                  'Автоматическое выравнивание громкости под стандарт -14 LUFS (как в Spotify). Все песни играют с одинаковым комфортным уровнем звука.'
+                  'Transparent peak leveling. For maximum dynamic range and deepest drum punch in Bose headphones, keep OFF (Bit-Perfect).',
+                  'Мягкое выравнивание пиков. Для максимальной динамики и сокрушительного панча баса в наушниках Bose рекомендуется держать ВЫКЛ (Bit-Perfect).'
                 )}
               </p>
             </div>

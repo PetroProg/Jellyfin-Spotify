@@ -22,13 +22,14 @@ import {
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
 export const EQ_PRESETS: Record<string, { label: string; labelEn: string; bands: number[] }> = {
-  flat: { label: 'Оригинал (Flat)', labelEn: 'Original (Flat)', bands: [0, 0, 0, 0, 0] },
-  bass: { label: 'Усиление басов', labelEn: 'Bass Boost', bands: [5.5, 3.5, 0, 0.5, 1] },
-  rock: { label: 'Рок', labelEn: 'Rock', bands: [3.5, 2, -0.5, 2, 2.5] },
-  pop: { label: 'Поп', labelEn: 'Pop', bands: [-0.5, 1.5, 2.5, 2, 2] },
-  vocal: { label: 'Чистый вокал', labelEn: 'Clean Vocal', bands: [-1.5, 0, 3.5, 2.5, 1] },
-  electronic: { label: 'Электроника', labelEn: 'Electronic', bands: [5, 3, 0, 2, 2.5] },
-  hiphop: { label: 'Хип-хоп', labelEn: 'Hip-Hop', bands: [6, 4, 0, 1, 1.5] },
+  flat: { label: 'Оригинал (Bit-Perfect)', labelEn: 'Original (Bit-Perfect)', bands: [0, 0, 0, 0, 0] },
+  bass: { label: '🔥 Усиление басов (Ultra Bass)', labelEn: '🔥 Ultra Bass Boost', bands: [6.5, 4.0, -0.5, 1.0, 2.0] },
+  club: { label: 'Клубный панч (EDM / Club)', labelEn: 'Club / EDM Punch', bands: [5.5, 3.0, 0, 2.0, 3.0] },
+  rock: { label: 'Рок & Драйв (Rock / Metal)', labelEn: 'Rock & Drive', bands: [4.0, 2.5, 0.5, 2.5, 3.0] },
+  audiophile: { label: 'Аудиофил (Bose / Sony)', labelEn: 'Audiophile (Bose / Sony)', bands: [3.0, 1.5, 0, 1.0, 1.5] },
+  pop: { label: 'Поп', labelEn: 'Pop', bands: [-0.5, 1.5, 2.5, 2.0, 2.0] },
+  vocal: { label: 'Чистый вокал', labelEn: 'Clean Vocal', bands: [-1.5, 0, 3.5, 2.5, 1.0] },
+  hiphop: { label: 'Хип-хоп & 808', labelEn: 'Hip-Hop & 808', bands: [7.0, 4.5, -0.5, 1.5, 2.0] },
 };
 
 interface PlayerState {
@@ -159,8 +160,8 @@ const loadSavedEqPreset = (): string => {
 
 const loadSavedNormalizer = (): boolean => {
   const val = localStorage.getItem(STORAGE_KEY_NORMALIZER);
-  // Default to true: automatic volume leveling so all tracks have uniform loudness
-  return val === null ? true : val === 'true';
+  // Default to false: Pure Bit-Perfect Direct Stream for high-end headphones (Bose, Sony, AirPods, etc.)
+  return val === null ? false : val === 'true';
 };
 
 // Helper to attach hidden <audio> elements to document.body so Chromium never treats them
@@ -559,15 +560,12 @@ function updateDspRouting(bands: number[], isNormalizer: boolean) {
 
 function applyHeadroom(bands: number[]) {
   if (!audioCtx || !preAmpGainNode) return;
-  const isNorm = usePlayerStore.getState().isNormalizerEnabled;
   const maxBoost = Math.max(0, ...bands);
   // Account for adjacent low-shelf (60Hz) + peaking (230Hz) filter overlap so bass boosts never clip 0 dBFS
-  const lowOverlap = (bands[0] > 0 && bands[1] > 0) ? Math.min(bands[0], bands[1]) * 0.35 : 0;
-  const headroomDb = maxBoost > 0 ? -Math.min(maxBoost * 0.65 + lowOverlap, 6.0) : 0;
-  // If normalizer is active, add gentle makeup gain (+2.5 dB) so quieter tracks are lifted to reference level
-  const makeupDb = isNorm ? 2.5 : 0;
-  const totalDb = headroomDb + makeupDb;
-  const preAmpLinear = Math.pow(10, totalDb / 20);
+  const lowOverlap = (bands[0] > 0 && bands[1] > 0) ? Math.min(bands[0], bands[1]) * 0.25 : 0;
+  // Apply transparent headroom only when EQ is boosted above 0 dB
+  const headroomDb = maxBoost > 0 ? -Math.min(maxBoost * 0.45 + lowOverlap, 4.0) : 0;
+  const preAmpLinear = Math.pow(10, headroomDb / 20);
   preAmpGainNode.gain.setTargetAtTime(preAmpLinear, audioCtx.currentTime, 0.02);
 }
 
@@ -577,20 +575,21 @@ function syncCompressorMode(bands: number[], isNormalizer: boolean) {
   const maxBoost = Math.max(0, ...bands);
 
   if (isNormalizer) {
-    // EBU R128-aligned automatic broadcast leveler:
-    // Soft knee (16 dB), ratio (3.0), fast attack (0.015s), smooth release (0.3s), threshold -18 dB
-    compressorNode.threshold.setTargetAtTime(-18, now, 0.02);
-    compressorNode.knee.setTargetAtTime(16, now, 0.02);
-    compressorNode.ratio.setTargetAtTime(3.0, now, 0.02);
-    compressorNode.attack.setTargetAtTime(0.015, now, 0.02);
-    compressorNode.release.setTargetAtTime(0.3, now, 0.02);
+    // Transparent Audiophile Leveler:
+    // High threshold (-2.5 dBFS), soft knee (12 dB), gentle ratio (1.4:1), long attack (0.045s), smooth release (0.25s)
+    // Transients (kick drum, slap bass, snare) pass through 100% uncompressed with full punch!
+    compressorNode.threshold.setTargetAtTime(-2.5, now, 0.02);
+    compressorNode.knee.setTargetAtTime(12, now, 0.02);
+    compressorNode.ratio.setTargetAtTime(1.4, now, 0.02);
+    compressorNode.attack.setTargetAtTime(0.045, now, 0.02);
+    compressorNode.release.setTargetAtTime(0.25, now, 0.02);
   } else if (maxBoost > 0) {
     // Transparent True-Peak Safety Ceiling when EQ boost is active: prevents bass transients from clipping > 0 dBFS
-    compressorNode.threshold.setTargetAtTime(-2.0, now, 0.02);
-    compressorNode.knee.setTargetAtTime(6.0, now, 0.02);
-    compressorNode.ratio.setTargetAtTime(6.0, now, 0.02);
-    compressorNode.attack.setTargetAtTime(0.02, now, 0.02);
-    compressorNode.release.setTargetAtTime(0.18, now, 0.02);
+    compressorNode.threshold.setTargetAtTime(-1.5, now, 0.02);
+    compressorNode.knee.setTargetAtTime(4.0, now, 0.02);
+    compressorNode.ratio.setTargetAtTime(12.0, now, 0.02);
+    compressorNode.attack.setTargetAtTime(0.005, now, 0.02);
+    compressorNode.release.setTargetAtTime(0.08, now, 0.02);
   } else {
     compressorNode.threshold.setTargetAtTime(0, now, 0.02);
     compressorNode.ratio.setTargetAtTime(1, now, 0.02);
@@ -682,6 +681,9 @@ function ensureAudioGraph() {
       } else if (idx === EQ_FREQUENCIES.length - 1) {
         filter.type = 'highshelf';
         filter.Q.value = 0.707;
+      } else if (idx === 1) {
+        filter.type = 'peaking';
+        filter.Q.value = 0.75;
       } else {
         filter.type = 'peaking';
         filter.Q.value = 0.85;
