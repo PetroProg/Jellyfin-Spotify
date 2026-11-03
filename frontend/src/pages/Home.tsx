@@ -80,7 +80,7 @@ export const Home: React.FC<HomeProps> = ({
   const loadDailyMixes = async (silent = false) => {
     try {
       if (!silent && dailyMixes.length === 0) setLoadingMixes(true);
-      const data = await apiRequest<{ mixes: Playlist[] }>('/daily-mixes');
+      const data = await apiRequest<{ mixes: Playlist[] }>('/daily-mixes', { silentOffline: true });
       if (data.mixes) {
         setDailyMixes(data.mixes);
         try {

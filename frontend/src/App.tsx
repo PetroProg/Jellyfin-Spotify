@@ -252,7 +252,7 @@ export const App: React.FC = () => {
   const loadPlaylists = async () => {
     if (!isAuthenticated) return;
     try {
-      const data = await apiRequest<{ playlists: Playlist[] }>('/playlists');
+      const data = await apiRequest<{ playlists: Playlist[] }>('/playlists', { silentOffline: true });
       const list = data.playlists || [];
       setPlaylists(list);
       saveAllPlaylistsCache(list);
@@ -285,15 +285,17 @@ export const App: React.FC = () => {
     if (!newPlaylistName.trim()) return;
 
     try {
-      const res = await apiRequest('/playlists', {
+      const res = await apiRequest<{ id?: number; playlist?: Playlist; success?: boolean }>('/playlists', {
         method: 'POST',
-        body: JSON.stringify({ name: newPlaylistName, description: newPlaylistDesc })
+        body: JSON.stringify({ name: newPlaylistName, description: newPlaylistDesc }),
+        silentOffline: true,
       });
       setShowCreateModal(false);
       setNewPlaylistName('');
       setNewPlaylistDesc('');
+      toast.success(t('Playlist created', 'Плейлист создан'));
       await loadPlaylists();
-      if (res.id) {
+      if (res && res.id) {
         handleSelectPlaylist(res.id);
       }
     } catch (e: any) {

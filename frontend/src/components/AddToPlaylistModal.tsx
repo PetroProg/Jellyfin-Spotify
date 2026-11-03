@@ -9,7 +9,9 @@ import { useI18nStore, formatTrackCount } from '../store/i18nStore';
 import {
   shouldTrackBeCachedOffline,
   addTrackToOfflinePlaylist,
-  removeTrackFromOfflinePlaylist
+  removeTrackFromOfflinePlaylist,
+  getAllPlaylistsCache,
+  getOfflinePlaylistData,
 } from '../utils/offline';
 
 interface PlaylistWithStatus {
@@ -67,9 +69,26 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   }, [isOpen, track?.id, spotifyTrack?.id]);
 
   const loadPlaylists = async (tId: number = 0) => {
-    setLoading(true);
+    // 1. Instantly render from local cache if available (0 ms)
+    const cached = getAllPlaylistsCache();
+    if (cached && cached.length > 0) {
+      const offlineList: PlaylistWithStatus[] = cached
+        .filter((p) => !p.name.toLowerCase().includes('daily mix') && !(p as any).is_daily_mix)
+        .map((p) => ({
+          ...p,
+          track_count: p.track_count ?? 0,
+          has_track: tId > 0 && getOfflinePlaylistData(p.id)?.tracks?.some((t) => t.id === tId) ? 1 : 0,
+        }));
+      setPlaylists(offlineList);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
+
     try {
-      const data = await apiRequest<{ playlists: PlaylistWithStatus[] }>(`/tracks/${tId || 0}/playlists`);
+      const data = await apiRequest<{ playlists: PlaylistWithStatus[] }>(`/tracks/${tId || 0}/playlists`, {
+        silentOffline: true,
+      });
       const filtered = (data.playlists || []).filter(
         (p) =>
           !p.name.toLowerCase().includes('daily mix') &&
@@ -77,7 +96,9 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
           !p.name.toLowerCase().includes('микс дня') &&
           !(p as any).is_daily_mix
       );
-      setPlaylists(filtered);
+      if (filtered.length > 0) {
+        setPlaylists(filtered);
+      }
     } catch (e) {
       console.warn('[Load playlists error]:', e);
     } finally {
@@ -172,20 +193,26 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
       try {
         if (isCurrentlyAdded) {
           // Remove from playlist
-          await apiRequest(`/playlists/${playlist.id}/tracks/${activeTrack.id}`, { method: 'DELETE' });
           removeTrackFromOfflinePlaylist(playlist.id, activeTrack.id);
+          await apiRequest(`/playlists/${playlist.id}/tracks/${activeTrack.id}`, {
+            method: 'DELETE',
+            coalesceKey: `rm_pl_${playlist.id}_${activeTrack.id}`,
+            actionType: 'REMOVE_PLAYLIST_TRACK',
+          });
         } else {
           // Add to playlist
+          addTrackToOfflinePlaylist(playlist.id, activeTrack);
           await apiRequest(`/playlists/${playlist.id}/tracks`, {
             method: 'POST',
             body: JSON.stringify({ trackId: activeTrack.id }),
+            coalesceKey: `add_pl_${playlist.id}_${activeTrack.id}`,
+            actionType: 'ADD_PLAYLIST_TRACK',
           });
 
           // Auto-cache track if this playlist or any offline condition is met!
           const shouldCache = shouldTrackBeCachedOffline(activeTrack.id, playlist.id, likedTrackIds);
           if (shouldCache) {
-            await useOfflineStore.getState().cacheTrack(activeTrack);
-            addTrackToOfflinePlaylist(playlist.id, activeTrack);
+            useOfflineStore.getState().cacheTrack(activeTrack).catch(() => {});
             toast.success(
               t(
                 `Track added to "${displayPlaylistName}" and saved offline`,
@@ -201,8 +228,6 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         onUpdated?.();
       } catch (err: any) {
         console.warn('[Toggle playlist error]:', err);
-        // Revert on error
-        await loadPlaylists(activeTrack.id);
       } finally {
         setTogglingId(null);
       }

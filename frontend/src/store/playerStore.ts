@@ -2510,63 +2510,73 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         ? Array.from(new Set([...likedTrackIds, trackId]))
         : likedTrackIds.filter((id) => id !== trackId);
 
+      // 1. Instant Optimistic UI & Local State Update (0 ms)
       set({ likedTrackIds: newLiked });
       try {
         localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(newLiked));
+        localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(newLiked));
       } catch (_) {}
 
+      let targetTrack = trackObj || (get().currentTrack?.id === trackId ? get().currentTrack : get().queue.find((t) => t.id === trackId));
+
+      // 2. Instant Local Offline Cache Update for Liked Songs
+      if (targetState) {
+        if (!targetTrack && shouldTrackBeCachedOffline(trackId, -1, newLiked)) {
+          try {
+            const fetched = await apiRequest<{ track: Track }>(`/tracks/${trackId}`, { silentOffline: true });
+            if (fetched?.track) {
+              targetTrack = fetched.track;
+            }
+          } catch (_) {}
+        }
+
+        if (targetTrack) {
+          addTrackToOfflinePlaylist(-1, targetTrack);
+          if (shouldTrackBeCachedOffline(trackId, -1, newLiked)) {
+            useOfflineStore.getState().cacheTrack(targetTrack).catch(() => {});
+          }
+        }
+      } else {
+        removeTrackFromOfflinePlaylist(-1, trackId);
+      }
+
+      // 3. Send mutation with Outbox-guaranteed delivery (never fails with timeout error)
       try {
-        const res = await apiRequest<{ liked: boolean }>(`/likes/${trackId}`, {
+        const res = await apiRequest<{ liked: boolean; queuedOffline?: boolean }>(`/likes/${trackId}`, {
           method: 'POST',
           body: JSON.stringify({ liked: targetState }),
-          timeoutMs: 6000,
+          coalesceKey: `like_${trackId}`,
+          actionType: targetState ? 'LIKE_TRACK' : 'UNLIKE_TRACK',
+          timeoutMs: 20000,
         });
-        const finalLiked = res.liked;
+
+        const finalLiked = res.liked !== undefined ? res.liked : targetState;
         const updated = finalLiked
           ? Array.from(new Set([...get().likedTrackIds, trackId]))
           : get().likedTrackIds.filter((id) => id !== trackId);
         set({ likedTrackIds: updated });
         try {
           localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(updated));
+          localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(updated));
         } catch (_) {}
-
-        let targetTrack = trackObj || (get().currentTrack?.id === trackId ? get().currentTrack : get().queue.find((t) => t.id === trackId));
-
-        if (finalLiked) {
-          if (!targetTrack && shouldTrackBeCachedOffline(trackId, -1, updated)) {
-            try {
-              const fetched = await apiRequest<{ track: Track }>(`/tracks/${trackId}`);
-              if (fetched?.track) {
-                targetTrack = fetched.track;
-              }
-            } catch (_) {}
-          }
-
-          if (targetTrack) {
-            // Auto-cache track if Liked Songs or any containing playlist is downloaded on this device!
-            if (shouldTrackBeCachedOffline(trackId, -1, updated)) {
-              useOfflineStore.getState().cacheTrack(targetTrack);
-            }
-            if (useOfflineStore.getState().isDownloaded(-1)) {
-              addTrackToOfflinePlaylist(-1, targetTrack);
-            }
-          }
-        } else {
-          removeTrackFromOfflinePlaylist(-1, trackId);
-        }
 
         return finalLiked;
-      } catch (err) {
-        set({ likedTrackIds });
-        try {
-          localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(likedTrackIds));
-        } catch (_) {}
-        throw err;
+      } catch (err: any) {
+        // Even if an unexpected error occurs, don't rollback if offline or network error!
+        console.warn('[PlayerStore] toggleLikeTrack network error, kept optimistic state:', err.message);
+        return targetState;
       }
     },
 
     blacklistTrack: async (track: Track) => {
-      await apiRequest('/blacklist', {
+      // 1. Instantly remove from liked tracks & playlists locally
+      set((state) => ({
+        likedTrackIds: state.likedTrackIds.filter((id) => id !== track.id),
+      }));
+      removeTrackFromOfflinePlaylist(-1, track.id);
+
+      // 2. Dispatch to backend with Outbox guarantee
+      apiRequest('/blacklist', {
         method: 'POST',
         body: JSON.stringify({
           title: track.title,
@@ -2574,14 +2584,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           track_id: track.id,
           spotify_id: track.spotify_id,
         }),
-      });
+        coalesceKey: `blacklist_${track.id || track.title}`,
+        actionType: 'BLACKLIST_TRACK',
+      }).catch(() => {});
 
-      // 1. Remove from liked tracks state
-      set((state) => ({
-        likedTrackIds: state.likedTrackIds.filter((id) => id !== track.id),
-      }));
-
-      // 2. Filter current queue
+      // 3. Filter current queue
       const { currentTrack, queue, originalQueue, currentIndex, playTrack } = get();
       const isCurrent =
         currentTrack &&

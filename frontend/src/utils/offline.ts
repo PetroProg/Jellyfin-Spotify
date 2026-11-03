@@ -189,6 +189,48 @@ export function getOfflinePlaylistData(
   }
 }
 
+export function updateOfflinePlaylistMeta(
+  playlistId: number,
+  updates: { name?: string; description?: string; cover_url?: string }
+): void {
+  try {
+    const existing = getOfflinePlaylistData(playlistId);
+    if (existing && existing.playlist) {
+      const updatedPlaylist = {
+        ...existing.playlist,
+        ...(updates.name !== undefined ? { name: updates.name } : {}),
+        ...(updates.description !== undefined ? { description: updates.description } : {}),
+        ...(updates.cover_url !== undefined ? { cover_url: updates.cover_url } : {}),
+      };
+      saveOfflinePlaylistData(updatedPlaylist, existing.tracks, false, existing.version);
+    }
+    const all = getAllPlaylistsCache().map((p) =>
+      p.id === playlistId
+        ? {
+            ...p,
+            ...(updates.name !== undefined ? { name: updates.name } : {}),
+            ...(updates.description !== undefined ? { description: updates.description } : {}),
+            ...(updates.cover_url !== undefined ? { cover_url: updates.cover_url } : {}),
+          }
+        : p
+    );
+    saveAllPlaylistsCache(all);
+  } catch (err) {
+    console.warn(`[Offline] Failed to update offline playlist meta for ${playlistId}:`, err);
+  }
+}
+
+export function deleteOfflinePlaylist(playlistId: number): void {
+  try {
+    localStorage.removeItem(`${OFFLINE_PLAYLIST_PREFIX}${playlistId}`);
+    unmarkPlaylistDownloaded(playlistId);
+    const all = getAllPlaylistsCache().filter((p) => p.id !== playlistId);
+    saveAllPlaylistsCache(all);
+  } catch (err) {
+    console.warn(`[Offline] Failed to delete offline playlist ${playlistId}:`, err);
+  }
+}
+
 export function addTrackToOfflinePlaylist(
   playlistId: number,
   track: Track,

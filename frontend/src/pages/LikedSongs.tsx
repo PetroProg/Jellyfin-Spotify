@@ -71,7 +71,8 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
     try {
       const cachedVer = localStorage.getItem('jellyfy_cached_liked_version') || '';
       const data = await apiRequest<{ upToDate?: boolean; version?: string; tracks?: Track[] }>(
-        cachedVer ? `/likes?version=${encodeURIComponent(cachedVer)}` : '/likes'
+        cachedVer ? `/likes?version=${encodeURIComponent(cachedVer)}` : '/likes',
+        { silentOffline: true }
       );
 
       if (data.upToDate) {

@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Loader2, ArrowRight, HardDriveDownload } from 'lucide-react';
+import { Loader2, ArrowRight, HardDriveDownload, CloudUpload, RefreshCw } from 'lucide-react';
 import { DownloadJob } from '../types';
 import { apiRequest } from '../api/client';
 import { useOfflineStore } from '../store/offlineStore';
 import { usePlayerStore } from '../store/playerStore';
 import { useI18nStore } from '../store/i18nStore';
+import { subscribeOutbox, drainOutbox } from '../utils/outbox';
 
 interface GlobalDownloadBarProps {
   onOpenPlaylist: (id: number) => void;
@@ -21,6 +22,11 @@ export const GlobalDownloadBar: React.FC<GlobalDownloadBarProps> = ({
   const currentTrack = usePlayerStore((s) => s.currentTrack);
   const [backendJobs, setBackendJobs] = useState<DownloadJob[]>([]);
   const offlineProgressMap = useOfflineStore((s) => s.progress);
+  const [pendingOutbox, setPendingOutbox] = useState(0);
+
+  useEffect(() => {
+    return subscribeOutbox((count) => setPendingOutbox(count));
+  }, []);
 
   const pollJobs = async () => {
     try {
@@ -47,7 +53,41 @@ export const GlobalDownloadBar: React.FC<GlobalDownloadBarProps> = ({
   const hasBackend = !!activeBackendJob;
   const hasOffline = !!activeOfflineEntry;
 
+  const mobileMarginClass = currentTrack
+    ? 'mb-[calc(116px+env(safe-area-inset-bottom))] md:mb-0'
+    : 'mb-[calc(56px+env(safe-area-inset-bottom))] md:mb-0';
+
   if (!hasBackend && !hasOffline) {
+    if (pendingOutbox > 0) {
+      return (
+        <div
+          onClick={() => drainOutbox().catch(() => {})}
+          className={`w-full max-w-full overflow-hidden box-border bg-cat-mantle/95 backdrop-blur-md border-t border-cat-blue/40 hover:border-cat-blue/60 transition-all shadow-2xl px-4 py-2 flex items-center justify-between gap-2.5 z-30 cursor-pointer select-none ${mobileMarginClass}`}
+          title={t('Click to sync pending actions with server', 'Нажмите, чтобы синхронизировать ожидающие действия с сервером')}
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-7 h-7 rounded-lg bg-cat-blue/20 text-cat-blue flex items-center justify-center shrink-0">
+              <CloudUpload className="w-4 h-4 animate-pulse" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-cat-text truncate">
+                {t('Offline changes saved', 'Изменения сохранены локально')}
+              </p>
+              <p className="text-[11px] text-cat-subtext0 truncate">
+                {t(
+                  `${pendingOutbox} action(s) waiting to sync with server`,
+                  `${pendingOutbox} действ. ожидают синхронизации с сервером`
+                )}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold text-cat-blue hover:text-cat-text transition-colors shrink-0">
+            <span>{t('Sync', 'Синхронизировать')}</span>
+            <RefreshCw className="w-3 h-3" />
+          </div>
+        </div>
+      );
+    }
     return null;
   }
 
@@ -64,10 +104,6 @@ export const GlobalDownloadBar: React.FC<GlobalDownloadBarProps> = ({
       }
     }
   };
-
-  const mobileMarginClass = currentTrack
-    ? 'mb-[calc(116px+env(safe-area-inset-bottom))] md:mb-0'
-    : 'mb-[calc(56px+env(safe-area-inset-bottom))] md:mb-0';
 
   return (
     <div

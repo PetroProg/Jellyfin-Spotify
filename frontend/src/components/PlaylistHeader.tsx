@@ -5,6 +5,7 @@ import { useOfflineStore } from '../store/offlineStore';
 import { apiRequest } from '../api/client';
 import { toast, confirmDialog } from '../store/toastStore';
 import { useI18nStore, formatTrackCount } from '../store/i18nStore';
+import { deleteOfflinePlaylist, updateOfflinePlaylistMeta } from '../utils/offline';
 
 interface PlaylistHeaderProps {
   playlist: Playlist;
@@ -72,21 +73,24 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
 
     setSavingRename(true);
     try {
+      playlist.name = trimmedName;
+      playlist.description = renameDesc.trim();
+      updateOfflinePlaylistMeta(playlist.id, { name: trimmedName, description: renameDesc.trim() });
+      onRename?.(trimmedName, renameDesc.trim());
+      setShowRenameModal(false);
+      toast.success(t('Playlist renamed', 'Плейлист переименован'));
+
       await apiRequest<{ success: boolean; playlist: Playlist }>(`/playlists/${playlist.id}`, {
         method: 'PUT',
         body: JSON.stringify({
           name: trimmedName,
           description: renameDesc.trim()
-        })
+        }),
+        silentOffline: true,
+        coalesceKey: `playlist_edit_${playlist.id}`
       });
-
-      playlist.name = trimmedName;
-      playlist.description = renameDesc.trim();
-      onRename?.(trimmedName, renameDesc.trim());
-      setShowRenameModal(false);
-      toast.success(t('Playlist renamed', 'Плейлист переименован'));
     } catch (err: any) {
-      toast.error(err.message || t('Error renaming playlist', 'Ошибка переименования плейлиста'));
+      console.warn('[PlaylistHeader] Rename queued offline or error:', err);
     } finally {
       setSavingRename(false);
     }
@@ -115,13 +119,20 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
           await removeDownload(playlist.id, tracks);
         } catch (_) {}
       }
-      await apiRequest(`/playlists/${playlist.id}`, { method: 'DELETE' });
+      deleteOfflinePlaylist(playlist.id);
       toast.success(
         t(`Playlist "${displayPlaylistName}" deleted`, `Плейлист «${displayPlaylistName}» успешно удален`)
       );
       onDelete?.();
+
+      await apiRequest(`/playlists/${playlist.id}`, {
+        method: 'DELETE',
+        silentOffline: true,
+        coalesceKey: `playlist_delete_${playlist.id}`
+      });
     } catch (e: any) {
-      toast.error(e.message || t('Error deleting playlist', 'Ошибка удаления плейлиста'));
+      console.warn('[PlaylistHeader] Delete queued offline or error:', e);
+    } finally {
       setDeletingPlaylist(false);
     }
   };

@@ -56,7 +56,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
     if (resuming) return;
     setResuming(true);
     try {
-      await apiRequest(`/playlists/${playlistId}/resume`, { method: 'POST' });
+      await apiRequest(`/playlists/${playlistId}/resume`, { method: 'POST', silentOffline: true });
       toast.info(t('Download resumed', 'Возобновление загрузки начато'));
       await loadData();
     } catch (err: any) {
@@ -92,7 +92,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
         tracks?: Track[];
         addedTracks?: Track[];
         activeJob?: any;
-      }>(`/playlists/${playlistId}${queryString}`);
+      }>(`/playlists/${playlistId}${queryString}`, { silentOffline: true });
 
       if (data.upToDate) {
         if (data.playlist) setPlaylist(data.playlist);
@@ -216,13 +216,23 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
   };
 
   const handleRemoveTrack = async (track: Track) => {
+    // 1. Optimistic UI update instantly (0 ms)
+    setTracks((prev) => prev.filter((t) => t.id !== track.id));
+    removeTrackFromOfflinePlaylist(Number(playlistId), track.id);
+    setPlaylist((prev) =>
+      prev ? { ...prev, track_count: Math.max(0, (prev.track_count || 1) - 1) } : prev
+    );
+    toast.success(t('Track removed from playlist', 'Трек удален из плейлиста'));
+
+    // 2. Dispatch DELETE mutation (absorbed into Outbox if offline/timeout)
     try {
-      await apiRequest(`/playlists/${playlistId}/tracks/${track.id}`, { method: 'DELETE' });
-      setTracks(prev => prev.filter(t => t.id !== track.id));
-      removeTrackFromOfflinePlaylist(Number(playlistId), track.id);
-      toast.success(t('Track removed from playlist', 'Трек удален из плейлиста'));
+      await apiRequest(`/playlists/${playlistId}/tracks/${track.id}`, {
+        method: 'DELETE',
+        silentOffline: true,
+        coalesceKey: `playlist_track_${playlistId}_${track.id}`,
+      });
     } catch (e: any) {
-      toast.error(e.message || t('Failed to remove track from playlist', 'Ошибка удаления трека из плейлиста'));
+      console.warn('[PlaylistView] Remove track queued offline or error handled silently:', e);
     }
   };
 
