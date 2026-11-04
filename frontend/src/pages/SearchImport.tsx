@@ -570,19 +570,19 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                         <div
                           key={st.id}
                           onClick={() => handlePlayInstant(st)}
-                          className={`p-3 rounded-2xl border transition-all flex items-center justify-between gap-3 group cursor-pointer ${
+                          className={`px-2.5 py-2 sm:p-3 rounded-2xl border transition-all flex items-center justify-between gap-2 sm:gap-3 group cursor-pointer ${
                             isCurrentlyPlaying || isPlayingThisInstant || isPendingThisInstant
                               ? 'bg-cat-surface0/90 border-cat-mauve/60 shadow-md ring-1 ring-cat-mauve/30'
                               : 'bg-cat-mantle border-cat-surface0/60 hover:border-cat-surface1 hover:bg-cat-surface0/40'
                           }`}
                         >
                           {/* Cover Art & Track Info */}
-                          <div className="flex items-center gap-3 min-w-0 flex-1">
-                            <div className="relative w-12 h-12 rounded-xl bg-cat-surface0 overflow-hidden flex-shrink-0 flex items-center justify-center border border-cat-surface1/30 group-hover:shadow-md transition-all">
+                          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
+                            <div className="relative w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-cat-surface0 overflow-hidden flex-shrink-0 flex items-center justify-center border border-cat-surface1/30 group-hover:shadow-md transition-all">
                               {st.cover_url ? (
                                 <img src={st.cover_url} alt="" className="w-full h-full object-cover" />
                               ) : (
-                                <Music2 className="w-6 h-6 text-cat-mauve" />
+                                <Music2 className="w-5 h-5 sm:w-6 sm:h-6 text-cat-mauve" />
                               )}
 
                               {/* Overlay Play / Animated icon on Cover */}
@@ -594,22 +594,32 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                 }`}
                               >
                                 {isPlayingThisInstant ? (
-                                  <span className="flex gap-0.5 items-end h-3.5 w-3.5 pb-0.5">
-                                    <span className="w-1 bg-white rounded-full animate-bounce [animation-delay:-0.3s] h-full" />
-                                    <span className="w-1 bg-white rounded-full animate-bounce [animation-delay:-0.15s] h-2/3" />
-                                    <span className="w-1 bg-white rounded-full animate-bounce h-4/5" />
+                                  <span className="flex gap-0.5 items-end h-3 w-3 sm:h-3.5 sm:w-3.5 pb-0.5">
+                                    <span className="w-0.5 sm:w-1 bg-white rounded-full animate-bounce [animation-delay:-0.3s] h-full" />
+                                    <span className="w-0.5 sm:w-1 bg-white rounded-full animate-bounce [animation-delay:-0.15s] h-2/3" />
+                                    <span className="w-0.5 sm:w-1 bg-white rounded-full animate-bounce h-4/5" />
                                   </span>
                                 ) : isPendingThisInstant ? (
-                                  <Loader2 className="w-4 h-4 text-white animate-spin" />
+                                  <Loader2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-white animate-spin" />
                                 ) : (
-                                  <Play className="w-5 h-5 text-white fill-white ml-0.5" />
+                                  <Play className="w-4 h-4 sm:w-5 sm:h-5 text-white fill-white ml-0.5" />
                                 )}
                               </div>
+
+                              {/* Small corner badge if already downloaded to library */}
+                              {isDownloaded && (
+                                <div
+                                  className="absolute bottom-0.5 right-0.5 w-3.5 h-3.5 rounded-full bg-cat-green text-cat-base flex items-center justify-center shadow-xs"
+                                  title={t('In Library', 'В медиатеке')}
+                                >
+                                  <Check className="w-2.5 h-2.5 stroke-[3]" />
+                                </div>
+                              )}
                             </div>
 
                             <div className="min-w-0 flex-1">
                               <h4
-                                className={`text-sm font-bold truncate ${
+                                className={`text-xs sm:text-sm font-semibold sm:font-bold truncate leading-snug ${
                                   isCurrentlyPlaying || isPlayingThisInstant || isPendingThisInstant
                                     ? 'text-cat-mauve'
                                     : 'text-cat-text'
@@ -617,20 +627,20 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                               >
                                 {st.title}
                               </h4>
-                              <p className="text-xs text-cat-subtext0 truncate mt-0.5">
+                              <p className="text-[11px] sm:text-xs text-cat-subtext0 truncate mt-0.5">
                                 {st.artist} {st.album ? `• ${st.album}` : ''}
                               </p>
                             </div>
                           </div>
 
                           {/* Duration & Action Buttons */}
-                          <div className="flex items-center gap-2.5 flex-shrink-0">
+                          <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
                             <span className="text-[11px] font-mono text-cat-subtext0 hidden xs:inline">
                               {formatDuration(st.duration_ms)}
                             </span>
 
                             {isDownloaded ? (
-                              <div className="flex items-center gap-1.5 sm:gap-2">
+                              <div className="flex items-center gap-1 sm:gap-1.5">
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
@@ -644,22 +654,22 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                       ? t('Remove from Liked', 'Удалить из любимых')
                                       : t('Save to Liked Songs', 'В любимые треки')
                                   }
-                                  className={`p-2 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 transition-all cursor-pointer active:scale-95 ${
+                                  className={`w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 flex items-center justify-center transition-all cursor-pointer active:scale-95 ${
                                     st.local_track && likedTrackIds.includes(st.local_track.id)
                                       ? 'text-cat-red'
                                       : 'text-cat-subtext0 hover:text-cat-red'
                                   }`}
                                 >
                                   <Heart
-                                    className={`w-4 h-4 ${
+                                    className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${
                                       st.local_track && likedTrackIds.includes(st.local_track.id) ? 'fill-current' : ''
                                     }`}
                                   />
                                 </button>
 
-                                <span className="text-[11px] px-2.5 py-1 rounded-full bg-cat-green/20 text-cat-green font-semibold flex items-center gap-1">
-                                  <Check className="w-3.5 h-3.5 stroke-[2.5]" />
-                                  <span className="hidden sm:inline">{t('In Library', 'В медиатеке')}</span>
+                                <span className="hidden md:inline-flex text-[11px] px-2 py-0.5 rounded-full bg-cat-green/20 text-cat-green font-semibold items-center gap-1">
+                                  <Check className="w-3 h-3 stroke-[2.5]" />
+                                  <span>{t('In Library', 'В медиатеке')}</span>
                                 </span>
 
                                 <button
@@ -670,9 +680,9 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                     }
                                   }}
                                   title={t('Play', 'Слушать')}
-                                  className="p-2 rounded-full bg-cat-mauve text-cat-base hover:opacity-95 active:scale-95 transition-all shadow-md cursor-pointer"
+                                  className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-cat-mauve text-cat-base flex items-center justify-center hover:opacity-95 active:scale-95 transition-all shadow-md cursor-pointer"
                                 >
-                                  <Play className="w-4 h-4 fill-current ml-0.5" />
+                                  <Play className="w-3.5 h-3.5 sm:w-4 sm:h-4 fill-current ml-0.5" />
                                 </button>
 
                                 <button
@@ -681,29 +691,29 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                     setAddToPlaylistTrack(st.local_track || null);
                                   }}
                                   title={t('Add to playlist', 'Добавить в плейлист')}
-                                  className="p-2 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-subtext0 hover:text-cat-mauve transition-all cursor-pointer active:scale-95"
+                                  className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 flex items-center justify-center text-cat-subtext0 hover:text-cat-mauve transition-all cursor-pointer active:scale-95"
                                 >
-                                  <ListPlus className="w-4 h-4" />
+                                  <ListPlus className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                                 </button>
                               </div>
                             ) : (
-                              <div className="flex items-center gap-1.5 sm:gap-2">
+                              <div className="flex items-center gap-1 sm:gap-1.5">
                                 {isPlayingThisInstant ? (
-                                  <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-cat-mauve/20 text-cat-mauve border border-cat-mauve/40 text-xs font-semibold">
-                                    <span className="flex gap-0.5 items-end h-3 w-3 pb-0.5">
+                                  <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-cat-mauve/20 text-cat-mauve border border-cat-mauve/40 text-[11px] font-semibold">
+                                    <span className="flex gap-0.5 items-end h-2.5 w-2.5 pb-0.5">
                                       <span className="w-0.5 bg-cat-mauve rounded-full animate-bounce [animation-delay:-0.3s] h-full" />
                                       <span className="w-0.5 bg-cat-mauve rounded-full animate-bounce [animation-delay:-0.15s] h-2/3" />
                                       <span className="w-0.5 bg-cat-mauve rounded-full animate-bounce h-4/5" />
                                     </span>
-                                    <span className="text-[11px] whitespace-nowrap">
-                                      {t('Playing (saving...)', 'Играет (сохраняется в медиатеку...)')}
+                                    <span className="hidden sm:inline whitespace-nowrap">
+                                      {t('Playing...', 'Играет...')}
                                     </span>
                                   </div>
                                 ) : isPendingThisInstant ? (
-                                  <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-cat-blue/20 text-cat-blue border border-cat-blue/40 text-xs font-semibold">
-                                    <Loader2 className="w-3.5 h-3.5 animate-spin text-cat-blue" />
-                                    <span className="text-[11px] whitespace-nowrap">
-                                      {t('Downloading... (starts automatically)', 'Скачивание... Запустится сразу')}
+                                  <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-cat-blue/20 text-cat-blue border border-cat-blue/40 text-[11px] font-semibold">
+                                    <Loader2 className="w-3 h-3 animate-spin text-cat-blue" />
+                                    <span className="hidden sm:inline whitespace-nowrap">
+                                      {t('Downloading...', 'Качаем...')}
                                     </span>
                                   </div>
                                 ) : (
@@ -713,9 +723,9 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                       handlePlayInstant(st);
                                     }}
                                     title={t('Play instantly and save to library', 'Слушать сразу и сохранить в медиатеку')}
-                                    className="p-2 rounded-full bg-cat-mauve text-cat-base hover:opacity-95 active:scale-95 transition-all shadow-md cursor-pointer flex-shrink-0"
+                                    className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-cat-mauve text-cat-base flex items-center justify-center hover:opacity-95 active:scale-95 transition-all shadow-md cursor-pointer flex-shrink-0"
                                   >
-                                    <Play className="w-4 h-4 fill-current ml-0.5" />
+                                    <Play className="w-3.5 h-3.5 sm:w-4 sm:h-4 fill-current ml-0.5" />
                                   </button>
                                 )}
 
@@ -725,7 +735,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                     handleLikeSpotifyTrack(st);
                                   }}
                                   disabled={likingTrackId === st.id || downloadingTrackId === st.id}
-                                  className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-red text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
+                                  className="w-7 h-7 sm:w-auto sm:h-auto p-0 sm:px-2.5 sm:py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-red flex items-center justify-center gap-1.5 text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs flex-shrink-0"
                                   title={t(
                                     'Add to Liked Songs (track will download automatically)',
                                     'Добавить в любимые треки (трек скачается автоматически)'
@@ -736,7 +746,7 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                   ) : (
                                     <Heart className="w-3.5 h-3.5 text-cat-red" />
                                   )}
-                                  <span className="hidden xs:inline">{t('To Liked', 'В любимые')}</span>
+                                  <span className="hidden md:inline">{t('To Liked', 'В любимые')}</span>
                                 </button>
 
                                 <button
@@ -745,14 +755,14 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                     setAddToPlaylistSpotify(st);
                                   }}
                                   disabled={likingTrackId === st.id || downloadingTrackId === st.id}
-                                  className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-mauve text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
+                                  className="w-7 h-7 sm:w-auto sm:h-auto p-0 sm:px-2.5 sm:py-1.5 rounded-xl bg-cat-surface0 hover:bg-cat-surface1 border border-cat-surface1/40 text-cat-text hover:text-cat-mauve flex items-center justify-center gap-1.5 text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs flex-shrink-0"
                                   title={t(
                                     'Add to playlist (track will download automatically)',
                                     'Добавить в плейлист (трек скачается автоматически)'
                                   )}
                                 >
                                   <ListPlus className="w-3.5 h-3.5 text-cat-mauve" />
-                                  <span className="hidden xs:inline">{t('To Playlist', 'В плейлист')}</span>
+                                  <span className="hidden md:inline">{t('To Playlist', 'В плейлист')}</span>
                                 </button>
 
                                 {!isPlayingThisInstant && (
@@ -762,13 +772,13 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
                                       handleDownloadSingle(st);
                                     }}
                                     disabled={likingTrackId === st.id || downloadingTrackId === st.id}
-                                    className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-mauve/20 hover:bg-cat-mauve text-cat-mauve hover:text-cat-base text-xs font-bold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
+                                    className="hidden md:inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-cat-mauve/20 hover:bg-cat-mauve text-cat-mauve hover:text-cat-base text-xs font-bold transition-all disabled:opacity-50 cursor-pointer active:scale-95 shadow-xs"
                                     title={t('Download to server in high quality', 'Скачать на сервер в высоком качестве')}
                                   >
                                     {downloadingTrackId === st.id ? (
                                       <>
                                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                        <span className="hidden xs:inline">{t('Downloading...', 'Качается...')}</span>
+                                        <span className="hidden sm:inline">{t('Downloading...', 'Качается...')}</span>
                                       </>
                                     ) : (
                                       <>
