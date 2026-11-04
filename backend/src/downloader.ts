@@ -676,64 +676,153 @@ export async function findBestStudioAudioSource(artist: string, title: string, d
   };
 
   try {
-    // 1. YouTube Music search (uncensored, pristine studio audio tracks, bypasses SafeSearch on "Sex", "Drugs", "Порнофильмы", etc.)
-    const ytmQuery = `${cleanArtist} ${cleanTitleNoFeat || cleanTitle}`;
-    let items = await fetchCandidates(`https://music.youtube.com/search?q=${encodeURIComponent(ytmQuery)}`);
+    const rawItems: any[] = [];
 
-    // 2. If YTM returned nothing, try standard YouTube search
-    if (items.length === 0) {
-      items = await fetchCandidates(`${cleanArtist} - ${cleanTitle} audio`, 'ytsearch8');
+    // Stage 1: Explicit Topic and Studio Audio queries
+    // These directly target official studio distributor tracks (Warner, Sony, Believe, Universal, etc.)
+    const tq1 = `ytsearch5:${cleanArtist} "${cleanTitleNoFeat || cleanTitle}" Topic`;
+    const tq2 = `ytsearch5:${cleanArtist} ${cleanTitleNoFeat || cleanTitle} (Official Audio)`;
+    const tq3 = `ytsearch5:${cleanArtist} "${cleanTitleNoFeat || cleanTitle}" "Provided to YouTube"`;
+    const [res1, res2, res3] = await Promise.all([
+      fetchCandidates(tq1),
+      fetchCandidates(tq2),
+      fetchCandidates(tq3)
+    ]);
+    rawItems.push(...res1, ...res2, ...res3);
+
+    // Stage 2: Fallback Audio search if nothing found
+    if (rawItems.length === 0) {
+      const aq1 = `ytsearch6:${cleanArtist} - ${cleanTitle} audio`;
+      const aq2 = `ytsearch6:${cleanArtist} ${cleanTitleNoFeat || cleanTitle}`;
+      const [res4, res5] = await Promise.all([
+        fetchCandidates(aq1),
+        fetchCandidates(aq2)
+      ]);
+      rawItems.push(...res4, ...res5);
     }
 
-    // 3. Fallback: simple search without "audio"
-    if (items.length === 0) {
-      items = await fetchCandidates(`${cleanArtist} ${cleanTitleNoFeat || cleanTitle}`, 'ytsearch6');
+    // Deduplicate by ID
+    const seenIds = new Set<string>();
+    const items: any[] = [];
+    for (const it of rawItems) {
+      if (it && it.id && !seenIds.has(it.id)) {
+        seenIds.add(it.id);
+        items.push(it);
+      }
     }
 
     if (items.length > 0) {
-      // Score candidates
+      // Multilingual Stop-Lists (Russian + English)
+      const CLIP_KEYWORDS = [
+        'клип', 'официальный клип', 'премьера клипа', 'видеоклип',
+        'official video', 'music video', 'official music video', 'clip',
+        'video clip', 'short film', 'фильм', 'cinematic', '2.0'
+      ];
+
+      const LIVE_KEYWORDS = [
+        'лайв', 'live', 'акустика', 'acoustic', 'под гитару', 'гитара',
+        'концерт', 'concert', 'unplugged', 'выступление', 'шоу', 'live at',
+        'festival', 'фестиваль', 'live session', 'живой звук', 'вживую'
+      ];
+
+      const FAN_KEYWORDS = [
+        'кавер', 'cover', 'караоке', 'karaoke', 'минус', 'минусовка',
+        'remake', 'сниппет', 'snippet', 'отрывок', 'тизер', 'teaser',
+        'slowed', 'reverb', 'speed up', 'nightcore', '8d', 'bass boosted',
+        'bassboost', 'реакция', 'reaction', 'тикток', 'tiktok', 'parody', 'пародия'
+      ];
+
       let bestItem: any = null;
       let bestScore = -99999;
+
+      const targetTitleLower = cleanTitle.toLowerCase();
+      const artistLower = cleanArtist.toLowerCase();
+
+      // Normalize strings for matching
+      const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      const targetCleanNorm = norm(cleanTitleNoFeat || cleanTitle);
+      const targetWords = targetCleanNorm.split(' ').filter(w => w.length > 1);
 
       for (const item of items) {
         const dur = Number(item.duration) || 0;
         const diff = targetSec > 0 && dur > 0 ? Math.abs(dur - targetSec) : 0;
         let score = 0;
 
-        if (targetSec > 0 && dur > 0) {
-          if (diff <= 2) score += 50;
-          else if (diff <= 5) score += 35;
-          else if (diff <= 10) score += 20;
-          else if (diff <= 25) score += 5;
-          else score -= 40;
-        }
-
         const tl = (item.title || '').toLowerCase();
         const cl = (item.channel || item.uploader || '').toLowerCase();
-        const artistLower = cleanArtist.toLowerCase();
+        const candidateTitleNorm = norm(item.title || '');
 
-        // 1. Prioritize YouTube Music / Label Studio Master Topic channels
-        if (cl.includes('topic')) score += 70;
-        // 2. Prioritize Official Artist channel
-        if (cl.includes(artistLower)) score += 60;
-
-        if (tl.includes('official audio')) score += 45;
-        else if (tl.includes('official visualizer') || tl.includes('visualizer')) score += 40;
-        else if (tl.includes('audio')) score += 30;
-        else if (tl.includes('lyrics')) score += 15;
-
-        // Severe penalties for music videos with sound effects / dialogue
-        if (tl.includes('official video') || tl.includes('music video') || tl.includes('official music video') || tl.includes('clip')) {
-          score -= 40;
+        // MANDATORY: Track Title Matching
+        // Prevents picking a completely different track by the same artist (e.g. "Down" instead of "10 Seconds from Panic")
+        const matchingWords = targetWords.filter(w => candidateTitleNorm.includes(w));
+        const wordMatchRatio = targetWords.length > 0 ? (matchingWords.length / targetWords.length) : 1;
+        if (wordMatchRatio < 0.6) {
+          score -= 1500;
+        } else if (candidateTitleNorm === targetCleanNorm) {
+          // Exact title match (classic sign of a Topic track: "Слово пацана", "10 Seconds from Panic")
+          score += 300;
+        } else {
+          score += 150;
         }
-        if (tl.includes('live') && !cleanTitle.toLowerCase().includes('live')) score -= 70;
-        if (tl.includes('cover') && !cleanTitle.toLowerCase().includes('cover')) score -= 80;
-        if (tl.includes('remix') && !cleanTitle.toLowerCase().includes('remix')) score -= 60;
 
-        // Penalize fan / unofficial video rips from trailers, series, games
-        if (!cl.includes(artistLower) && !cl.includes('topic')) {
-          if (['trailer', 'teaser', 'gameplay', 'netflix', 'series', 'ost', 'soundtrack', 'movie', 'scene', 'edit'].some(w => tl.includes(w))) {
-            score -= 60;
+        // 1. YouTube Topic / Label Distributor Studio Master: +500 points
+        const isTopic = cl.includes('topic');
+        if (isTopic) score += 500;
+
+        // 2. Official Artist channel: +250 points
+        const isArtistChannel = cl.includes(artistLower) || (artistLower.length > 4 && cl.startsWith(artistLower));
+        if (isArtistChannel) score += 250;
+
+        // 3. Audio & Visualizer markers
+        if (tl.includes('official audio')) score += 200;
+        else if (tl.includes('audio') || tl.includes('аудио')) score += 100;
+        else if (tl.includes('official visualizer') || tl.includes('visualizer')) score += 80;
+
+        // 4. Music video penalty (dialogue, ambient noises, intro cutscenes)
+        if (CLIP_KEYWORDS.some(k => tl.includes(k))) {
+          score -= 300;
+        }
+
+        // 5. Live / Acoustic penalty (unless target title explicitly requested it)
+        const targetWantsLive = targetTitleLower.includes('live') || targetTitleLower.includes('лайв') || targetTitleLower.includes('acoustic') || targetTitleLower.includes('акустика');
+        if (!targetWantsLive && LIVE_KEYWORDS.some(k => tl.includes(k))) {
+          score -= 400;
+        }
+
+        // 6. Covers, Remakes, Karaoke, Edits
+        const targetWantsCover = targetTitleLower.includes('cover') || targetTitleLower.includes('кавер');
+        if (!targetWantsCover && (tl.includes('cover') || tl.includes('кавер'))) {
+          score -= 400;
+        }
+
+        const targetWantsRemix = targetTitleLower.includes('remix') || targetTitleLower.includes('ремикс');
+        if (!targetWantsRemix && (tl.includes('remix') || tl.includes('ремикс'))) {
+          score -= 350;
+        }
+
+        if (FAN_KEYWORDS.some(k => tl.includes(k))) {
+          score -= 350;
+        }
+
+        // 7. Lyrics penalty on unofficial channels (prevents choosing amateur movie maker rips)
+        if ((tl.includes('lyrics') || tl.includes('со словами') || tl.includes('текст')) && !isTopic && !isArtistChannel) {
+          score -= 200;
+        }
+
+        // 8. Duration alignment:
+        // Verified studio tracks (Topic or official artist audio) get wide tolerance for streaming outro silence differences
+        const isVerifiedStudio = isTopic || (isArtistChannel && (tl.includes('audio') || tl.includes('visualizer')));
+        if (targetSec > 0 && dur > 0) {
+          if (isVerifiedStudio) {
+            if (diff <= 5) score += 60;
+            else if (diff <= 15) score += 40;
+            else if (diff <= 25) score += 10;
+            else score -= 60;
+          } else {
+            if (diff <= 2) score += 40;
+            else if (diff <= 5) score += 20;
+            else if (diff <= 10) score += 5;
+            else score -= 80;
           }
         }
 
@@ -745,7 +834,7 @@ export async function findBestStudioAudioSource(artist: string, title: string, d
 
       const selected = bestItem || items[0];
       if (selected?.id) {
-        console.log(`[Studio Audio Match] "${cleanArtist} - ${cleanTitle}": selected ${selected.id} ("${selected.title}", diff=${targetSec > 0 && selected.duration ? Math.abs(selected.duration - targetSec) : 0}s, score=${bestScore})`);
+        console.log(`[Studio Audio Match] "${cleanArtist} - ${cleanTitle}": selected ${selected.id} ("${selected.title}", channel="${selected.channel || selected.uploader}", diff=${targetSec > 0 && selected.duration ? Math.abs(selected.duration - targetSec) : 0}s, score=${bestScore})`);
         return `https://www.youtube.com/watch?v=${selected.id}`;
       }
     }
@@ -1585,4 +1674,78 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
 
   return { started: true, message: `Запущена выборочная проверка и перезагрузка треков низкого качества (320 kbps)` };
 }
+
+export async function redownloadTrackStudioMaster(trackId: number): Promise<{ success: boolean; track?: any; error?: string }> {
+  try {
+    const track: any = db.prepare('SELECT * FROM tracks WHERE id = ?').get(trackId);
+    if (!track) {
+      return { success: false, error: 'Track not found' };
+    }
+
+    console.log(`[Redownload Studio Master] Starting replacement for #${track.id}: "${track.artist} - ${track.title}"`);
+
+    const artistFolder = sanitizeFilename(track.artist || 'Unknown Artist');
+    const targetDir = path.join(MUSIC_DIR, artistFolder);
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+
+    const safeTitle = sanitizeFilename(track.title);
+    const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
+
+    // Clean up old audio file and temporary files
+    cleanupPartialFiles(targetDir, safeTitle);
+    if (track.file_path && fs.existsSync(track.file_path)) {
+      try {
+        fs.unlinkSync(track.file_path);
+      } catch (err: any) {
+        console.warn(`[Redownload] Could not delete old file ${track.file_path}:`, err.message);
+      }
+    }
+
+    // Force re-download with single download slot
+    const success = await runWithSingleDownloadSlot(async () => {
+      return await downloadAudioWithFallback(
+        track.artist,
+        track.title,
+        track.duration_ms,
+        outputTemplate,
+        targetDir,
+        safeTitle,
+        180000,
+        false
+      );
+    });
+
+    if (!success) {
+      return { success: false, error: 'Не удалось скачать студийный аудиофайл' };
+    }
+
+    const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.mp3`);
+    const probe = await probeAudioFile(finalFile, track.duration_ms);
+
+    const actualDurationMs = (probe.valid && probe.durationSec > 0)
+      ? Math.round(probe.durationSec * 1000)
+      : track.duration_ms;
+
+    db.prepare('UPDATE tracks SET file_path = ?, duration_ms = ?, bitrate = ? WHERE id = ?')
+      .run(finalFile, actualDurationMs, probe.bitrateKbps || 320, track.id);
+
+    const updatedTrack: any = db.prepare('SELECT * FROM tracks WHERE id = ?').get(track.id);
+
+    broadcastToAll({
+      type: 'TRACK_UPDATED',
+      track: updatedTrack
+    });
+
+    await refreshJellyfinLibrary();
+    console.log(`[Redownload Studio Master] Completed for #${track.id}: "${track.artist} - ${track.title}" (${probe.bitrateKbps || 320}kbps, ${Math.round(actualDurationMs / 1000)}s)`);
+
+    return { success: true, track: updatedTrack };
+  } catch (err: any) {
+    console.error(`[Redownload Studio Master Error] Track #${trackId}:`, err);
+    return { success: false, error: err.message };
+  }
+}
+
 

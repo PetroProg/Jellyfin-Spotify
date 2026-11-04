@@ -1,8 +1,10 @@
 import React, { useEffect, useRef } from 'react';
-import { ListPlus, Ban, FolderPlus, Trash2, Heart } from 'lucide-react';
+import { ListPlus, Ban, FolderPlus, Trash2, Heart, Sparkles } from 'lucide-react';
 import { Track } from '../types';
 import { usePlayerStore } from '../store/playerStore';
 import { useI18nStore } from '../store/i18nStore';
+import { apiRequest } from '../api/client';
+import { toast } from '../store/toastStore';
 
 interface ContextMenuProps {
   track: Track;
@@ -29,6 +31,21 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   const { likedTrackIds, toggleLikeTrack } = usePlayerStore();
   const { t } = useI18nStore();
   const isLiked = isLikedOverride !== undefined ? isLikedOverride : likedTrackIds.includes(track.id);
+
+  const handleRedownloadStudio = async () => {
+    onClose();
+    toast.info(t('Searching clean studio master (Topic/Distributor)...', 'Ищем чистый студийный оригинал...'));
+    try {
+      const res = await apiRequest(`/tracks/${track.id}/redownload`, { method: 'POST' });
+      if (res && res.success) {
+        toast.success(t('Studio original successfully installed!', 'Студийный оригинал успешно установлен!'));
+      } else {
+        toast.error(res?.error || t('Could not find better studio version', 'Не удалось найти другую студийную версию'));
+      }
+    } catch (err: any) {
+      toast.error(err.message || t('Error updating track', 'Ошибка обновления трека'));
+    }
+  };
 
   useEffect(() => {
     const handleOutsideInteraction = (e: MouseEvent | TouchEvent) => {
@@ -143,6 +160,15 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             {t('Remove from Playlist', 'Удалить из плейлиста')}
           </button>
         )}
+
+        <button
+          onClick={handleRedownloadStudio}
+          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-cat-peach hover:bg-cat-surface0 text-left transition-colors"
+          title={t('Find clean studio album version without clips or skits', 'Найти чистую студийную версию без клипов и разговоров')}
+        >
+          <Sparkles className="w-4 h-4 text-cat-peach" />
+          {t('Replace with Studio Master', 'Заменить на студийный оригинал')}
+        </button>
 
         <button
           onClick={() => {

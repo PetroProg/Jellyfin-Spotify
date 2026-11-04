@@ -35,7 +35,8 @@ import {
   queueTrackQualityUpgrade,
   cancelBlacklistedDownloads,
   isTrackBlacklistedForUser,
-  filterBlacklistedTracksForUser
+  filterBlacklistedTracksForUser,
+  redownloadTrackStudioMaster
 } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
@@ -933,6 +934,18 @@ server.get('/api/tracks/:id/playlists', { preHandler: [(server as any).authentic
   `).all(trackId, req.user.id);
 
   return { playlists };
+});
+
+server.post('/api/tracks/:id/redownload', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const trackId = Number(req.params.id);
+  if (!trackId || isNaN(trackId)) {
+    return reply.status(400).send({ error: 'Invalid track ID' });
+  }
+  const result = await redownloadTrackStudioMaster(trackId);
+  if (!result.success) {
+    return reply.status(500).send(result);
+  }
+  return result;
 });
 
 // ----------------- SPOTIFY IMPORT -----------------

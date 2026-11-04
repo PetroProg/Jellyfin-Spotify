@@ -120,9 +120,38 @@ db.exec(`
     cover_url TEXT,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS daily_mix_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    track_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL,
+    category TEXT,
+    recommended_date TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
 `);
 
 // Safe migrations
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS daily_mix_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      track_key TEXT NOT NULL,
+      title TEXT NOT NULL,
+      artist TEXT NOT NULL,
+      category TEXT,
+      recommended_date TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_dm_history_user_key ON daily_mix_history(user_id, track_key);
+    CREATE INDEX IF NOT EXISTS idx_dm_history_user_date ON daily_mix_history(user_id, recommended_date);
+  `);
+} catch (_) {}
 try {
   db.exec('ALTER TABLE users ADD COLUMN email TEXT;');
 } catch (_) {}
