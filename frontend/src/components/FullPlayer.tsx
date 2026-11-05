@@ -2,12 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { 
   ChevronDown, Heart, Shuffle, SkipBack, Play, Pause, 
   SkipForward, Repeat, Repeat1, Music2, Sparkles, FolderPlus,
-  SlidersHorizontal, Ban, Radio, ListMusic
+  Ban, Radio, ListMusic
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { useSyncStore } from '../store/syncStore';
 import { AddToPlaylistModal } from './AddToPlaylistModal';
-import { EqualizerModal } from './EqualizerModal';
 import { toast } from '../store/toastStore';
 import { useI18nStore } from '../store/i18nStore';
 
@@ -33,7 +32,6 @@ export const FullPlayer: React.FC = () => {
     likedTrackIds,
     toggleLikeTrack,
     loadLikes,
-    setEqualizerOpen,
     blacklistTrack,
     setQueueOpen,
   } = usePlayerStore();
@@ -126,13 +124,6 @@ export const FullPlayer: React.FC = () => {
             className="p-2 text-cat-subtext0 hover:text-cat-peach active:scale-95 transition-all cursor-pointer"
           >
             <ListMusic className="w-5 h-5" />
-          </button>
-          <button
-            onClick={() => setEqualizerOpen(true)}
-            title={t('Studio Audio & Equalizer', 'Студийный звук & Эквалайзер')}
-            className="p-2 text-cat-subtext0 hover:text-cat-mauve active:scale-95 transition-all cursor-pointer"
-          >
-            <SlidersHorizontal className="w-5 h-5" />
           </button>
           <button
             onClick={toggleSmartShuffle}
@@ -293,8 +284,6 @@ export const FullPlayer: React.FC = () => {
         isOpen={isAddToPlaylistOpen}
         onClose={() => setIsAddToPlaylistOpen(false)}
       />
-
-      <EqualizerModal />
     </div>
   );
 };

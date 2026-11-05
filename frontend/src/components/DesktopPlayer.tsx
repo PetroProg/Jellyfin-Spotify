@@ -2,12 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { 
   Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Repeat1, 
   Volume2, VolumeX, Heart, Music2, Sparkles, ListMusic, FolderPlus,
-  SlidersHorizontal, Ban, Radio
+  Ban, Radio
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { useSyncStore } from '../store/syncStore';
 import { AddToPlaylistModal } from './AddToPlaylistModal';
-import { EqualizerModal } from './EqualizerModal';
 import { toast } from '../store/toastStore';
 import { useI18nStore } from '../store/i18nStore';
 
@@ -37,7 +36,6 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
     likedTrackIds,
     toggleLikeTrack,
     loadLikes,
-    setEqualizerOpen,
     blacklistTrack,
     isQueueOpen,
     setQueueOpen,
@@ -235,14 +233,6 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
           <Sparkles className="w-4 h-4" />
         </button>
 
-        <button
-          onClick={() => setEqualizerOpen(true)}
-          title={t('Studio Audio & Equalizer', 'Студийный звук & Эквалайзер')}
-          className="p-1.5 rounded-lg hover:text-cat-mauve text-cat-subtext0 transition-colors cursor-pointer active:scale-95"
-        >
-          <SlidersHorizontal className="w-4 h-4" />
-        </button>
-
         {/* Device Picker Button */}
         <button
           onClick={() => setDevicePickerOpen(true)}
@@ -292,8 +282,6 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
         isOpen={isAddToPlaylistOpen}
         onClose={() => setIsAddToPlaylistOpen(false)}
       />
-
-      <EqualizerModal />
     </div>
   );
 };

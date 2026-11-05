@@ -21,9 +21,28 @@ import {
 
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
+// Default Sound Profile: Soft Mids + Accented Deep Bass (Option 1)
+export const DEFAULT_BASS_FOCUS_BANDS = [4.5, 2.5, -4.5, -3.0, 1.0];
+
+// Dynamic Loudness Contour (Option 3):
+// Compensates human hearing curve (Fletcher-Munson) so low-frequency punch never disappears when volume is low
+export function getDynamicLoudnessBands(vol: number): number[] {
+  const base = DEFAULT_BASS_FOCUS_BANDS;
+  const clampedVol = Math.max(0, Math.min(1, vol));
+  const factor = Math.max(0, 1.0 - clampedVol);
+  return [
+    Math.round((base[0] + factor * 5.0) * 10) / 10,
+    Math.round((base[1] + factor * 3.0) * 10) / 10,
+    base[2], // mids stay quiet and soft
+    base[3], // upper mids stay soft
+    Math.round((base[4] + factor * 1.5) * 10) / 10,
+  ];
+}
+
 export const EQ_PRESETS: Record<string, { label: string; labelEn: string; bands: number[] }> = {
   flat: { label: 'Оригинал (Bit-Perfect)', labelEn: 'Original (Bit-Perfect)', bands: [0, 0, 0, 0, 0] },
   bass: { label: '🔥 Усиление басов (Ultra Bass)', labelEn: '🔥 Ultra Bass Boost', bands: [6.5, 4.0, -0.5, 1.0, 2.0] },
+  bass_focus: { label: 'Фокус на басе & Мягкая середина', labelEn: 'Bass Focus & Soft Mids', bands: [4.5, 2.5, -4.5, -3.0, 1.0] },
   club: { label: 'Клубный панч (EDM / Club)', labelEn: 'Club / EDM Punch', bands: [5.5, 3.0, 0, 2.0, 3.0] },
   rock: { label: 'Рок & Драйв (Rock / Metal)', labelEn: 'Rock & Drive', bands: [4.0, 2.5, 0.5, 2.5, 3.0] },
   audiophile: { label: 'Аудиофил (Bose / Sony)', labelEn: 'Audiophile (Bose / Sony)', bands: [3.0, 1.5, 0, 1.0, 1.5] },
@@ -144,18 +163,11 @@ const loadSavedVolume = (): number => {
 };
 
 const loadSavedEqBands = (): number[] => {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_EQ_BANDS);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length === 5) return parsed;
-    }
-  } catch (_) {}
-  return [0, 0, 0, 0, 0];
+  return [...DEFAULT_BASS_FOCUS_BANDS];
 };
 
 const loadSavedEqPreset = (): string => {
-  return localStorage.getItem(STORAGE_KEY_EQ_PRESET) || 'flat';
+  return 'bass_focus';
 };
 
 const loadSavedNormalizer = (): boolean => {
@@ -672,7 +684,9 @@ function ensureAudioGraph() {
     preAmpGainNode.gain.value = 1.0;
 
     // 4. 5-Band Studio Equalizer (Calibrated Q to prevent mud & inter-band phase ringing)
-    const savedBands = loadSavedEqBands();
+    // Applies Bass Focus (Soft Mids) + Dynamic Loudness Contour by default
+    const currentVol = usePlayerStore.getState?.() ? usePlayerStore.getState().volume : initialVolume;
+    const initialBands = getDynamicLoudnessBands(currentVol);
     eqFilters = EQ_FREQUENCIES.map((freq, idx) => {
       const filter = audioCtx!.createBiquadFilter();
       if (idx === 0) {
@@ -689,7 +703,7 @@ function ensureAudioGraph() {
         filter.Q.value = 0.85;
       }
       filter.frequency.value = freq;
-      filter.gain.value = savedBands[idx] || 0;
+      filter.gain.value = initialBands[idx] || 0;
       return filter;
     });
 
@@ -720,9 +734,9 @@ function ensureAudioGraph() {
     // Common Output: fadeGainNode -> destination
     fadeGainNode.connect(audioCtx.destination);
 
-    applyHeadroom(savedBands);
-    syncCompressorMode(savedBands, isNorm);
-    updateDspRouting(savedBands, isNorm);
+    applyHeadroom(initialBands);
+    syncCompressorMode(initialBands, isNorm);
+    updateDspRouting(initialBands, isNorm);
     ensureAudioContextKeepAlive();
 
     audioCtx.onstatechange = () => {
@@ -741,10 +755,7 @@ function ensureAudioGraph() {
 }
 
 function checkAndInitAudioGraph() {
-  const isBitPerfect = loadSavedEqPreset() === 'flat' && !loadSavedNormalizer() && loadSavedEqBands().every((b) => b === 0);
-  if (!isBitPerfect) {
-    ensureAudioGraph();
-  }
+  ensureAudioGraph();
 }
 
 // Track transition & request coordination
@@ -2335,6 +2346,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
       localStorage.setItem(STORAGE_KEY_VOLUME, clamped.toString());
       set({ volume: clamped });
+
+      // Dynamic Loudness Contour (Option 3):
+      // As music gets quieter, smoothly adapt bass curve so bass punch remains prominent and deep
+      if (audioCtx && isAudioGraphAttached) {
+        const dynBands = getDynamicLoudnessBands(clamped);
+        updateFilterGains(dynBands);
+      }
     },
 
     toggleShuffle: () => {
