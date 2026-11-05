@@ -485,8 +485,8 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={t(
-              'Search any song (in your library & Spotify)...',
-              'Поиск любых песен (в вашей медиатеке и Spotify)...'
+              'Search any song or paste a Spotify link (track, album, playlist)...',
+              'Поиск любых песен или вставьте ссылку Spotify (трек, альбом, плейлист)...'
             )}
             className="w-full bg-cat-mantle border border-cat-surface0/80 rounded-2xl pl-12 pr-12 py-3.5 text-sm text-cat-text placeholder-cat-subtext0/60 focus:outline-none focus:border-cat-mauve shadow-lg transition-all"
           />
@@ -831,8 +831,8 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
               </h2>
               <p className="text-xs text-cat-subtext0">
                 {t(
-                  'By playlist URL or directly as a track list from your clipboard',
-                  'По ссылке на плейлист или напрямую списком из буфера обмена'
+                  'By link to a playlist, album, artist, or track — or as a list from clipboard',
+                  'По ссылке на плейлист, альбом, артиста или трек — либо списком из буфера обмена'
                 )}
               </p>
             </div>
@@ -873,7 +873,10 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
               type="text"
               value={spotifyUrl}
               onChange={(e) => setSpotifyUrl(e.target.value)}
-              placeholder="https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
+              placeholder={t(
+                'https://open.spotify.com/playlist/... or /album/... or /track/...',
+                'https://open.spotify.com/playlist/... или /album/... или /track/...'
+              )}
               className="flex-1 bg-cat-surface0 border border-cat-surface1/40 rounded-2xl px-4 py-3 text-sm text-cat-text placeholder-cat-subtext0/60 focus:outline-none focus:border-cat-mauve transition-colors"
             />
             <button
@@ -916,8 +919,8 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
               value={listText}
               onChange={(e) => setListText(e.target.value)}
               placeholder={t(
-                'Paste track links or titles (one per line):\nhttps://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT\nThree Days Grace - Never Too Late\nLinkin Park - Numb',
-                'Вставьте ссылки на треки или названия (каждый с новой строки):\nhttps://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT\nThree Days Grace - Never Too Late\nLinkin Park - Numb'
+                'Paste links to tracks, albums, playlists or titles (one per line):\nhttps://open.spotify.com/album/5K1cercaK468GPvesblTSy\nhttps://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT\nThree Days Grace - Never Too Late',
+                'Вставьте ссылки на треки, альбомы, плейлисты или названия (по одному на строку):\nhttps://open.spotify.com/album/5K1cercaK468GPvesblTSy\nhttps://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT\nThree Days Grace - Never Too Late'
               )}
               className="w-full bg-cat-surface0 border border-cat-surface1/40 rounded-2xl p-4 text-xs font-mono text-cat-text placeholder-cat-subtext0/50 focus:outline-none focus:border-cat-mauve transition-colors custom-scrollbar"
             />

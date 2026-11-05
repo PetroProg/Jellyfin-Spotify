@@ -403,6 +403,10 @@ export function enqueuePlaylistDownload(
   }
 
   for (let i = 0; i < tracks.length; i++) {
+    if (/https?:\/\//i.test(tracks[i].title) || /https?:\/\//i.test(tracks[i].artist)) {
+      console.warn(`[Downloader] Skipping invalid URL-as-title track "${tracks[i].artist} - ${tracks[i].title}"`);
+      continue;
+    }
     if (isTrackBlacklistedForUser(userId, tracks[i].title, tracks[i].artist, tracks[i].id)) {
       console.log(`[Downloader] Skipping queued blacklisted track "${tracks[i].artist} - ${tracks[i].title}" for user ${userId}`);
       continue;
@@ -969,6 +973,11 @@ async function downloadAudioWithFallback(
 
 async function downloadSingleTrack(item: QueueItem): Promise<void> {
   const { jobId, playlistId, track, position } = item;
+
+  if (/https?:\/\//i.test(track.title) || /https?:\/\//i.test(track.artist)) {
+    console.warn(`[Downloader] Skipping invalid URL-as-title track "${track.artist} - ${track.title}"`);
+    return;
+  }
 
   // Resolve real individual track details (cover + real album) from Spotify / Deezer
   const details = await resolveSpotifyTrackDetails(track.id);

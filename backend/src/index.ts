@@ -13,6 +13,7 @@ import {
   fetchSpotifyPlaylist, 
   getSpotifyCredentials, 
   extractPlaylistId, 
+  resolveSpotifyEntityInput,
   searchSpotifyTracks,
   getSpotifyAuthUrl,
   handleSpotifyOAuthCallback,
@@ -952,15 +953,16 @@ server.post('/api/tracks/:id/redownload', { preHandler: [(server as any).authent
 server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const body = req.body || {};
   const { url } = body;
-  if (!url) return reply.status(400).send({ error: 'Укажите ссылку на плейлист Spotify' });
+  if (!url) return reply.status(400).send({ error: 'Укажите ссылку на плейлист, альбом или трек Spotify' });
 
   try {
     const playlistData = await fetchSpotifyPlaylist(url, req.user.id);
     if (!playlistData.tracks || playlistData.tracks.length === 0) {
-      return reply.status(400).send({ error: 'Не удалось извлечь треки из плейлиста' });
+      return reply.status(400).send({ error: 'Не удалось извлечь треки по указанной ссылке Spotify' });
     }
 
-    const cleanSpotifyId = extractPlaylistId(url);
+    const resolvedEntity = await resolveSpotifyEntityInput(url);
+    const cleanSpotifyId = resolvedEntity?.id || extractPlaylistId(url);
 
     // Check if user already has this playlist imported (by Spotify ID or matching title)
     let existingPlaylist: any = null;
@@ -982,6 +984,9 @@ server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] 
 
     if (existingPlaylist) {
       const playlistId = existingPlaylist.id;
+      if (playlistData.cover_url && (!existingPlaylist.cover_url || existingPlaylist.cover_url.includes('mosaic.scdn.co'))) {
+        db.prepare('UPDATE playlists SET cover_url = ? WHERE id = ?').run(playlistData.cover_url, playlistId);
+      }
 
       // Existing tracks linked to this playlist
       const existingRows: any[] = db.prepare(`
@@ -1369,21 +1374,33 @@ server.post('/api/spotify/import-list', { preHandler: [(server as any).authentic
     }
 
     let targetPlaylistId = requestedPlaylistId ? Number(requestedPlaylistId) : null;
-    let finalPlaylistName = playlistName ? playlistName.trim() : 'Импортированный список';
+    const sharedAlbumName =
+      tracks.length >= 2 &&
+      tracks[0]?.album &&
+      tracks.every((t) => t.album === tracks[0].album)
+        ? tracks[0].album
+        : '';
+    let finalPlaylistName = playlistName ? playlistName.trim() : (sharedAlbumName || 'Импортированный список');
 
     if (targetPlaylistId) {
-      const pl: any = db.prepare('SELECT id, name FROM playlists WHERE id = ? AND user_id = ?').get(targetPlaylistId, req.user.id);
+      const pl: any = db.prepare('SELECT id, name, cover_url FROM playlists WHERE id = ? AND user_id = ?').get(targetPlaylistId, req.user.id);
       if (pl) {
         finalPlaylistName = pl.name;
+        if (!pl.cover_url && tracks[0]?.cover_url) {
+          db.prepare('UPDATE playlists SET cover_url = ? WHERE id = ?').run(tracks[0].cover_url, targetPlaylistId);
+        }
       } else {
         targetPlaylistId = null;
       }
     }
 
     if (!targetPlaylistId) {
-      const existing: any = db.prepare('SELECT id FROM playlists WHERE user_id = ? AND LOWER(name) = LOWER(?)').get(req.user.id, finalPlaylistName);
+      const existing: any = db.prepare('SELECT id, cover_url FROM playlists WHERE user_id = ? AND LOWER(name) = LOWER(?)').get(req.user.id, finalPlaylistName);
       if (existing) {
         targetPlaylistId = existing.id;
+        if (!existing.cover_url && tracks[0]?.cover_url) {
+          db.prepare('UPDATE playlists SET cover_url = ? WHERE id = ?').run(tracks[0].cover_url, targetPlaylistId);
+        }
       } else {
         const pInfo = db.prepare(`
           INSERT INTO playlists (user_id, name, description, cover_url)
@@ -1448,6 +1465,41 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
   const query = (req.query.q || '').trim();
   if (!query) {
     return { localTracks: [], spotifyTracks: [] };
+  }
+
+  // Check if the search query is a direct Spotify URL/URI (track, album, playlist, artist, or short link)
+  const parsedEntity = await resolveSpotifyEntityInput(query);
+  if (parsedEntity) {
+    let spotifyRaw: any[] = [];
+    try {
+      const collection = await fetchSpotifyPlaylist(query, req.user?.id);
+      spotifyRaw = (collection.tracks || []).slice(0, 50);
+    } catch (err: any) {
+      console.warn('[Search Spotify URL Error]', err.message);
+    }
+
+    const localTracks: any[] = [];
+    const spotifyTracks = spotifyRaw.map((st) => {
+      const matchedLocal: any = db.prepare(`
+        SELECT * FROM tracks
+        WHERE (spotify_id IS NOT NULL AND spotify_id = ?)
+           OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+        LIMIT 1
+      `).get(st.id, st.title, st.artist);
+
+      if (matchedLocal && !localTracks.some((lt) => lt.id === matchedLocal.id)) {
+        localTracks.push(matchedLocal);
+      }
+
+      return {
+        ...st,
+        is_downloaded: !!matchedLocal,
+        local_track_id: matchedLocal?.id || null,
+        local_track: matchedLocal || null
+      };
+    });
+
+    return { localTracks, spotifyTracks };
   }
 
   // 1. Search Local Database (up to 5 tracks, deduplicated by title & artist)
