@@ -5,6 +5,7 @@ import { usePlayerStore } from './playerStore';
 import { toast } from './toastStore';
 import { getToken } from '../api/client';
 import { tr } from './i18nStore';
+import { evictTrackOfflineCache } from '../utils/offline';
 
 export interface ConnectedDevice {
   id: string;
@@ -288,6 +289,18 @@ export const useSyncStore = create<SyncState>((set, get) => {
                     })
                   );
                   usePlayerStore.getState().handleInstantTrackDownloaded(data.spotifyId, data.track);
+                }
+                break;
+              }
+
+              case 'TRACK_UPDATED': {
+                if (data.track && data.track.id) {
+                  evictTrackOfflineCache(data.track.id).then(() => {
+                    const pState = usePlayerStore.getState();
+                    if (pState.currentTrack?.id === data.track.id) {
+                      pState.reloadCurrentTrackStream(data.track);
+                    }
+                  });
                 }
                 break;
               }

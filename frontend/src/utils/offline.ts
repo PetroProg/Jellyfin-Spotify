@@ -1,12 +1,22 @@
 import { Playlist, Track } from '../types';
 import { tr, td } from '../store/i18nStore';
 
-export const CACHE_NAME = 'jellyfin-spotify-audio-cache-v2';
+export const CACHE_NAME = 'jellyfin-spotify-audio-cache-v3';
 export const LEGACY_CACHE_NAME = 'jellyfin-spotify-audio-cache';
+export const LEGACY_CACHE_NAME_V2 = 'jellyfin-spotify-audio-cache-v2';
 export const OFFLINE_PLAYLISTS_KEY = 'offline_playlists_ids';
 export const OFFLINE_PLAYLIST_PREFIX = 'jellyfy_offline_playlist_';
 export const ALL_PLAYLISTS_CACHE_KEY = 'jellyfy_all_playlists_cache';
 export const DOWNLOAD_QUEUE_KEY = 'jellyfy_download_queue';
+
+// Automatically purge outdated audio caches (v1 and v2) that may contain stale or mismatched audio
+if (typeof window !== 'undefined' && 'caches' in window) {
+  caches.delete(LEGACY_CACHE_NAME).catch(() => {});
+  caches.delete(LEGACY_CACHE_NAME_V2).catch(() => {});
+  try {
+    localStorage.removeItem('jellyfy_cached_track_ids_v2');
+  } catch (_) {}
+}
 
 // In-memory registry of active Blob URLs for zero-latency instant playback
 const activeBlobUrls = new Map<number, string>();
@@ -26,7 +36,7 @@ export interface QueuedDownloadJob {
   usedBackgroundFetch?: boolean;
 }
 
-export const CACHED_TRACK_IDS_KEY = 'jellyfy_cached_track_ids_v2';
+export const CACHED_TRACK_IDS_KEY = 'jellyfy_cached_track_ids_v3';
 const cachedTrackIdSet = new Set<number>();
 let isCachedTrackIdSetInitialized = false;
 
@@ -438,18 +448,40 @@ export async function getCachedTrackUrl(trackId: number): Promise<string | null>
 
   try {
     const cache = await caches.open(CACHE_NAME);
-    let match = await cache.match(`/api/stream/${trackId}`);
-    // Also fall back to legacy cache if present
-    if (!match) {
-      const legacyCache = await caches.open(LEGACY_CACHE_NAME);
-      match = await legacyCache.match(`/api/stream/${trackId}`);
-    }
+    const match = await cache.match(`/api/stream/${trackId}`);
     if (match) {
       const contentType = match.headers.get('content-type') || '';
-      if (typeof navigator !== 'undefined' && navigator.onLine && contentType.includes('audio/mp4')) {
-        await cache.delete(`/api/stream/${trackId}`).catch(() => {});
-        removeCachedTrackId(trackId);
-        return null;
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        if (contentType.includes('audio/mp4')) {
+          await cache.delete(`/api/stream/${trackId}`, { ignoreSearch: true }).catch(() => {});
+          removeCachedTrackId(trackId);
+          return null;
+        }
+        // Validate ETag / Content-Length against server when online so replaced Studio Masters are never shadowed by stale cache
+        try {
+          const cachedEtag = match.headers.get('etag');
+          const cachedLen = match.headers.get('content-length');
+          const headRes = await fetch(`/api/stream/${trackId}`, {
+            method: 'HEAD',
+            cache: 'no-store',
+            signal: AbortSignal.timeout(2500),
+          });
+          if (headRes.ok) {
+            const serverEtag = headRes.headers.get('etag');
+            const serverLen = headRes.headers.get('content-length');
+            if (
+              (serverEtag && cachedEtag && serverEtag !== cachedEtag) ||
+              (serverLen && cachedLen && serverLen !== cachedLen)
+            ) {
+              console.log(`[Offline Cache] Stale audio detected for track #${trackId}, evicting local cache to stream fresh Studio Master.`);
+              await cache.delete(`/api/stream/${trackId}`, { ignoreSearch: true }).catch(() => {});
+              removeCachedTrackId(trackId);
+              return null;
+            }
+          }
+        } catch (_) {
+          // Network unreachable or timed out: safely fall back to cached audio
+        }
       }
       addCachedTrackId(trackId);
       const blob = await match.blob();
@@ -486,15 +518,11 @@ export async function isTrackCached(trackId: number): Promise<boolean> {
 
   try {
     const cache = await caches.open(CACHE_NAME);
-    let match = await cache.match(`/api/stream/${trackId}`);
-    if (!match) {
-      const legacyCache = await caches.open(LEGACY_CACHE_NAME);
-      match = await legacyCache.match(`/api/stream/${trackId}`);
-    }
+    const match = await cache.match(`/api/stream/${trackId}`);
     if (match) {
       const contentType = match.headers.get('content-type') || '';
       if (typeof navigator !== 'undefined' && navigator.onLine && contentType.includes('audio/mp4')) {
-        await cache.delete(`/api/stream/${trackId}`).catch(() => {});
+        await cache.delete(`/api/stream/${trackId}`, { ignoreSearch: true }).catch(() => {});
         removeCachedTrackId(trackId);
         return false;
       }
@@ -686,8 +714,10 @@ export async function evictTrackOfflineCache(trackId: number): Promise<void> {
   if (!trackId || typeof window === 'undefined') return;
   try {
     if ('caches' in window) {
-      const cache = await caches.open(CACHE_NAME);
-      await cache.delete(`/api/stream/${trackId}`).catch(() => {});
+      for (const name of [CACHE_NAME, LEGACY_CACHE_NAME, LEGACY_CACHE_NAME_V2]) {
+        const cache = await caches.open(name);
+        await cache.delete(`/api/stream/${trackId}`, { ignoreSearch: true }).catch(() => {});
+      }
     }
   } catch (_) {}
 

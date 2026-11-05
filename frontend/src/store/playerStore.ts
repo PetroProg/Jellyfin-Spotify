@@ -951,7 +951,7 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
   }
 
   const syncBlobUrl = track.id > 0 ? getSynchronousBlobUrl(track.id) : null;
-  const streamUrl = `/api/stream/${track.id}`;
+  const streamUrl = `/api/stream/${track.id}?v=${track.duration_ms || 0}_${track.bitrate || 0}`;
 
   const applyPlayback = (targetSrc: string) => {
     const needsChange = !audio.src.endsWith(targetSrc) && audio.src !== targetSrc;
@@ -962,7 +962,11 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
 
     const applySeek = () => {
       try {
-        if (startTime > 0) audio.currentTime = startTime;
+        if (startTime > 0) {
+          audio.currentTime = startTime;
+        } else if (!needsChange && audio.currentTime > 0) {
+          audio.currentTime = 0;
+        }
       } catch (_) {}
     };
 

@@ -1,7 +1,16 @@
 // Jellyfy Custom Service Worker Extensions
 // Handles Background Fetch API and background offline caching
 
-const AUDIO_CACHE_NAME = 'jellyfin-spotify-audio-cache';
+const AUDIO_CACHE_NAME = 'jellyfin-spotify-audio-cache-v3';
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    Promise.all([
+      caches.delete('jellyfin-spotify-audio-cache').catch(() => {}),
+      caches.delete('jellyfin-spotify-audio-cache-v2').catch(() => {}),
+    ])
+  );
+});
 
 // 1. Background Fetch API events (for Chromium browsers / Android PWA)
 // Allows downloading to continue even after the app/browser is closed!
