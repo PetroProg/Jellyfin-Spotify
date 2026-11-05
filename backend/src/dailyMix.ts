@@ -1044,9 +1044,15 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
   // Build set of all tracks already owned by user
   const ownedTrackKeys = new Set<string>();
   const ownedSpotifyIds = new Set<string>();
+  const ownedTitleToArtists = new Map<string, Set<string>>();
   for (const ut of userTracks) {
     ownedTrackKeys.add(normalizeTrackKey(ut.artist, ut.title));
     if (ut.spotify_id) ownedSpotifyIds.add(ut.spotify_id);
+    const cleanT = (ut.title || '').toLowerCase().replace(/\s*[\(\[].*?[\)\]]/g, '').trim();
+    if (cleanT.length >= 4) {
+      if (!ownedTitleToArtists.has(cleanT)) ownedTitleToArtists.set(cleanT, new Set());
+      ownedTitleToArtists.get(cleanT)!.add(extractPrimaryArtist(ut.artist).toLowerCase());
+    }
   }
 
   // 3. Extract unique primary artists, count frequency, and track source playlists
@@ -1388,6 +1394,32 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     const canAddCandidate = (cand: SpotifyTrack): boolean => {
       if (!cand.title || !cand.artist) return false;
       const pa = extractPrimaryArtist(cand.artist).toLowerCase();
+
+      // 1. Cover / Remake filter: reject explicit cover keywords
+      if (/\b(cover|rock cover|metal cover|acoustic cover|tribute|караоке|кавер|remake)\b/i.test(cand.title) ||
+          /\b(cover|rock cover|metal cover|acoustic cover|tribute|караоке|кавер|remake)\b/i.test(cand.album || '')) {
+        return false;
+      }
+
+      // 2. Reject duplicate song title by a different artist if user already owns it
+      // (Prevents unwanted remakes/covers of library hits like Adele - Set Fire to the Rain)
+      const cleanCandTitle = (cand.title || '').toLowerCase().replace(/\s*[\(\[].*?[\)\]]/g, '').trim();
+      if (cleanCandTitle.length >= 4 && ownedTitleToArtists.has(cleanCandTitle)) {
+        const owners = ownedTitleToArtists.get(cleanCandTitle)!;
+        if (!owners.has(pa)) {
+          return false;
+        }
+      }
+
+      // 3. Known cover-band pop rework filter in rock / metal / alternative mixes:
+      if (catKey === 'rock' || catKey === 'classic_rock') {
+        if (/^(no resolve|fame on fire|our last night|leo moracchioli|punk goes pop|goblins from mars)$/i.test(pa)) {
+          if (/set fire to the rain|easy on me|someone you loved|stay|counting stars|hello|rolling in the deep|shape of you|bad guy|blank space|drivers license|industry baby|as it was|anti-hero|flowers|unstoppable/i.test(cleanCandTitle)) {
+            return false;
+          }
+        }
+      }
+
       // Never allow a Classic Rock anchor in Modern Rock mix or vice versa
       if (catKey === 'rock' && CLASSIC_ROCK_ANCHORS.has(pa)) return false;
       if (catKey === 'classic_rock' && MODERN_ROCK_ANCHORS.has(pa)) return false;
