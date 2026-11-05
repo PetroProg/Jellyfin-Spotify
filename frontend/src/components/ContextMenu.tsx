@@ -5,6 +5,7 @@ import { usePlayerStore } from '../store/playerStore';
 import { useI18nStore } from '../store/i18nStore';
 import { apiRequest } from '../api/client';
 import { toast } from '../store/toastStore';
+import { evictTrackOfflineCache } from '../utils/offline';
 
 interface ContextMenuProps {
   track: Track;
@@ -39,6 +40,11 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
       const res = await apiRequest(`/tracks/${track.id}/redownload`, { method: 'POST' });
       if (res && res.success) {
         toast.success(t('Studio original successfully installed!', 'Студийный оригинал успешно установлен!'));
+        await evictTrackOfflineCache(track.id);
+        const state = usePlayerStore.getState();
+        if (state.currentTrack?.id === track.id) {
+          state.reloadCurrentTrackStream(res.track || undefined);
+        }
       } else {
         toast.error(res?.error || t('Could not find better studio version', 'Не удалось найти другую студийную версию'));
       }

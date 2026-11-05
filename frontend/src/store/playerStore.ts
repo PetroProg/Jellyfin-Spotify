@@ -109,6 +109,7 @@ interface PlayerState {
   setCrossfade: (seconds: number) => void;
   applyAccountSettings: (settings: Record<string, string>) => void;
   handleInstantTrackDownloaded: (spotifyId: string, realTrack: Track) => void;
+  reloadCurrentTrackStream: (trackOverride?: Track) => void;
 }
 
 const STORAGE_KEY_VOLUME = 'jellyfy_player_volume';
@@ -2805,6 +2806,21 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           queue: [realTrack],
         });
         updateMediaSession(realTrack);
+      }
+    },
+
+    reloadCurrentTrackStream: (trackOverride?: Track) => {
+      const { currentTrack, isPlaying, currentTime } = get();
+      const t = trackOverride || currentTrack;
+      if (t && t.id > 0) {
+        if (trackOverride) {
+          set({
+            currentTrack: trackOverride,
+            duration: (trackOverride.duration_ms || 180000) / 1000,
+          });
+          updateMediaSession(trackOverride);
+        }
+        recoverAudioStream(currentTime > 0 ? currentTime : 0, isPlaying);
       }
     },
   };

@@ -679,6 +679,27 @@ export async function syncDownloadedPlaylist(
 }
 
 /**
+ * Evicts a single track from the browser's CacheStorage and in-memory Blob URL cache,
+ * ensuring immediate fresh playback when replaced with a Studio Master.
+ */
+export async function evictTrackOfflineCache(trackId: number): Promise<void> {
+  if (!trackId || typeof window === 'undefined') return;
+  try {
+    if ('caches' in window) {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.delete(`/api/stream/${trackId}`).catch(() => {});
+    }
+  } catch (_) {}
+
+  const blobUrl = activeBlobUrls.get(trackId);
+  if (blobUrl) {
+    URL.revokeObjectURL(blobUrl);
+    activeBlobUrls.delete(trackId);
+  }
+  removeCachedTrackId(trackId);
+}
+
+/**
  * Removes downloaded playlist and revokes its memory Blob URLs.
  */
 export async function removePlaylistOffline(playlistId: number, tracks: Track[]): Promise<void> {
