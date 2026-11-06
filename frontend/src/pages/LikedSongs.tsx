@@ -3,7 +3,7 @@ import { Heart, Play, Shuffle, ChevronUp, ArrowLeft, Download, Check, Loader2, R
 import { Track, DownloadJob } from '../types';
 import { apiRequest } from '../api/client';
 import { useOfflineStore } from '../store/offlineStore';
-import { getOfflinePlaylistData, saveOfflinePlaylistData } from '../utils/offline';
+import { getOfflinePlaylistData, saveOfflinePlaylistData, partitionCachedTracks } from '../utils/offline';
 import { TrackRow } from '../components/TrackRow';
 import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
@@ -76,6 +76,9 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       );
 
       if (data.upToDate) {
+        if (useOfflineStore.getState().isDownloaded(LIKED_PLAYLIST_ID) && tracks.length > 0) {
+          useOfflineStore.getState().syncPlaylist(LIKED_PLAYLIST_ID, tracks);
+        }
         return;
       }
 
@@ -219,10 +222,55 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
     }
   };
 
+  useEffect(() => {
+    const handleLikedChanged = (e: any) => {
+      try {
+        localStorage.removeItem('jellyfy_cached_liked_version');
+      } catch (_) {}
+      const { trackId, track, liked } = e.detail || {};
+      if (liked && track && track.id > 0) {
+        setTracks((prev) => {
+          if (prev.some((t) => t.id === track.id)) return prev;
+          return [track, ...prev];
+        });
+      } else if (liked === false && trackId) {
+        setTracks((prev) => prev.filter((t) => t.id !== trackId));
+      } else {
+        loadLikes();
+      }
+    };
+    window.addEventListener('jellyfy:liked_tracks_changed', handleLikedChanged);
+    return () => window.removeEventListener('jellyfy:liked_tracks_changed', handleLikedChanged);
+  }, []);
+
   const handleToggleDownload = async () => {
     if (downloading) return;
 
+    const likedPl = {
+      id: LIKED_PLAYLIST_ID,
+      name: 'Любимые треки',
+      description: 'Ваша медиатека сохраненных композиций',
+      created_at: new Date().toISOString(),
+      track_count: tracks.length,
+    };
+
     if (isDownloaded) {
+      const { missingTracks } = await partitionCachedTracks(tracks);
+      if (missingTracks.length > 0) {
+        try {
+          await startDownload(LIKED_PLAYLIST_ID, tracks, likedPl);
+          toast.success(
+            t(
+              `Downloading ${missingTracks.length} new track(s) to device`,
+              `Докачиваем новые треки (${missingTracks.length} шт.) на устройство`
+            )
+          );
+        } catch (e: any) {
+          toast.error(e.message || t('Failed to save offline', 'Ошибка сохранения оффлайн'));
+        }
+        return;
+      }
+
       const ok = await confirmDialog({
         title: t('Remove offline Liked Songs?', 'Удалить любимые треки?'),
         message: t(
@@ -243,13 +291,6 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       }
     } else {
       try {
-        const likedPl = {
-          id: LIKED_PLAYLIST_ID,
-          name: 'Любимые треки',
-          description: 'Ваша медиатека сохраненных композиций',
-          created_at: new Date().toISOString(),
-          track_count: tracks.length,
-        };
         await startDownload(LIKED_PLAYLIST_ID, tracks, likedPl);
         toast.success(t('Started downloading Liked Songs for offline', 'Скачивание любимых треков начато'));
       } catch (e: any) {

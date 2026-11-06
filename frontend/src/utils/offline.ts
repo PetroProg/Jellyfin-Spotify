@@ -246,6 +246,7 @@ export function addTrackToOfflinePlaylist(
   track: Track,
   playlistFallback?: Playlist
 ): void {
+  if (!track || !track.id || track.id <= 0) return;
   try {
     const existing = getOfflinePlaylistData(playlistId);
     let playlist = existing?.playlist || playlistFallback;
@@ -268,12 +269,11 @@ export function addTrackToOfflinePlaylist(
       }
     }
     const currentTracks = existing?.tracks || [];
-    if (!currentTracks.some((t) => t.id === track.id)) {
-      const updatedTracks = [track, ...currentTracks];
-      const updatedPlaylist = { ...playlist, track_count: updatedTracks.length };
-      saveOfflinePlaylistData(updatedPlaylist, updatedTracks);
-    }
-    addCachedTrackId(track.id);
+    const filteredTracks = currentTracks.filter((t) => t.id !== track.id);
+    const updatedTracks = [track, ...filteredTracks];
+    const updatedPlaylist = { ...playlist, track_count: updatedTracks.length };
+    // Save with empty version so next server check reconciles cleanly without discarding the new track
+    saveOfflinePlaylistData(updatedPlaylist, updatedTracks, false, '');
   } catch (err) {
     console.warn(`[Offline] Failed to add track to offline playlist ${playlistId}:`, err);
   }
@@ -378,6 +378,82 @@ export function getAllOfflinePlaylists(): Playlist[] {
  * This allows downloads to continue seamlessly via the OS download manager even if the user
  * completely closes the browser or swipes away the PWA.
  */
+// Cooldown registry for tracks that temporarily failed to download (e.g. 404 or server still encoding)
+// Prevents syncPlaylist / syncAllDownloadedPlaylists from infinitely restarting the download bar on every navigation
+const failedTrackCooldowns = new Map<number, { count: number; until: number }>();
+
+export function clearFailedTrackCooldowns(tracks?: Track[]): void {
+  if (!tracks) {
+    failedTrackCooldowns.clear();
+    return;
+  }
+  for (const t of tracks) {
+    if (t && t.id) failedTrackCooldowns.delete(t.id);
+  }
+}
+
+export function isTrackInFailedCooldown(trackId: number): boolean {
+  const entry = failedTrackCooldowns.get(trackId);
+  if (!entry) return false;
+  if (Date.now() > entry.until) {
+    failedTrackCooldowns.delete(trackId);
+    return false;
+  }
+  return true;
+}
+
+export function recordTrackDownloadFailure(trackId: number): void {
+  const prev = failedTrackCooldowns.get(trackId);
+  const count = (prev?.count || 0) + 1;
+  // 1st failure: 90s cooldown, 2nd+: 10 min cooldown for auto-sync
+  const cooldownMs = count === 1 ? 90_000 : 10 * 60_000;
+  failedTrackCooldowns.set(trackId, { count, until: Date.now() + cooldownMs });
+}
+
+/**
+ * Inspects CacheStorage for a list of tracks and splits them into already-cached vs missing tracks,
+ * while reconciling cachedTrackIdSet with actual CacheStorage state.
+ */
+export async function partitionCachedTracks(tracks: Track[]): Promise<{
+  cachedTracks: Track[];
+  missingTracks: Track[];
+  cachedCount: number;
+}> {
+  if (typeof window === 'undefined' || !('caches' in window) || !tracks || tracks.length === 0) {
+    return { cachedTracks: [], missingTracks: tracks || [], cachedCount: 0 };
+  }
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    const cachedTracks: Track[] = [];
+    const missingTracks: Track[] = [];
+
+    for (const track of tracks) {
+      if (!track || !track.id || track.id <= 0) continue;
+      if (activeBlobUrls.has(track.id)) {
+        addCachedTrackId(track.id);
+        cachedTracks.push(track);
+        continue;
+      }
+      const match = await cache.match(`/api/stream/${track.id}`);
+      if (match) {
+        addCachedTrackId(track.id);
+        cachedTracks.push(track);
+      } else {
+        removeCachedTrackId(track.id);
+        missingTracks.push(track);
+      }
+    }
+
+    return {
+      cachedTracks,
+      missingTracks,
+      cachedCount: cachedTracks.length,
+    };
+  } catch {
+    return { cachedTracks: [], missingTracks: tracks, cachedCount: 0 };
+  }
+}
+
 export async function tryStartBackgroundFetch(
   playlistId: number,
   tracks: Track[],
@@ -396,14 +472,20 @@ export async function tryStartBackgroundFetch(
       }
     } catch (_) {}
 
-    const requests = tracks.map((t) => `/api/stream/${t.id}`);
+    // Only request tracks that are NOT yet downloaded in CacheStorage!
+    const { missingTracks } = await partitionCachedTracks(tracks);
+    if (missingTracks.length === 0) {
+      return false;
+    }
+
+    const requests = missingTracks.map((t) => `/api/stream/${t.id}`);
     const displayTitle = playlistName
       ? tr(`Downloading: ${td(playlistName)}`, `Загрузка: ${playlistName}`)
       : tr('Downloading music for offline', 'Загрузка музыки в оффлайн');
     await reg.backgroundFetch.fetch(bgFetchId, requests, {
       title: displayTitle,
       icons: [{ src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png' }],
-      downloadTotal: tracks.length * 4 * 1024 * 1024, // Estimate ~4MB per track
+      downloadTotal: missingTracks.length * 4 * 1024 * 1024, // Estimate ~4MB per missing track
     });
 
     return true;
@@ -417,22 +499,8 @@ export async function tryStartBackgroundFetch(
  * Checks how many tracks from the list are already present in CacheStorage.
  */
 export async function countCachedTracks(tracks: Track[]): Promise<number> {
-  if (typeof window === 'undefined' || !('caches' in window) || !tracks || tracks.length === 0) return 0;
-  try {
-    const cache = await caches.open(CACHE_NAME);
-    let count = 0;
-    for (const track of tracks) {
-      if (activeBlobUrls.has(track.id)) {
-        count++;
-        continue;
-      }
-      const match = await cache.match(`/api/stream/${track.id}`);
-      if (match) count++;
-    }
-    return count;
-  } catch {
-    return 0;
-  }
+  const { cachedCount } = await partitionCachedTracks(tracks);
+  return cachedCount;
 }
 
 /**
@@ -440,7 +508,7 @@ export async function countCachedTracks(tracks: Track[]): Promise<number> {
  * Returns null if not cached (falling back to remote streaming).
  */
 export async function getCachedTrackUrl(trackId: number): Promise<string | null> {
-  if (typeof window === 'undefined' || !('caches' in window)) return null;
+  if (typeof window === 'undefined' || !('caches' in window) || !trackId || trackId <= 0) return null;
 
   if (activeBlobUrls.has(trackId)) {
     return activeBlobUrls.get(trackId)!;
@@ -486,8 +554,8 @@ export async function getCachedTrackUrl(trackId: number): Promise<string | null>
       addCachedTrackId(trackId);
       const blob = await match.blob();
       if (blob && blob.size > 1024) {
-        // Keep up to 30 blob URLs active in memory for seamless queue prebuffering without evicting the playing track
-        if (activeBlobUrls.size >= 30) {
+        // Keep up to 35 blob URLs active in memory for seamless queue prebuffering without evicting the playing track
+        if (activeBlobUrls.size >= 35) {
           for (const key of activeBlobUrls.keys()) {
             if (key !== currentlyPlayingTrackId && key !== trackId) {
               try {
@@ -513,7 +581,7 @@ export async function getCachedTrackUrl(trackId: number): Promise<string | null>
  * Checks whether track is already saved in local offline cache.
  */
 export async function isTrackCached(trackId: number): Promise<boolean> {
-  if (typeof window === 'undefined' || !('caches' in window)) return false;
+  if (typeof window === 'undefined' || !('caches' in window) || !trackId || trackId <= 0) return false;
   if (activeBlobUrls.has(trackId)) return true;
 
   try {
@@ -529,6 +597,7 @@ export async function isTrackCached(trackId: number): Promise<boolean> {
       addCachedTrackId(trackId);
       return true;
     }
+    removeCachedTrackId(trackId);
     return false;
   } catch {
     return false;
@@ -541,16 +610,18 @@ export async function isTrackCached(trackId: number): Promise<boolean> {
  */
 export async function cacheTrackOffline(
   track: Track,
-  timeoutMs = 25000,
+  timeoutMs = 30000,
   externalSignal?: AbortSignal
 ): Promise<boolean> {
-  if (typeof window === 'undefined' || !('caches' in window) || !track || !track.id) return false;
+  if (typeof window === 'undefined' || !('caches' in window) || !track || !track.id || track.id <= 0) return false;
 
   const streamUrl = `/api/stream/${track.id}`;
   try {
     const cache = await caches.open(CACHE_NAME);
     const existing = await cache.match(streamUrl);
     if (existing) {
+      addCachedTrackId(track.id);
+      failedTrackCooldowns.delete(track.id);
       return true;
     }
 
@@ -580,8 +651,14 @@ export async function cacheTrackOffline(
       });
 
       if (res.ok && (res.status === 200 || res.status === 0)) {
+        const contentLen = Number(res.headers.get('content-length') || '0');
+        if (contentLen > 0 && contentLen < 1024) {
+          recordTrackDownloadFailure(track.id);
+          return false;
+        }
         await cache.put(streamUrl, res);
         addCachedTrackId(track.id);
+        failedTrackCooldowns.delete(track.id);
 
         // Preload cover art non-blockingly
         if (track.cover_url && !track.cover_url.startsWith('data:')) {
@@ -598,6 +675,7 @@ export async function cacheTrackOffline(
 
         return true;
       }
+      recordTrackDownloadFailure(track.id);
       return false;
     } finally {
       clearTimeout(timer);
@@ -608,20 +686,45 @@ export async function cacheTrackOffline(
   } catch (err: any) {
     if (err?.name !== 'AbortError') {
       console.warn(`[Offline Cache] Error caching track ${track.title}:`, err);
+      recordTrackDownloadFailure(track.id);
     }
     return false;
   }
 }
 
 /**
+ * Downloads a single track with automatic retries (useful when a newly liked or imported track
+ * is just finishing its server-side download).
+ */
+export async function cacheTrackWithRetry(
+  track: Track,
+  maxAttempts = 4,
+  delayMs = 2500
+): Promise<boolean> {
+  if (!track || !track.id || track.id <= 0) return false;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const ok = await cacheTrackOffline(track);
+    if (ok) {
+      // Also pre-warm into Blob URL RAM if space permits
+      getCachedTrackUrl(track.id).catch(() => {});
+      return true;
+    }
+    if (attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, delayMs * attempt));
+    }
+  }
+  return false;
+}
+
+/**
  * Proactively pre-warms Blob URLs in memory for upcoming tracks in queue
  */
-export function prewarmQueueBlobUrls(tracks: Track[], startIndex: number, count = 2): void {
+export function prewarmQueueBlobUrls(tracks: Track[], startIndex: number, count = 6): void {
   if (typeof window === 'undefined' || !tracks || tracks.length === 0) return;
   const end = Math.min(tracks.length, startIndex + count);
   for (let i = startIndex; i < end; i++) {
     const t = tracks[i];
-    if (t && t.id) {
+    if (t && t.id && t.id > 0) {
       getCachedTrackUrl(t.id).catch(() => {});
     }
   }
@@ -645,19 +748,19 @@ export async function downloadPlaylistOffline(
     saveOfflinePlaylistData(playlist, tracks);
   }
 
-  let done = await countCachedTracks(tracks);
+  const { missingTracks, cachedCount } = await partitionCachedTracks(tracks);
+  let done = cachedCount;
   if (onProgress) {
     onProgress(done, tracks.length);
   }
 
-  for (const track of tracks) {
-    const isCached = await isTrackCached(track.id);
-    if (!isCached) {
-      await cacheTrackOffline(track);
+  for (const track of missingTracks) {
+    const ok = await cacheTrackOffline(track);
+    if (ok) {
       done++;
-      if (onProgress) {
-        onProgress(done, tracks.length);
-      }
+    }
+    if (onProgress) {
+      onProgress(done, tracks.length);
     }
   }
 
@@ -670,6 +773,7 @@ export async function downloadPlaylistOffline(
 
 /**
  * Syncs a downloaded playlist by fetching and caching only the tracks that are not yet stored locally.
+ * Skips tracks that recently failed so background sync never gets stuck in a restart loop.
  */
 export async function syncDownloadedPlaylist(
   playlistId: number,
@@ -684,22 +788,25 @@ export async function syncDownloadedPlaylist(
     saveOfflinePlaylistData(playlist, tracks);
   }
 
-  const missingTracks: Track[] = [];
-  for (const t of tracks) {
-    const cached = await isTrackCached(t.id);
-    if (!cached) {
-      missingTracks.push(t);
-    }
-  }
+  const { missingTracks, cachedCount } = await partitionCachedTracks(tracks);
+  const actionableMissing = missingTracks.filter((t) => !isTrackInFailedCooldown(t.id));
 
-  if (missingTracks.length === 0) return 0;
+  if (actionableMissing.length === 0) return 0;
 
   let downloadedCount = 0;
-  for (const t of missingTracks) {
+  let currentTotalDone = cachedCount;
+  if (onProgress) {
+    onProgress(currentTotalDone, tracks.length);
+  }
+
+  for (const t of actionableMissing) {
     const success = await cacheTrackOffline(t);
-    if (success) downloadedCount++;
+    if (success) {
+      downloadedCount++;
+      currentTotalDone++;
+    }
     if (onProgress) {
-      onProgress(downloadedCount, missingTracks.length);
+      onProgress(currentTotalDone, tracks.length);
     }
   }
 

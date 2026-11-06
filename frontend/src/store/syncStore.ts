@@ -3,9 +3,16 @@ import { Track } from '../types';
 import { useAuthStore } from './authStore';
 import { usePlayerStore } from './playerStore';
 import { toast } from './toastStore';
-import { getToken } from '../api/client';
+import { getToken, apiRequest } from '../api/client';
 import { tr } from './i18nStore';
-import { evictTrackOfflineCache } from '../utils/offline';
+import {
+  evictTrackOfflineCache,
+  isPlaylistDownloaded,
+  isTrackDownloadedLocally,
+  addTrackToOfflinePlaylist,
+  removeTrackFromOfflinePlaylist,
+  cacheTrackWithRetry,
+} from '../utils/offline';
 
 export interface ConnectedDevice {
   id: string;
@@ -267,14 +274,37 @@ export const useSyncStore = create<SyncState>((set, get) => {
 
               case 'LIKES_UPDATED': {
                 if (data.trackId && typeof data.liked === 'boolean') {
-                  const currentIds = usePlayerStore.getState().likedTrackIds;
-                  const newIds = data.liked
-                    ? Array.from(new Set([...currentIds, data.trackId]))
-                    : currentIds.filter((id) => id !== data.trackId);
-                  usePlayerStore.setState({ likedTrackIds: newIds });
-                  try {
-                    localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(newIds));
-                  } catch (_) {}
+                  const tId = Number(data.trackId);
+                  if (tId > 0) {
+                    const currentIds = usePlayerStore.getState().likedTrackIds;
+                    const newIds = data.liked
+                      ? Array.from(new Set([...currentIds, tId]))
+                      : currentIds.filter((id) => id !== tId);
+                    usePlayerStore.setState({ likedTrackIds: newIds });
+                    try {
+                      localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(newIds));
+                    } catch (_) {}
+
+                    if (data.liked) {
+                      if (data.track && data.track.id > 0) {
+                        addTrackToOfflinePlaylist(-1, data.track);
+                        if (isPlaylistDownloaded(-1) && !isTrackDownloadedLocally(tId)) {
+                          cacheTrackWithRetry(data.track).catch(() => {});
+                        }
+                      } else if (isPlaylistDownloaded(-1) && !isTrackDownloadedLocally(tId)) {
+                        apiRequest<{ track: Track }>(`/tracks/${tId}`, { silentOffline: true })
+                          .then((res) => {
+                            if (res?.track) {
+                              addTrackToOfflinePlaylist(-1, res.track);
+                              cacheTrackWithRetry(res.track).catch(() => {});
+                            }
+                          })
+                          .catch(() => {});
+                      }
+                    } else {
+                      removeTrackFromOfflinePlaylist(-1, tId);
+                    }
+                  }
                 } else {
                   usePlayerStore.getState().loadLikes();
                 }

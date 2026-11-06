@@ -74,12 +74,19 @@ self.addEventListener('backgroundfetchclick', (event) => {
 
 // 2. Direct Service Worker caching with event.waitUntil
 // Keeps the Service Worker alive while downloading tracks when client sends message
+const activeSwPlaylistJobs = new Set();
+
 self.addEventListener('message', (event) => {
   if (!event.data) return;
 
   if (event.data.type === 'CACHE_TRACKS_IN_BACKGROUND') {
-    const { tracks, playlistId } = event.data;
-    if (!tracks || !Array.isArray(tracks)) return;
+    const { tracks, playlistId, initialDone = 0, totalTracks } = event.data;
+    if (!tracks || !Array.isArray(tracks) || tracks.length === 0) return;
+    if (activeSwPlaylistJobs.has(playlistId)) return;
+
+    activeSwPlaylistJobs.add(playlistId);
+    const total = totalTracks || (initialDone + tracks.length);
+    let currentDone = initialDone;
 
     event.waitUntil(
       (async () => {
@@ -87,9 +94,11 @@ self.addEventListener('message', (event) => {
           const cache = await caches.open(AUDIO_CACHE_NAME);
           for (let i = 0; i < tracks.length; i++) {
             const track = tracks[i];
+            if (!track || !track.id || track.id <= 0) continue;
             const streamUrl = `/api/stream/${track.id}`;
             const existing = await cache.match(streamUrl);
 
+            let cachedOk = Boolean(existing);
             if (!existing) {
               try {
                 const res = await fetch(streamUrl, {
@@ -97,10 +106,15 @@ self.addEventListener('message', (event) => {
                 });
                 if (res.ok && (res.status === 200 || res.status === 0)) {
                   await cache.put(streamUrl, res);
+                  cachedOk = true;
                 }
               } catch (err) {
                 console.warn('[SW BG Cache] Failed to cache track:', track.id, err);
               }
+            }
+
+            if (cachedOk) {
+              currentDone = Math.min(total, currentDone + 1);
             }
 
             // Post progress update
@@ -109,8 +123,8 @@ self.addEventListener('message', (event) => {
               client.postMessage({
                 type: 'BG_CACHE_PROGRESS',
                 playlistId,
-                done: i + 1,
-                total: tracks.length,
+                done: currentDone,
+                total,
                 trackId: track.id,
               });
             }
@@ -126,6 +140,8 @@ self.addEventListener('message', (event) => {
           }
         } catch (err) {
           console.error('[SW BG Cache Error]:', err);
+        } finally {
+          activeSwPlaylistJobs.delete(playlistId);
         }
       })()
     );

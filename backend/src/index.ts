@@ -1722,6 +1722,10 @@ server.get('/api/likes', { preHandler: [(server as any).authenticate] }, async (
 
 server.post('/api/likes/:trackId', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const trackId = Number(req.params.trackId);
+  if (!trackId || isNaN(trackId) || trackId <= 0) {
+    db.prepare('DELETE FROM liked_tracks WHERE track_id <= 0').run();
+    return { liked: false };
+  }
   const body = req.body || {};
   const explicitLiked = typeof body.liked === 'boolean' ? body.liked : null;
   const exists = !!db.prepare('SELECT 1 FROM liked_tracks WHERE user_id = ? AND track_id = ?').get(req.user.id, trackId);
@@ -1739,10 +1743,15 @@ server.post('/api/likes/:trackId', { preHandler: [(server as any).authenticate] 
     db.prepare('DELETE FROM liked_tracks WHERE user_id = ? AND track_id = ?').run(req.user.id, trackId);
   }
 
+  const trackRow = newLikedState
+    ? db.prepare('SELECT id, title, artist, album, duration_ms, cover_url FROM tracks WHERE id = ?').get(trackId)
+    : null;
+
   broadcastToUser(req.user.id, {
     type: 'LIKES_UPDATED',
     trackId,
     liked: newLikedState,
+    track: trackRow || null,
   });
 
   return { liked: newLikedState };

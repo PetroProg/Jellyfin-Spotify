@@ -1698,25 +1698,25 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
   const isBufferSafeForPrefetch = (): boolean => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
-    const cur = audio.currentTime;
-    // Don't prefetch during the first 6 seconds to give the active track 100% bandwidth
-    if (cur < 6) return false;
-
-    // If playing from a local blob URL, network bandwidth is 100% free!
+    // If playing from a local blob URL, network bandwidth is 100% free immediately!
     if (audio.src.startsWith('blob:')) return true;
 
+    const cur = audio.currentTime;
+    // Wait only the first 2.5 seconds so the active stream starts smoothly
+    if (cur < 2.5) return false;
+
     if (!audio.duration || !isFinite(audio.duration) || audio.duration <= 0) {
-      return cur >= 12;
+      return cur >= 5;
     }
 
     for (let i = 0; i < audio.buffered.length; i++) {
       if (audio.buffered.start(i) <= cur && cur <= audio.buffered.end(i)) {
         const bufferedAhead = audio.buffered.end(i) - cur;
-        // Current track must have at least 15 seconds buffered ahead (or reached EOF)
-        return bufferedAhead >= 15 || audio.buffered.end(i) >= (audio.duration - 1);
+        // Current track only needs 5 seconds buffered ahead (or reached EOF) before prefetching upcoming tracks
+        return bufferedAhead >= 5 || audio.buffered.end(i) >= (audio.duration - 1);
       }
     }
-    return cur >= 15 && audio.readyState >= 3;
+    return cur >= 6 && audio.readyState >= 3;
   };
 
   let lastPrefetchCheckTime = 0;
@@ -1724,28 +1724,34 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   const triggerEventDrivenPrefetch = async () => {
     if (isPrefetching) return;
     const now = Date.now();
-    if (now - lastPrefetchCheckTime < 2500) return;
+    if (now - lastPrefetchCheckTime < 1500) return;
     lastPrefetchCheckTime = now;
 
     const { queue, currentIndex, currentTrack, isPlaying, repeat } = get();
     if (!isPlaying || !currentTrack || !queue || queue.length === 0 || currentIndex < 0) return;
 
-    // Collect up to 2 upcoming tracks to pre-buffer into Blob RAM
+    // Collect up to 6 upcoming tracks in the queue to pre-download and pre-buffer
+    const PREFETCH_LOOKAHEAD = 6;
     const upcomingIndices: number[] = [];
-    if (currentIndex + 1 < queue.length) {
-      upcomingIndices.push(currentIndex + 1);
-      if (currentIndex + 2 < queue.length) {
-        upcomingIndices.push(currentIndex + 2);
+    for (let offset = 1; offset <= PREFETCH_LOOKAHEAD; offset++) {
+      const nextIdx = currentIndex + offset;
+      if (nextIdx < queue.length) {
+        upcomingIndices.push(nextIdx);
+      } else if (repeat === 'all' && queue.length > 1) {
+        const wrappedIdx = nextIdx % queue.length;
+        if (wrappedIdx !== currentIndex && !upcomingIndices.includes(wrappedIdx)) {
+          upcomingIndices.push(wrappedIdx);
+        }
       }
-    } else if (repeat === 'all' && queue.length > 0) {
-      upcomingIndices.push(0);
     }
 
     if (upcomingIndices.length === 0) return;
 
-    // Check if any upcoming track still needs to be loaded into synchronous Blob RAM
+    // Find the first upcoming track in the 6-track window that isn't cached or pre-warmed yet
     let targetTrack: Track | null = null;
     let isImmediateNext = false;
+    let targetOffsetIndex = 0;
+    let remainingCandidates = 0;
 
     for (let i = 0; i < upcomingIndices.length; i++) {
       const idx = upcomingIndices[i];
@@ -1760,9 +1766,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         continue;
       }
 
-      targetTrack = candidate;
-      isImmediateNext = i === 0;
-      break;
+      // For tracks 1..3 ahead, ensure they are in synchronous Blob RAM; for tracks 4..6 ahead, ensure they are in CacheStorage
+      if (i >= 3 && isTrackDownloadedLocally(candidate.id)) {
+        continue;
+      }
+
+      if (!targetTrack) {
+        targetTrack = candidate;
+        isImmediateNext = i === 0;
+        targetOffsetIndex = i;
+      } else {
+        remainingCandidates++;
+      }
     }
 
     if (!targetTrack) return;
@@ -1774,15 +1789,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     try {
       const cached = await isTrackCached(targetTrack.id);
       if (!cached) {
-        console.log(`[Smart Prefetch] Pre-downloading upcoming track into offline cache: "${targetTrack.title}"`);
+        console.log(`[Smart Prefetch] Pre-downloading upcoming track (+${targetOffsetIndex + 1}) into offline cache: "${targetTrack.title}"`);
         await cacheTrackOffline(targetTrack, 35000, prefetchAbortController.signal);
       }
-      const blobUrl = await getCachedTrackUrl(targetTrack.id);
-      if (isImmediateNext) {
-        preloadNextTrackElement(blobUrl || `/api/stream/${targetTrack.id}`);
-      }
-      if (blobUrl) {
-        console.log(`[Smart Prefetch] Track "${targetTrack.title}" ready in RAM as 0ms Blob URL`);
+
+      // Warm the next 3 tracks into 0ms Blob RAM
+      if (targetOffsetIndex < 3) {
+        const blobUrl = await getCachedTrackUrl(targetTrack.id);
+        if (isImmediateNext) {
+          preloadNextTrackElement(blobUrl || `/api/stream/${targetTrack.id}`);
+        }
+        if (blobUrl) {
+          console.log(`[Smart Prefetch] Track "${targetTrack.title}" ready in RAM as 0ms Blob URL`);
+        }
       }
     } catch (err: any) {
       if (err?.name !== 'AbortError') {
@@ -1791,6 +1810,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     } finally {
       isPrefetching = false;
       prefetchAbortController = null;
+      // If more tracks in the 6-track lookahead window still need pre-downloading, chain the next prefetch!
+      if (remainingCandidates > 0 && get().isPlaying) {
+        if (prefetchTimeout) clearTimeout(prefetchTimeout);
+        prefetchTimeout = setTimeout(() => {
+          triggerEventDrivenPrefetch();
+        }, 900);
+      }
     }
   };
 
@@ -1801,20 +1827,21 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
     prefetchTimeout = setTimeout(() => {
       triggerEventDrivenPrefetch();
-    }, 6500);
+    }, 2000);
   };
 
   let isPrefetchingRecommendations = false;
   const prefetchRecommendationsIfNeeded = async () => {
     const { queue, currentIndex, smartShuffle } = get();
     if (!smartShuffle || isPrefetchingRecommendations) return;
-    if (queue.length > 0 && currentIndex >= queue.length - 2) {
+    // Fetch new recommendations earlier (when 5 or fewer tracks remain in the queue)
+    if (queue.length > 0 && currentIndex >= queue.length - 5) {
       isPrefetchingRecommendations = true;
       try {
         const lastTrack = queue[queue.length - 1];
         const data = await apiRequest<{ recommendations: any[] }>(
           `/recommendations?artists=${encodeURIComponent(lastTrack?.artist || '')}`,
-          { timeoutMs: 4000 }
+          { timeoutMs: 5000 }
         );
         if (data.recommendations && data.recommendations.length > 0) {
           const existingIds = new Set(get().queue.map((t) => t.id));
@@ -1830,6 +1857,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
             }));
           if (newTracks.length > 0) {
             set((state) => ({ queue: [...state.queue, ...newTracks] }));
+            scheduleNextTrackPrefetch();
           }
         }
       } catch (_) {
@@ -1978,7 +2006,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       useSyncStore.getState().sendPlaybackState({ currentTime: 0, duration: initialDur, isPlaying: true });
       scheduleNextTrackPrefetch();
       prefetchRecommendationsIfNeeded();
-      prewarmQueueBlobUrls(q, idx + 1, 5);
+      prewarmQueueBlobUrls(q, idx + 1, 6);
     },
 
     playTrackLocally: (track, newQueue, index, startTime, autoPlay = true, playlistId) => {
@@ -2016,7 +2044,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       useSyncStore.getState().sendPlaybackState();
       scheduleNextTrackPrefetch();
       prefetchRecommendationsIfNeeded();
-      prewarmQueueBlobUrls(q, idx + 1, 5);
+      prewarmQueueBlobUrls(q, idx + 1, 6);
     },
 
     stopLocalPlayback: () => {
@@ -2504,19 +2532,26 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     loadLikes: async () => {
       try {
-        const data = await apiRequest<{ tracks: Track[] }>('/likes', { timeoutMs: 5000 });
+        const data = await apiRequest<{ tracks: Track[]; version?: string }>('/likes', { timeoutMs: 5000 });
         const tracks = data.tracks || [];
-        const ids = tracks.map((t) => t.id);
+        // Keep any optimistic negative IDs for currently playing instant tracks
+        const pendingNegIds = get().likedTrackIds.filter((id) => id < 0);
+        const ids = Array.from(new Set([...tracks.map((t) => t.id), ...pendingNegIds]));
         set({ likedTrackIds: ids });
         localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(ids));
+        localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(ids));
         localStorage.setItem('jellyfy_cached_liked_tracks', JSON.stringify(tracks));
-        saveOfflinePlaylistData({
+        const likedPl = {
           id: -1,
           name: 'Любимые треки',
           description: 'Ваша медиатека сохраненных композиций',
           created_at: new Date().toISOString(),
           track_count: tracks.length,
-        }, tracks);
+        };
+        saveOfflinePlaylistData(likedPl, tracks, false, data.version);
+        if (useOfflineStore.getState().isDownloaded(-1) && tracks.length > 0) {
+          useOfflineStore.getState().syncPlaylist(-1, tracks, likedPl);
+        }
       } catch (e) {
         const saved = loadSavedLikedIds();
         if (saved && saved.length > 0) {
@@ -2529,8 +2564,41 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const { likedTrackIds } = get();
       const isCurrentlyLiked = likedTrackIds.includes(trackId);
       const targetState = forceState !== undefined ? forceState : !isCurrentlyLiked;
+
+      let targetTrack =
+        trackObj ||
+        (get().currentTrack?.id === trackId ? get().currentTrack : get().queue.find((t) => t.id === trackId));
+
+      // If user likes an Instant-Play track that still has a temporary negative ID,
+      // check if its real downloaded track is already ready; otherwise keep optimistic negative ID
+      // and handleInstantTrackDownloaded will automatically persist & cache it once ready!
+      if (trackId <= 0) {
+        if (
+          downloadedInstantTrack &&
+          downloadedInstantTrack.id > 0 &&
+          targetTrack &&
+          (downloadedInstantTrack.spotify_id === targetTrack.spotify_id ||
+            (downloadedInstantTrack.title.toLowerCase() === targetTrack.title.toLowerCase() &&
+              downloadedInstantTrack.artist.toLowerCase() === targetTrack.artist.toLowerCase()))
+        ) {
+          const cleaned = likedTrackIds.filter((id) => id !== trackId);
+          set({ likedTrackIds: cleaned });
+          return await get().toggleLikeTrack(downloadedInstantTrack.id, downloadedInstantTrack, targetState);
+        }
+
+        const negLiked = targetState
+          ? Array.from(new Set([...likedTrackIds, trackId]))
+          : likedTrackIds.filter((id) => id !== trackId);
+        set({ likedTrackIds: negLiked });
+        try {
+          localStorage.setItem(STORAGE_KEY_LIKED_IDS, JSON.stringify(negLiked));
+          localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(negLiked));
+        } catch (_) {}
+        return targetState;
+      }
+
       const newLiked = targetState
-        ? Array.from(new Set([...likedTrackIds, trackId]))
+        ? Array.from(new Set([...likedTrackIds.filter((id) => id > 0), trackId]))
         : likedTrackIds.filter((id) => id !== trackId);
 
       // 1. Instant Optimistic UI & Local State Update (0 ms)
@@ -2540,11 +2608,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(newLiked));
       } catch (_) {}
 
-      let targetTrack = trackObj || (get().currentTrack?.id === trackId ? get().currentTrack : get().queue.find((t) => t.id === trackId));
-
       // 2. Instant Local Offline Cache Update for Liked Songs
       if (targetState) {
-        if (!targetTrack && shouldTrackBeCachedOffline(trackId, -1, newLiked)) {
+        if (!targetTrack) {
           try {
             const fetched = await apiRequest<{ track: Track }>(`/tracks/${trackId}`, { silentOffline: true });
             if (fetched?.track) {
@@ -2553,14 +2619,39 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           } catch (_) {}
         }
 
-        if (targetTrack) {
+        if (targetTrack && targetTrack.id > 0) {
           addTrackToOfflinePlaylist(-1, targetTrack);
-          if (shouldTrackBeCachedOffline(trackId, -1, newLiked)) {
+          try {
+            const rawCached = localStorage.getItem('jellyfy_cached_liked_tracks');
+            const prevCached: Track[] = rawCached ? JSON.parse(rawCached) : [];
+            const nextCached = [targetTrack, ...prevCached.filter((t) => t.id !== targetTrack!.id)];
+            localStorage.setItem('jellyfy_cached_liked_tracks', JSON.stringify(nextCached));
+          } catch (_) {}
+
+          if (shouldTrackBeCachedOffline(trackId, -1, newLiked) || useOfflineStore.getState().isDownloaded(-1)) {
             useOfflineStore.getState().cacheTrack(targetTrack).catch(() => {});
           }
         }
       } else {
         removeTrackFromOfflinePlaylist(-1, trackId);
+        try {
+          const rawCached = localStorage.getItem('jellyfy_cached_liked_tracks');
+          if (rawCached) {
+            const prevCached: Track[] = JSON.parse(rawCached);
+            localStorage.setItem(
+              'jellyfy_cached_liked_tracks',
+              JSON.stringify(prevCached.filter((t) => t.id !== trackId))
+            );
+          }
+        } catch (_) {}
+      }
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('jellyfy:liked_tracks_changed', {
+            detail: { trackId, track: targetTrack || null, liked: targetState },
+          })
+        );
       }
 
       // 3. Send mutation with Outbox-guaranteed delivery (never fails with timeout error)
@@ -2793,7 +2884,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     handleInstantTrackDownloaded: (spotifyId: string, realTrack: Track) => {
       downloadedInstantTrack = realTrack;
-      const { currentTrack } = get();
+      const { currentTrack, likedTrackIds, queue, originalQueue } = get();
+      const prevTempId = currentTrack?.id;
+      const wasLikedWhilePending = Boolean(
+        (prevTempId && prevTempId < 0 && likedTrackIds.includes(prevTempId)) ||
+          likedTrackIds.includes(realTrack.id)
+      );
+
       if (
         currentTrack &&
         (currentTrack.spotify_id === spotifyId ||
@@ -2801,15 +2898,54 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           (currentTrack.title.toLowerCase() === realTrack.title.toLowerCase() &&
             currentTrack.artist.toLowerCase() === realTrack.artist.toLowerCase()))
       ) {
+        const updatedQueue =
+          queue.length > 1
+            ? queue.map((t) =>
+                t.id === currentTrack.id ||
+                t.spotify_id === spotifyId ||
+                (t.title.toLowerCase() === realTrack.title.toLowerCase() &&
+                  t.artist.toLowerCase() === realTrack.artist.toLowerCase())
+                  ? realTrack
+                  : t
+              )
+            : [realTrack];
+
+        const updatedOrigQueue =
+          originalQueue.length > 1
+            ? originalQueue.map((t) =>
+                t.id === currentTrack.id ||
+                t.spotify_id === spotifyId ||
+                (t.title.toLowerCase() === realTrack.title.toLowerCase() &&
+                  t.artist.toLowerCase() === realTrack.artist.toLowerCase())
+                  ? realTrack
+                  : t
+              )
+            : updatedQueue;
+
         set({
           currentTrack: {
             ...realTrack,
             isPreview: Boolean(currentTrack.isPreview),
           },
           duration: (realTrack.duration_ms || 180000) / 1000,
-          queue: [realTrack],
+          queue: updatedQueue,
+          originalQueue: updatedOrigQueue,
         });
         updateMediaSession(realTrack);
+      }
+
+      // If the user liked this track while it was still downloading on the server (or it's already in likedTrackIds),
+      // persist the real track ID to the server and cache the newly downloaded MP3 for offline playback!
+      if (wasLikedWhilePending && realTrack && realTrack.id > 0) {
+        const cleanedIds = get().likedTrackIds.filter((id) => id > 0 && id !== prevTempId);
+        set({ likedTrackIds: cleanedIds });
+        get().toggleLikeTrack(realTrack.id, realTrack, true).catch(() => {});
+      } else if (
+        realTrack &&
+        realTrack.id > 0 &&
+        shouldTrackBeCachedOffline(realTrack.id, undefined, get().likedTrackIds)
+      ) {
+        useOfflineStore.getState().cacheTrack(realTrack).catch(() => {});
       }
     },
 

@@ -5,7 +5,7 @@ import { useOfflineStore } from '../store/offlineStore';
 import { apiRequest } from '../api/client';
 import { toast, confirmDialog } from '../store/toastStore';
 import { useI18nStore, formatTrackCount } from '../store/i18nStore';
-import { deleteOfflinePlaylist, updateOfflinePlaylistMeta } from '../utils/offline';
+import { deleteOfflinePlaylist, updateOfflinePlaylistMeta, partitionCachedTracks } from '../utils/offline';
 
 interface PlaylistHeaderProps {
   playlist: Playlist;
@@ -174,6 +174,22 @@ export const PlaylistHeader: React.FC<PlaylistHeaderProps> = ({
     const displayPlaylistName = td(playlist.name);
 
     if (isDownloaded) {
+      const { missingTracks } = await partitionCachedTracks(tracks);
+      if (missingTracks.length > 0) {
+        try {
+          await startDownload(playlist.id, tracks, playlist);
+          toast.success(
+            t(
+              `Downloading ${missingTracks.length} new track(s) of "${displayPlaylistName}"`,
+              `Докачиваем новые треки (${missingTracks.length} шт.) плейлиста «${displayPlaylistName}»`
+            )
+          );
+        } catch (e: any) {
+          toast.error(e.message || t('Error saving offline', 'Ошибка сохранения оффлайн'));
+        }
+        return;
+      }
+
       const ok = await confirmDialog({
         title: t('Remove offline tracks?', 'Удалить оффлайн-треки?'),
         message: t(

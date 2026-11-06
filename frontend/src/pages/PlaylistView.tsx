@@ -99,6 +99,9 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
         setActiveJob(data.activeJob || null);
         if (data.playlist && currentTracks.length > 0) {
           saveOfflinePlaylistData(data.playlist, currentTracks, false, data.version);
+          if (useOfflineStore.getState().isDownloaded(Number(playlistId))) {
+            useOfflineStore.getState().syncPlaylist(Number(playlistId), currentTracks, data.playlist);
+          }
         }
         return;
       }
