@@ -2,6 +2,8 @@ import Fastify, { FastifyRequest, FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import jwt from '@fastify/jwt';
+import compress from '@fastify/compress';
+import zlib from 'zlib';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -116,6 +118,19 @@ function resetAuthLimit(ip: string) {
 // Register Plugins
 server.register(cors, { origin: true });
 server.register(jwt, { secret: JWT_SECRET });
+server.register(compress, {
+  global: true,
+  threshold: 1024,
+  encodings: ['br', 'gzip', 'deflate'],
+  brotliOptions: {
+    params: {
+      [zlib.constants.BROTLI_PARAM_QUALITY]: 4, // Fast dynamic compression (~1-2ms), beats gzip ratio by 15%
+    },
+  },
+  zlibOptions: {
+    level: 6,
+  },
+});
 
 // Handle empty JSON bodies gracefully without throwing 400
 server.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
@@ -507,7 +522,7 @@ server.post('/api/user/library/restore', { preHandler: [(server as any).authenti
 
 // ----------------- AUDIO STREAMING (High-Performance WAN Stream & Caching) -----------------
 // Dedicated lightweight HEAD route: instant 0ms validation for PWA ETag / Content-Length
-server.head('/api/stream/:trackId', async (req: any, reply: any) => {
+server.head('/api/stream/:trackId', { config: { compress: false } }, async (req: any, reply: any) => {
   const trackId = parseInt(req.params.trackId, 10) || req.params.trackId;
   const track: any = db.prepare('SELECT file_path FROM tracks WHERE id = ?').get(trackId);
   if (!track || !track.file_path) {
@@ -559,7 +574,7 @@ server.head('/api/stream/:trackId', async (req: any, reply: any) => {
   }
 });
 
-server.get('/api/stream/:trackId', async (req: any, reply: any) => {
+server.get('/api/stream/:trackId', { config: { compress: false } }, async (req: any, reply: any) => {
   // Optimize TCP socket for real-time low-latency audio transmission over WAN
   if (req.raw.socket) {
     try {
@@ -901,7 +916,7 @@ server.put('/api/playlists/:id/cover', { preHandler: [(server as any).authentica
   return { success: true, cover_url: finalUrl };
 });
 
-server.get('/api/playlists/:id/cover', async (req: any, reply: any) => {
+server.get('/api/playlists/:id/cover', { config: { compress: false } }, async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
   const coversDir = path.join(process.cwd(), 'data', 'covers');
   const filePath = path.join(coversDir, `playlist_${playlistId}.jpg`);
