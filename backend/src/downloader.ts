@@ -91,6 +91,34 @@ async function runWithSingleDownloadSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+interface BlacklistCacheEntry {
+  rows: any[];
+  cachedAt: number;
+}
+const userBlacklistMemoryCache = new Map<number, BlacklistCacheEntry>();
+const BLACKLIST_CACHE_TTL_MS = 30000; // 30 seconds in-memory TTL to eliminate N+1 queries
+
+export function invalidateUserBlacklistCache(userId?: number) {
+  if (userId !== undefined) {
+    userBlacklistMemoryCache.delete(userId);
+  } else {
+    userBlacklistMemoryCache.clear();
+  }
+}
+
+function getUserBlacklistRows(userId: number): any[] {
+  const now = Date.now();
+  const cached = userBlacklistMemoryCache.get(userId);
+  if (cached && (now - cached.cachedAt) < BLACKLIST_CACHE_TTL_MS) {
+    return cached.rows;
+  }
+  const rows: any[] = db.prepare(`
+    SELECT title, artist, spotify_id FROM blacklist WHERE user_id = ?
+  `).all(userId);
+  userBlacklistMemoryCache.set(userId, { rows, cachedAt: now });
+  return rows;
+}
+
 export function isTrackBlacklistedForUser(
   userId: number,
   title: string,
@@ -112,9 +140,7 @@ export function isTrackBlacklistedForUser(
 
     const cTitle = cleanTitle(lTitle);
 
-    const rows: any[] = db.prepare(`
-      SELECT title, artist, spotify_id FROM blacklist WHERE user_id = ?
-    `).all(userId);
+    const rows = getUserBlacklistRows(userId);
 
     return rows.some((b) => {
       if (spotifyId && b.spotify_id && b.spotify_id === spotifyId) return true;
@@ -156,9 +182,7 @@ export function filterBlacklistedTracksForUser<T extends { title: string; artist
 ): T[] {
   if (!userId || !tracks || tracks.length === 0) return tracks;
   try {
-    const rows: any[] = db.prepare(`
-      SELECT title, artist, spotify_id FROM blacklist WHERE user_id = ?
-    `).all(userId);
+    const rows = getUserBlacklistRows(userId);
     if (!rows || rows.length === 0) return tracks;
 
     const cleanTitle = (s: string) =>

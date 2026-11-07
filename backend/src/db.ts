@@ -17,6 +17,9 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 10000');
 db.pragma('synchronous = NORMAL');
+db.pragma('cache_size = -64000'); // 64 MB page cache in RAM (vs default ~2 MB)
+db.pragma('mmap_size = 268435456'); // 256 MB Memory-Mapped I/O for direct kernel zero-copy page reads
+db.pragma('temp_store = MEMORY'); // Keep temporary tables and index sorts in RAM
 
 // Initialize tables
 db.exec(`
@@ -219,30 +222,35 @@ try {
     HAVING COUNT(*) > 1
   `).all() as any[];
 
-  for (const dup of duplicates) {
-    const keepId = dup.keep_id;
-    const allIds = String(dup.all_ids).split(',').map(Number);
-    const removeIds = allIds.filter((id: number) => id !== keepId);
+  if (duplicates && duplicates.length > 0) {
+    const deduplicateTx = db.transaction(() => {
+      for (const dup of duplicates) {
+        const keepId = dup.keep_id;
+        const allIds = String(dup.all_ids).split(',').map(Number);
+        const removeIds = allIds.filter((id: number) => id !== keepId);
 
-    for (const removeId of removeIds) {
-      db.prepare(`
-        UPDATE OR IGNORE playlist_tracks
-        SET track_id = ?
-        WHERE track_id = ?
-      `).run(keepId, removeId);
+        for (const removeId of removeIds) {
+          db.prepare(`
+            UPDATE OR IGNORE playlist_tracks
+            SET track_id = ?
+            WHERE track_id = ?
+          `).run(keepId, removeId);
 
-      db.prepare('DELETE FROM playlist_tracks WHERE track_id = ?').run(removeId);
+          db.prepare('DELETE FROM playlist_tracks WHERE track_id = ?').run(removeId);
 
-      db.prepare(`
-        UPDATE OR IGNORE liked_tracks
-        SET track_id = ?
-        WHERE track_id = ?
-      `).run(keepId, removeId);
+          db.prepare(`
+            UPDATE OR IGNORE liked_tracks
+            SET track_id = ?
+            WHERE track_id = ?
+          `).run(keepId, removeId);
 
-      db.prepare('DELETE FROM liked_tracks WHERE track_id = ?').run(removeId);
+          db.prepare('DELETE FROM liked_tracks WHERE track_id = ?').run(removeId);
 
-      db.prepare('DELETE FROM tracks WHERE id = ?').run(removeId);
-    }
+          db.prepare('DELETE FROM tracks WHERE id = ?').run(removeId);
+        }
+      }
+    });
+    deduplicateTx();
   }
 } catch (e: any) {
   console.warn('[DB Deduplication routine]:', e.message);
@@ -267,6 +275,26 @@ try {
 try {
   db.exec('ALTER TABLE tracks ADD COLUMN bitrate INTEGER DEFAULT NULL;');
 } catch (_) {}
+
+// High-performance query & search indexes
+try {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_tracks_spotify_id ON tracks(spotify_id);
+    CREATE INDEX IF NOT EXISTS idx_tracks_lower_title_artist ON tracks(LOWER(title), LOWER(artist));
+    CREATE INDEX IF NOT EXISTS idx_tracks_file_path ON tracks(file_path);
+    CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track_id ON playlist_tracks(track_id);
+    CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_pos ON playlist_tracks(playlist_id, position);
+    CREATE INDEX IF NOT EXISTS idx_liked_tracks_user_created ON liked_tracks(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_liked_tracks_track_id ON liked_tracks(track_id);
+    CREATE INDEX IF NOT EXISTS idx_playlists_user_daily ON playlists(user_id, is_daily_mix);
+    CREATE INDEX IF NOT EXISTS idx_blacklist_user_id ON blacklist(user_id);
+    CREATE INDEX IF NOT EXISTS idx_blacklist_user_spotify ON blacklist(user_id, spotify_id);
+    CREATE INDEX IF NOT EXISTS idx_download_jobs_user_status ON download_jobs(user_id, status);
+    CREATE INDEX IF NOT EXISTS idx_download_jobs_playlist_id ON download_jobs(playlist_id);
+  `);
+} catch (e: any) {
+  console.warn('[DB Index Migration Warning]:', e.message);
+}
 
 
 

@@ -37,7 +37,8 @@ import {
   cancelBlacklistedDownloads,
   isTrackBlacklistedForUser,
   filterBlacklistedTracksForUser,
-  redownloadTrackStudioMaster
+  redownloadTrackStudioMaster,
+  invalidateUserBlacklistCache
 } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
@@ -505,6 +506,59 @@ server.post('/api/user/library/restore', { preHandler: [(server as any).authenti
 });
 
 // ----------------- AUDIO STREAMING (High-Performance WAN Stream & Caching) -----------------
+// Dedicated lightweight HEAD route: instant 0ms validation for PWA ETag / Content-Length
+server.head('/api/stream/:trackId', async (req: any, reply: any) => {
+  const trackId = parseInt(req.params.trackId, 10) || req.params.trackId;
+  const track: any = db.prepare('SELECT file_path FROM tracks WHERE id = ?').get(trackId);
+  if (!track || !track.file_path) {
+    return reply.status(404).send();
+  }
+
+  const filePath = track.file_path;
+  const resolvedPath = path.resolve(filePath);
+  const resolvedMusicDir = path.resolve(MUSIC_DIR);
+  if (!resolvedPath.startsWith(resolvedMusicDir + path.sep) && resolvedPath !== resolvedMusicDir) {
+    return reply.status(403).send();
+  }
+
+  try {
+    const stat = await fs.promises.stat(filePath);
+    const total = stat.size;
+    const ext = path.extname(filePath).toLowerCase();
+    let contentType = 'audio/mpeg';
+    if (ext === '.m4a' || ext === '.aac') contentType = 'audio/mp4';
+    else if (ext === '.ogg' || ext === '.opus') contentType = 'audio/ogg';
+    else if (ext === '.flac') contentType = 'audio/flac';
+
+    const etag = `W/"track-${trackId}-${stat.mtimeMs}-${total}"`;
+    const lastModified = stat.mtime.toUTCString();
+
+    const clientEtag = (req.headers['if-none-match'] || '').replace(/^W\//, '').replace(/^"|"$/g, '').trim();
+    const cleanEtag = `track-${trackId}-${stat.mtimeMs}-${total}`;
+
+    if (clientEtag && (clientEtag === cleanEtag || clientEtag === '*')) {
+      return reply.status(304).send();
+    }
+
+    reply.status(200).headers({
+      'Content-Type': contentType,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': total,
+      'ETag': etag,
+      'Last-Modified': lastModified,
+      'Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800',
+      'Connection': 'keep-alive',
+      'Timing-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Range, Content-Range, Accept-Ranges, Cache-Control',
+      'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges, ETag, Cache-Control',
+    });
+    return reply.send();
+  } catch (_) {
+    return reply.status(404).send();
+  }
+});
+
 server.get('/api/stream/:trackId', async (req: any, reply: any) => {
   // Optimize TCP socket for real-time low-latency audio transmission over WAN
   if (req.raw.socket) {
@@ -516,7 +570,7 @@ server.get('/api/stream/:trackId', async (req: any, reply: any) => {
 
   const trackId = parseInt(req.params.trackId, 10) || req.params.trackId;
   const track: any = db.prepare('SELECT file_path FROM tracks WHERE id = ?').get(trackId);
-  if (!track || !fs.existsSync(track.file_path)) {
+  if (!track || !track.file_path) {
     return reply.status(404).send({ error: 'Аудиофайл не найден' });
   }
 
@@ -526,7 +580,13 @@ server.get('/api/stream/:trackId', async (req: any, reply: any) => {
   if (!resolvedPath.startsWith(resolvedMusicDir + path.sep) && resolvedPath !== resolvedMusicDir) {
     return reply.status(403).send({ error: 'Доступ запрещен: путь к файлу недопустим' });
   }
-  const stat = fs.statSync(filePath);
+
+  let stat: fs.Stats;
+  try {
+    stat = await fs.promises.stat(filePath);
+  } catch (_) {
+    return reply.status(404).send({ error: 'Аудиофайл не найден' });
+  }
   const total = stat.size;
   const range = req.headers.range;
 
@@ -539,15 +599,18 @@ server.get('/api/stream/:trackId', async (req: any, reply: any) => {
   const etag = `W/"track-${trackId}-${stat.mtimeMs}-${total}"`;
   const lastModified = stat.mtime.toUTCString();
 
+  const clientEtag = (req.headers['if-none-match'] || '').replace(/^W\//, '').replace(/^"|"$/g, '').trim();
+  const cleanEtag = `track-${trackId}-${stat.mtimeMs}-${total}`;
+
   // ETag conditional check (instant 304 response)
-  if (req.headers['if-none-match'] === etag) {
+  if (clientEtag && (clientEtag === cleanEtag || clientEtag === '*')) {
     return reply.status(304).send();
   }
 
   const baseHeaders = {
     'Content-Type': contentType,
     'Accept-Ranges': 'bytes',
-    'Cache-Control': 'no-store, no-cache, must-revalidate',
+    'Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800',
     'ETag': etag,
     'Last-Modified': lastModified,
     'Connection': 'keep-alive',
@@ -842,9 +905,22 @@ server.get('/api/playlists/:id/cover', async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
   const coversDir = path.join(process.cwd(), 'data', 'covers');
   const filePath = path.join(coversDir, `playlist_${playlistId}.jpg`);
-  if (fs.existsSync(filePath)) {
-    reply.type('image/jpeg').header('Cache-Control', 'public, max-age=86400').send(fs.readFileSync(filePath));
-  } else {
+  try {
+    const stat = await fs.promises.stat(filePath);
+    const etag = `W/"cover-${playlistId}-${stat.mtimeMs}"`;
+    const clientEtag = (req.headers['if-none-match'] || '').replace(/^W\//, '').replace(/^"|"$/g, '').trim();
+    const cleanEtag = `cover-${playlistId}-${stat.mtimeMs}`;
+    if (clientEtag && (clientEtag === cleanEtag || clientEtag === '*')) {
+      return reply.status(304).send();
+    }
+    reply.type('image/jpeg').headers({
+      'Cache-Control': 'public, max-age=86400',
+      'ETag': etag,
+      'Last-Modified': stat.mtime.toUTCString(),
+      'Content-Length': stat.size
+    });
+    return reply.send(fs.createReadStream(filePath));
+  } catch (_) {
     reply.status(404).send('Cover not found');
   }
 });
@@ -1842,11 +1918,13 @@ server.post('/api/blacklist', { preHandler: [(server as any).authenticate] }, as
     } catch (_) {}
   }
 
+  invalidateUserBlacklistCache(req.user.id);
   return { success: true, removedCount: targetTrackIds.length };
 });
 
 server.delete('/api/blacklist/:id', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   db.prepare('DELETE FROM blacklist WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  invalidateUserBlacklistCache(req.user.id);
   return { success: true };
 });
 
@@ -1887,20 +1965,28 @@ server.post('/api/settings', { preHandler: [(server as any).authenticate] }, asy
   return { success: true };
 });
 
-// SPA Fallback for React PWA routing
-server.setNotFoundHandler((req, reply) => {
+// SPA Fallback for React PWA routing with in-memory RAM caching
+let cachedIndexHtml: Buffer | null = null;
+let cachedIndexMtime = 0;
+
+server.setNotFoundHandler(async (req, reply) => {
   if (req.raw.url && req.raw.url.startsWith('/api')) {
     return reply.status(404).send({ error: 'Endpoint not found' });
   }
   const indexPath = path.join(publicDir, 'index.html');
-  if (fs.existsSync(indexPath)) {
+  try {
+    const stat = await fs.promises.stat(indexPath);
+    if (!cachedIndexHtml || cachedIndexMtime !== stat.mtimeMs) {
+      cachedIndexHtml = await fs.promises.readFile(indexPath);
+      cachedIndexMtime = stat.mtimeMs;
+    }
     reply
       .header('Cache-Control', 'no-cache, no-store, must-revalidate')
       .header('Pragma', 'no-cache')
       .header('Expires', '0')
       .type('text/html')
-      .send(fs.readFileSync(indexPath));
-  } else {
+      .send(cachedIndexHtml);
+  } catch (_) {
     reply.status(404).send('Not Found');
   }
 });
