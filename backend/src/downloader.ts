@@ -441,6 +441,9 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
   if (!filePath || !fs.existsSync(filePath)) {
     return { valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: 'FILE_NOT_FOUND' };
   }
+  if (!isPathInsideMusicDir(filePath)) {
+    return { valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: 'PATH_OUTSIDE_MUSIC_DIR' };
+  }
   try {
     const stat = fs.statSync(filePath);
     if (stat.size < 100000) {
@@ -468,6 +471,7 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
       '-show_entries', 'stream=codec_name,sample_rate,bit_rate',
       '-show_format',
       '-of', 'json',
+      '--',
       filePath
     ], { detached: true });
 
@@ -1219,23 +1223,23 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
   // Resolve real individual track details (cover + real album) from Spotify / Deezer
   const details = await resolveSpotifyTrackDetails(track.id);
   if (details.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
-    track.cover_url = details.cover_url;
+    track.cover_url = String(details.cover_url).slice(0, 2048);
   }
   if (details.album) {
-    track.album = details.album;
+    track.album = String(details.album).slice(0, 200);
   }
   if (details.artist && (!track.artist || track.artist === 'Unknown Artist')) {
-    track.artist = details.artist;
+    track.artist = String(details.artist).slice(0, 200);
   }
 
   if (!track.cover_url || !track.album) {
     try {
       const dz = await resolveDeezerTrackInfo(track.artist, track.title);
       if (dz.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
-        track.cover_url = dz.cover_url;
+        track.cover_url = String(dz.cover_url).slice(0, 2048);
       }
       if (dz.album && !track.album) {
-        track.album = dz.album;
+        track.album = String(dz.album).slice(0, 200);
       }
       if (dz.duration && (!track.duration_ms || track.duration_ms <= 0)) {
         track.duration_ms = dz.duration * 1000;
@@ -1251,10 +1255,10 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
   if (existing && existing.file_path && fs.existsSync(existing.file_path)) {
     // If existing track had missing or playlist fallback album/cover, update it
     if (details.album && (!existing.album || existing.album === 'Любимые треки' || existing.album === '-')) {
-      db.prepare('UPDATE tracks SET album = ? WHERE id = ?').run(details.album, existing.id);
+      db.prepare('UPDATE tracks SET album = ? WHERE id = ?').run(String(details.album).slice(0, 200), existing.id);
     }
     if (details.cover_url && (!existing.cover_url || existing.cover_url.includes('mosaic.scdn.co'))) {
-      db.prepare('UPDATE tracks SET cover_url = ? WHERE id = ?').run(details.cover_url, existing.id);
+      db.prepare('UPDATE tracks SET cover_url = ? WHERE id = ?').run(String(details.cover_url).slice(0, 2048), existing.id);
     }
 
     // Opportunistically queue quality upgrade in background if legacy .m4a or low bitrate
@@ -1468,13 +1472,13 @@ async function downloadSingleSpotifyTrackDirectInternal(
     if (track.id) {
       const details = await resolveSpotifyTrackDetails(track.id);
       if (details.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
-        track.cover_url = details.cover_url;
+        track.cover_url = String(details.cover_url).slice(0, 2048);
       }
       if (details.album) {
-        track.album = details.album;
+        track.album = String(details.album).slice(0, 200);
       }
       if (details.artist && (!track.artist || track.artist === 'Unknown Artist')) {
-        track.artist = details.artist;
+        track.artist = String(details.artist).slice(0, 200);
       }
     }
 
@@ -1482,10 +1486,10 @@ async function downloadSingleSpotifyTrackDirectInternal(
       try {
         const dz = await resolveDeezerTrackInfo(track.artist, track.title);
         if (dz.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
-          track.cover_url = dz.cover_url;
+          track.cover_url = String(dz.cover_url).slice(0, 2048);
         }
         if (dz.album && !track.album) {
-          track.album = dz.album;
+          track.album = String(dz.album).slice(0, 200);
         }
         if (dz.duration && (!track.duration_ms || track.duration_ms <= 0)) {
           track.duration_ms = dz.duration * 1000;
@@ -1509,7 +1513,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
       }
       if (!playlistId) return;
       if (userId) {
-        const ownsPlaylist = db.prepare('SELECT 1 FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, userId);
+        const ownsPlaylist = db.prepare('SELECT 1 FROM playlists WHERE id = ? AND user_id = ? AND COALESCE(is_daily_mix, 0) = 0').get(playlistId, userId);
         if (!ownsPlaylist) return;
       }
       const inPl: any = db.prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').get(playlistId, trackRecord.id);

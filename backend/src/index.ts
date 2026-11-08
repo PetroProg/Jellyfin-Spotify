@@ -715,6 +715,8 @@ server.post('/api/user/library/restore', { preHandler: [(server as any).authenti
         if (!pl || !pl.name) continue;
         const name = String(pl.name).trim().slice(0, 100);
         if (!name) continue;
+        const lName = name.toLowerCase();
+        if (lName === 'любимые треки' || lName === 'liked songs') continue;
         const description = pl.description ? String(pl.description).trim().slice(0, 500) : '';
 
         let safeCoverUrl: string | null = null;
@@ -732,8 +734,8 @@ server.post('/api/user/library/restore', { preHandler: [(server as any).authenti
           description,
           safeCoverUrl,
           spotifyId,
-          pl.is_daily_mix ? 1 : 0,
-          pl.daily_mix_date ? String(pl.daily_mix_date).slice(0, 32) : null
+          0,
+          null
         );
         const newPlaylistId = Number(info.lastInsertRowid);
         restoredPlaylists++;
@@ -1002,6 +1004,11 @@ server.post('/api/daily-mixes/refresh', { preHandler: [(server as any).authentic
 });
 
 server.post('/api/daily-mixes/:id/save', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('save_dm:' + req.user.id, 5, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на сохранение микса. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const mixId = Number(req.params.id);
   if (!mixId || !Number.isInteger(mixId) || mixId <= 0) {
     return reply.status(400).send({ error: 'Некорректный ID микса' });
@@ -1053,6 +1060,14 @@ server.post('/api/playlists', { preHandler: [(server as any).authenticate] }, as
   if (!name || typeof name !== 'string' || !name.trim()) return reply.status(400).send({ error: 'Название обязательно' });
 
   const cleanName = name.trim().slice(0, 100);
+  const lName = cleanName.toLowerCase();
+  if (lName === 'любимые треки' || lName === 'liked songs') {
+    return reply.status(400).send({ error: 'Имя «Любимые треки» зарезервировано для системного раздела' });
+  }
+  if (lName.includes('daily mix') || lName.includes('микс дня') || lName.includes('ежедневный микс')) {
+    return reply.status(400).send({ error: 'Имя содержит зарезервированное обозначение Daily Mix' });
+  }
+
   const cleanDesc = description ? String(description).trim().slice(0, 500) : '';
   const existing = db.prepare('SELECT id FROM playlists WHERE user_id = ? AND COALESCE(is_daily_mix, 0) = 0 AND LOWER(name) = LOWER(?)').get(req.user.id, cleanName);
   if (existing) {
@@ -1060,8 +1075,8 @@ server.post('/api/playlists', { preHandler: [(server as any).authenticate] }, as
   }
 
   const info = db.prepare(`
-    INSERT INTO playlists (user_id, name, description)
-    VALUES (?, ?, ?)
+    INSERT INTO playlists (user_id, name, description, is_daily_mix)
+    VALUES (?, ?, ?, 0)
   `).run(req.user.id, cleanName, cleanDesc);
 
   return { id: info.lastInsertRowid, name: cleanName, description: cleanDesc };
@@ -1410,38 +1425,43 @@ server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] 
   const body = req.body || {};
   const { url } = body;
   if (!url || typeof url !== 'string') return reply.status(400).send({ error: 'Укажите ссылку на плейлист, альбом или трек Spotify' });
+  const safeUrl = url.trim().slice(0, 2048);
 
   try {
-    const playlistData = await fetchSpotifyPlaylist(url, req.user.id);
+    const playlistData = await fetchSpotifyPlaylist(safeUrl, req.user.id);
     if (!playlistData.tracks || playlistData.tracks.length === 0) {
       return reply.status(400).send({ error: 'Не удалось извлечь треки по указанной ссылке Spotify' });
     }
 
-    const resolvedEntity = await resolveSpotifyEntityInput(url);
-    const cleanSpotifyId = resolvedEntity?.id || extractPlaylistId(url);
+    const safeName = String(playlistData.name || 'Spotify Playlist').trim().slice(0, 100);
+    const safeDesc = String(playlistData.description || 'Импортировано из Spotify').trim().slice(0, 500);
+    const safeCoverUrl = playlistData.cover_url ? String(playlistData.cover_url).slice(0, 2048) : '';
+
+    const resolvedEntity = await resolveSpotifyEntityInput(safeUrl);
+    const cleanSpotifyId = resolvedEntity?.id || extractPlaylistId(safeUrl);
 
     // Check if user already has this playlist imported (by Spotify ID or matching title)
     let existingPlaylist: any = null;
     if (cleanSpotifyId) {
       existingPlaylist = db.prepare(`
         SELECT * FROM playlists 
-        WHERE user_id = ? AND spotify_id LIKE ?
+        WHERE user_id = ? AND spotify_id LIKE ? AND COALESCE(is_daily_mix, 0) = 0
         ORDER BY id ASC LIMIT 1
       `).get(req.user.id, `%${cleanSpotifyId}%`);
     }
 
-    if (!existingPlaylist && playlistData.name) {
+    if (!existingPlaylist && safeName) {
       existingPlaylist = db.prepare(`
         SELECT * FROM playlists 
-        WHERE user_id = ? AND LOWER(name) = LOWER(?)
+        WHERE user_id = ? AND LOWER(name) = LOWER(?) AND COALESCE(is_daily_mix, 0) = 0
         ORDER BY id ASC LIMIT 1
-      `).get(req.user.id, playlistData.name);
+      `).get(req.user.id, safeName);
     }
 
     if (existingPlaylist) {
       const playlistId = existingPlaylist.id;
-      if (playlistData.cover_url && (!existingPlaylist.cover_url || existingPlaylist.cover_url.includes('mosaic.scdn.co'))) {
-        db.prepare('UPDATE playlists SET cover_url = ? WHERE id = ?').run(playlistData.cover_url, playlistId);
+      if (safeCoverUrl && (!existingPlaylist.cover_url || existingPlaylist.cover_url.includes('mosaic.scdn.co'))) {
+        db.prepare('UPDATE playlists SET cover_url = ? WHERE id = ?').run(safeCoverUrl, playlistId);
       }
 
       // Existing tracks linked to this playlist
@@ -1497,14 +1517,14 @@ server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] 
 
     // Create new playlist in DB
     const pInfo = db.prepare(`
-      INSERT INTO playlists (user_id, name, description, cover_url, spotify_id)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO playlists (user_id, name, description, cover_url, spotify_id, is_daily_mix)
+      VALUES (?, ?, ?, ?, ?, 0)
     `).run(
       req.user.id,
-      playlistData.name,
-      playlistData.description || 'Импортировано из Spotify',
-      playlistData.cover_url || '',
-      url
+      safeName,
+      safeDesc,
+      safeCoverUrl,
+      safeUrl
     );
 
     const playlistId = Number(pInfo.lastInsertRowid);
@@ -1514,7 +1534,7 @@ server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] 
     db.prepare(`
       INSERT INTO download_jobs (id, user_id, playlist_id, playlist_name, total_tracks, downloaded_tracks, status)
       VALUES (?, ?, ?, ?, ?, 0, 'downloading')
-    `).run(jobId, req.user.id, playlistId, playlistData.name, playlistData.tracks.length);
+    `).run(jobId, req.user.id, playlistId, safeName, playlistData.tracks.length);
 
     // Enqueue background throttled download
     enqueuePlaylistDownload(jobId, req.user.id, playlistId, playlistData.tracks);
@@ -1523,7 +1543,7 @@ server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] 
       success: true,
       jobId,
       playlistId,
-      playlistName: playlistData.name,
+      playlistName: safeName,
       totalTracks: playlistData.tracks.length
     };
   } catch (err: any) {
@@ -1900,14 +1920,26 @@ server.post('/api/spotify/import-list', { preHandler: [(server as any).authentic
       tracks.every((t) => t.album === tracks[0].album)
         ? tracks[0].album
         : '';
-    let finalPlaylistName = playlistName ? playlistName.trim() : (sharedAlbumName || 'Импортированный список');
+    const safePlaylistName = typeof playlistName === 'string' ? playlistName.trim().slice(0, 100) : '';
+    let finalPlaylistName = safePlaylistName || (sharedAlbumName ? sharedAlbumName.trim().slice(0, 100) : 'Импортированный список');
+
+    const lFinal = finalPlaylistName.toLowerCase();
+    if (lFinal === 'любимые треки' || lFinal === 'liked songs') {
+      return reply.status(400).send({ error: 'Имя «Любимые треки» зарезервировано для системного раздела' });
+    }
+    if (lFinal.includes('daily mix') || lFinal.includes('микс дня') || lFinal.includes('ежедневный микс')) {
+      return reply.status(400).send({ error: 'Имя содержит зарезервированное обозначение Daily Mix' });
+    }
 
     if (targetPlaylistId) {
-      const pl: any = db.prepare('SELECT id, name, cover_url FROM playlists WHERE id = ? AND user_id = ?').get(targetPlaylistId, req.user.id);
+      const pl: any = db.prepare('SELECT id, name, cover_url, is_daily_mix FROM playlists WHERE id = ? AND user_id = ?').get(targetPlaylistId, req.user.id);
       if (pl) {
+        if (pl.is_daily_mix) {
+          return reply.status(400).send({ error: 'Нельзя добавлять треки в ежедневный микс' });
+        }
         finalPlaylistName = pl.name;
         if (!pl.cover_url && tracks[0]?.cover_url) {
-          db.prepare('UPDATE playlists SET cover_url = ? WHERE id = ?').run(tracks[0].cover_url, targetPlaylistId);
+          db.prepare('UPDATE playlists SET cover_url = ? WHERE id = ?').run(String(tracks[0].cover_url).slice(0, 2048), targetPlaylistId);
         }
       } else {
         targetPlaylistId = null;
@@ -1915,17 +1947,18 @@ server.post('/api/spotify/import-list', { preHandler: [(server as any).authentic
     }
 
     if (!targetPlaylistId) {
-      const existing: any = db.prepare('SELECT id, cover_url FROM playlists WHERE user_id = ? AND LOWER(name) = LOWER(?)').get(req.user.id, finalPlaylistName);
+      const existing: any = db.prepare('SELECT id, cover_url FROM playlists WHERE user_id = ? AND COALESCE(is_daily_mix, 0) = 0 AND LOWER(name) = LOWER(?)').get(req.user.id, finalPlaylistName);
       if (existing) {
         targetPlaylistId = existing.id;
         if (!existing.cover_url && tracks[0]?.cover_url) {
-          db.prepare('UPDATE playlists SET cover_url = ? WHERE id = ?').run(tracks[0].cover_url, targetPlaylistId);
+          db.prepare('UPDATE playlists SET cover_url = ? WHERE id = ?').run(String(tracks[0].cover_url).slice(0, 2048), targetPlaylistId);
         }
       } else {
+        const safeCover = tracks[0]?.cover_url ? String(tracks[0].cover_url).slice(0, 2048) : '';
         const pInfo = db.prepare(`
-          INSERT INTO playlists (user_id, name, description, cover_url)
-          VALUES (?, ?, 'Импортировано из списка треков', ?)
-        `).run(req.user.id, finalPlaylistName, tracks[0]?.cover_url || '');
+          INSERT INTO playlists (user_id, name, description, cover_url, is_daily_mix)
+          VALUES (?, ?, 'Импортировано из списка треков', ?, 0)
+        `).run(req.user.id, finalPlaylistName, safeCover);
         targetPlaylistId = Number(pInfo.lastInsertRowid);
       }
     }
@@ -2015,6 +2048,11 @@ function batchMatchLocalTracks(tracks: any[]): Map<string, any> {
 }
 
 server.get('/api/search', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('search:' + req.user.id, 30, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много поисковых запросов. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const query = (req.query.q || '').trim().slice(0, 200);
   if (!query) {
     return { localTracks: [], spotifyTracks: [] };
@@ -2055,16 +2093,19 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
   }
 
   // 1. Search Local Database (up to 5 tracks, deduplicated by title & artist)
+  const escapedQuery = query.replace(/[%_\\]/g, '\\$&');
   const localTracks = db.prepare(`
     SELECT id, title, artist, album, duration_ms, cover_url, spotify_id FROM tracks
-    WHERE LOWER(title) LIKE LOWER(?) OR LOWER(artist) LIKE LOWER(?) OR LOWER(album) LIKE LOWER(?)
+    WHERE LOWER(title) LIKE LOWER(?) ESCAPE '\\' 
+       OR LOWER(artist) LIKE LOWER(?) ESCAPE '\\' 
+       OR LOWER(album) LIKE LOWER(?) ESCAPE '\\'
     GROUP BY LOWER(title), LOWER(artist)
     ORDER BY
       CASE WHEN LOWER(title) = LOWER(?) THEN 1
-           WHEN LOWER(title) LIKE LOWER(?) THEN 2
+           WHEN LOWER(title) LIKE LOWER(?) ESCAPE '\\' THEN 2
            ELSE 3 END
     LIMIT 5
-  `).all(`%${query}%`, `%${query}%`, `%${query}%`, query, `${query}%`);
+  `).all(`%${escapedQuery}%`, `%${escapedQuery}%`, `%${escapedQuery}%`, query, `${escapedQuery}%`);
 
   // 2. Search External Music APIs (Spotify OAuth / Deezer / iTunes, up to 8 tracks)
   let spotifyRaw: any[] = [];
@@ -2453,7 +2494,12 @@ server.delete('/api/blacklist/:id', { preHandler: [(server as any).authenticate]
 });
 
 // ----------------- RECOMMENDATIONS & SMART SHUFFLE -----------------
-server.get('/api/recommendations', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+server.get('/api/recommendations', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('recs:' + req.user.id, 20, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов рекомендаций. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const artistsQuery = req.query.artists
     ? String(req.query.artists)
         .split(',')

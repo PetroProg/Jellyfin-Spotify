@@ -356,6 +356,9 @@ export async function resolveSpotifyEntityInput(input: string): Promise<ParsedSp
       // Manual redirect follow loop with domain whitelist (SSRF & loop prevention)
       for (let hop = 0; hop < 3; hop++) {
         const urlObj = new URL(currentUrl);
+        if (urlObj.protocol !== 'http:' && urlObj.protocol !== 'https:') {
+          return null;
+        }
         if (!isAllowedSpotifyHost(urlObj.hostname)) {
           return null;
         }
@@ -373,11 +376,14 @@ export async function resolveSpotifyEntityInput(input: string): Promise<ParsedSp
         if (res.status >= 300 && res.status < 400) {
           const loc = res.headers.get('location');
           if (!loc) break;
-          const nextUrl = new URL(loc, currentUrl).toString();
-          const nextHost = new URL(nextUrl).hostname;
-          if (!isAllowedSpotifyHost(nextHost)) {
+          const nextUrlObj = new URL(loc, currentUrl);
+          if (nextUrlObj.protocol !== 'http:' && nextUrlObj.protocol !== 'https:') {
             return null;
           }
+          if (!isAllowedSpotifyHost(nextUrlObj.hostname)) {
+            return null;
+          }
+          const nextUrl = nextUrlObj.toString();
           const resolved = parseSpotifyEntityUrl(nextUrl);
           if (resolved) return resolved;
           currentUrl = nextUrl;
@@ -934,6 +940,11 @@ export async function resolveSpotifyTrackDetails(trackId: string): Promise<Spoti
         result.album = data.album?.name;
         result.artist = data.artists?.map((a: any) => a.name).join(', ');
         result.duration_ms = data.duration_ms;
+        pruneTrackDetailsCache();
+        spotifyTrackDetailsCache.set(trackId, {
+          data: { ...result },
+          expires: Date.now() + TRACK_DETAILS_CACHE_TTL_MS
+        });
         return result;
       }
     }
@@ -960,6 +971,11 @@ export async function resolveSpotifyTrackDetails(trackId: string): Promise<Spoti
           result.duration_ms = entity.duration;
           result.cover_url = extractEntityCoverUrl(entity);
           if (result.title && result.artist) {
+            pruneTrackDetailsCache();
+            spotifyTrackDetailsCache.set(trackId, {
+              data: { ...result },
+              expires: Date.now() + TRACK_DETAILS_CACHE_TTL_MS
+            });
             return result;
           }
         }
@@ -1413,10 +1429,21 @@ export async function parseTrackListText(text: string, userId?: number): Promise
   const token = (userId ? await getUserSpotifyToken(userId) : null) || await getAccessToken();
   let complexEntitiesCount = 0;
   let resolvedSingleTrackCount = 0;
+  let resolvedShortLinksCount = 0;
   const MAX_SINGLE_TRACK_RESOLVES = 40;
+  const MAX_SHORT_LINK_RESOLVES = 15;
 
   for (const line of lines) {
     if (rawTracks.length >= 500) break;
+
+    const isShortLink = /https?:\/\/(?:spotify\.link|spoti\.fi|spotify\.app\.link)\/[^\s"'<>]+/i.test(line);
+    if (isShortLink) {
+      if (resolvedShortLinksCount >= MAX_SHORT_LINK_RESOLVES) {
+        console.warn(`[parseTrackListText] Skipping short link resolve limit reached (${MAX_SHORT_LINK_RESOLVES})`);
+        continue;
+      }
+      resolvedShortLinksCount++;
+    }
 
     // 1. Check if line contains any Spotify URL/URI (track, album, playlist, artist, or short link)
     const entity = await resolveSpotifyEntityInput(line);

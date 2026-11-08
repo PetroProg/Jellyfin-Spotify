@@ -45,6 +45,9 @@ const userPlayback = new Map<number, PlaybackState>();
 // Active device disconnect grace timeouts
 const disconnectTimers = new Map<number, NodeJS.Timeout>();
 
+// Unregistered pending connections per user (max 10)
+const unregisteredClients = new Map<number, Set<WebSocket>>();
+
 function getOrCreatePlayback(userId: number): PlaybackState {
   let state = userPlayback.get(userId);
   if (!state) {
@@ -184,6 +187,18 @@ export function setupWebSocketSync(server: FastifyInstance) {
   });
 
   wss.on('connection', (ws: WebSocket, req: any, userId: number) => {
+    // Limit pending unregistered WebSocket connections per user to 10
+    let unreg = unregisteredClients.get(userId);
+    if (!unreg) {
+      unreg = new Set<WebSocket>();
+      unregisteredClients.set(userId, unreg);
+    }
+    if (unreg.size >= 10) {
+      try { ws.close(1008, 'Too many pending connections'); } catch (_) {}
+      return;
+    }
+    unreg.add(ws);
+
     let session: ClientSession = {
       ws,
       userId,
@@ -196,6 +211,11 @@ export function setupWebSocketSync(server: FastifyInstance) {
 
     const regTimeout = setTimeout(() => {
       if (!session.deviceId) {
+        const u = unregisteredClients.get(userId);
+        if (u) {
+          u.delete(ws);
+          if (u.size === 0) unregisteredClients.delete(userId);
+        }
         try { ws.close(4001, 'Registration timeout'); } catch (_) {}
       }
     }, 15000);
@@ -236,6 +256,11 @@ export function setupWebSocketSync(server: FastifyInstance) {
         switch (data.type) {
           case 'REGISTER': {
             clearTimeout(regTimeout);
+            const u = unregisteredClients.get(userId);
+            if (u) {
+              u.delete(ws);
+              if (u.size === 0) unregisteredClients.delete(userId);
+            }
             const { deviceId, deviceName, deviceType, hasActivePlayback } = data;
             if (!deviceId || typeof deviceId !== 'string') return;
 
@@ -342,10 +367,22 @@ export function setupWebSocketSync(server: FastifyInstance) {
             if (state.originalQueue !== undefined) {
               playback.originalQueue = sanitizePlaybackQueue(state.originalQueue);
             }
-            if (state.currentIndex !== undefined) playback.currentIndex = state.currentIndex;
-            if (state.shuffle !== undefined) playback.shuffle = state.shuffle;
-            if (state.repeat !== undefined) playback.repeat = state.repeat;
-            if (state.volume !== undefined) playback.volume = state.volume;
+            if (state.currentIndex !== undefined) {
+              playback.currentIndex = typeof state.currentIndex === 'number' && Number.isInteger(state.currentIndex)
+                ? Math.max(-1, Math.min(10000, state.currentIndex))
+                : -1;
+            }
+            if (state.shuffle !== undefined) {
+              playback.shuffle = Boolean(state.shuffle);
+            }
+            if (state.repeat !== undefined) {
+              playback.repeat = ['off', 'all', 'one'].includes(String(state.repeat)) ? String(state.repeat) : 'off';
+            }
+            if (state.volume !== undefined) {
+              playback.volume = typeof state.volume === 'number' && !isNaN(state.volume)
+                ? Math.max(0, Math.min(1, state.volume))
+                : 1;
+            }
             playback.updatedAt = Date.now();
 
             if (hasStructuralChange) {
@@ -392,6 +429,19 @@ export function setupWebSocketSync(server: FastifyInstance) {
 
           case 'REMOTE_COMMAND': {
             const { action, value } = data;
+            if (typeof action !== 'string' || action.length > 50 || !/^[a-zA-Z0-9_-]+$/.test(action)) {
+              return;
+            }
+            let safeValue: any = undefined;
+            if (value !== undefined) {
+              if (typeof value === 'number') {
+                if (!isNaN(value)) safeValue = value;
+              } else if (typeof value === 'boolean') {
+                safeValue = value;
+              } else if (typeof value === 'string') {
+                safeValue = value.slice(0, 100);
+              }
+            }
             const clients = userClients.get(userId);
             const activeClient = playback.activeDeviceId && clients ? clients.get(playback.activeDeviceId) : null;
 
@@ -400,7 +450,7 @@ export function setupWebSocketSync(server: FastifyInstance) {
               safeSend(activeClient.ws, {
                 type: 'EXECUTE_COMMAND',
                 action,
-                value,
+                value: safeValue,
                 fromDeviceId: session.deviceId,
               });
             } else {
@@ -408,7 +458,7 @@ export function setupWebSocketSync(server: FastifyInstance) {
               safeSend(ws, {
                 type: 'BECOME_ACTIVE',
                 action,
-                value,
+                value: safeValue,
               });
             }
             break;
@@ -446,9 +496,17 @@ export function setupWebSocketSync(server: FastifyInstance) {
               if (clientState.originalQueue !== undefined) {
                 playback.originalQueue = sanitizePlaybackQueue(clientState.originalQueue);
               }
-              if (clientState.currentIndex !== undefined) playback.currentIndex = clientState.currentIndex;
-              if (clientState.shuffle !== undefined) playback.shuffle = clientState.shuffle;
-              if (clientState.repeat !== undefined) playback.repeat = clientState.repeat;
+              if (clientState.currentIndex !== undefined) {
+                playback.currentIndex = typeof clientState.currentIndex === 'number' && Number.isInteger(clientState.currentIndex)
+                  ? Math.max(-1, Math.min(10000, clientState.currentIndex))
+                  : -1;
+              }
+              if (clientState.shuffle !== undefined) {
+                playback.shuffle = Boolean(clientState.shuffle);
+              }
+              if (clientState.repeat !== undefined) {
+                playback.repeat = ['off', 'all', 'one'].includes(String(clientState.repeat)) ? String(clientState.repeat) : 'off';
+              }
             } else if (playback.isPlaying && playback.updatedAt) {
               // Interpolate current playhead if client didn't supply state
               const elapsed = (Date.now() - playback.updatedAt) / 1000;
@@ -504,6 +562,11 @@ export function setupWebSocketSync(server: FastifyInstance) {
 
     ws.on('close', () => {
       clearTimeout(regTimeout);
+      const u = unregisteredClients.get(userId);
+      if (u) {
+        u.delete(ws);
+        if (u.size === 0) unregisteredClients.delete(userId);
+      }
       const clients = userClients.get(userId);
       if (clients && session.deviceId) {
         // Only delete from active client map if this session is still the active one registered
@@ -517,6 +580,11 @@ export function setupWebSocketSync(server: FastifyInstance) {
 
       const playback = getOrCreatePlayback(userId);
       if (playback.activeDeviceId === session.deviceId) {
+        const existingTimer = disconnectTimers.get(userId);
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+          disconnectTimers.delete(userId);
+        }
         // Active device went offline. Give 45 seconds grace in case of mobile network switch / cell tower handover
         const timer = setTimeout(() => {
           disconnectTimers.delete(userId);
