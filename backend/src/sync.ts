@@ -234,6 +234,14 @@ export function setupWebSocketSync(server: FastifyInstance) {
           case 'PLAYBACK_STATE': {
             const state = data.state || {};
             const isPlayingChanged = state.isPlaying !== undefined && state.isPlaying !== playback.isPlaying;
+            const isShuffleChanged = state.shuffle !== undefined && state.shuffle !== playback.shuffle;
+            const isRepeatChanged = state.repeat !== undefined && state.repeat !== playback.repeat;
+            const hasStructuralChange =
+              state.track !== undefined ||
+              state.queue !== undefined ||
+              state.originalQueue !== undefined ||
+              isShuffleChanged ||
+              isRepeatChanged;
 
             // If this client is playing or updates state, it claims active playback
             playback.activeDeviceId = session.deviceId;
@@ -251,17 +259,36 @@ export function setupWebSocketSync(server: FastifyInstance) {
             if (state.volume !== undefined) playback.volume = state.volume;
             playback.updatedAt = Date.now();
 
-            // Broadcast updated playback state to all other devices
-            broadcastToUser(
-              userId,
-              {
-                type: 'PLAYBACK_UPDATE',
-                activeDeviceId: playback.activeDeviceId,
-                activeDeviceName: playback.activeDeviceName,
-                state: playback,
-              },
-              session.deviceId
-            );
+            if (hasStructuralChange) {
+              // Full structural state update (track changed, queue modified, shuffle/repeat toggled)
+              broadcastToUser(
+                userId,
+                {
+                  type: 'PLAYBACK_UPDATE',
+                  activeDeviceId: playback.activeDeviceId,
+                  activeDeviceName: playback.activeDeviceName,
+                  state: playback,
+                },
+                session.deviceId
+              );
+            } else {
+              // High-frequency lightweight progress tick (~100 bytes vs ~100 KB, saving 99% WS bandwidth)
+              broadcastToUser(
+                userId,
+                {
+                  type: 'PLAYBACK_TICK',
+                  activeDeviceId: playback.activeDeviceId,
+                  activeDeviceName: playback.activeDeviceName,
+                  currentTime: playback.currentTime,
+                  duration: playback.duration,
+                  isPlaying: playback.isPlaying,
+                  currentIndex: playback.currentIndex,
+                  volume: playback.volume,
+                  updatedAt: playback.updatedAt,
+                },
+                session.deviceId
+              );
+            }
 
             if (isPlayingChanged) {
               broadcastToUser(userId, {

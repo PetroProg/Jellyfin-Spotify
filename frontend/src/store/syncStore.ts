@@ -229,6 +229,39 @@ export const useSyncStore = create<SyncState>((set, get) => {
                 break;
               }
 
+              case 'PLAYBACK_TICK': {
+                const { activeDeviceId, activeDeviceName, currentTime, duration, isPlaying, currentIndex, volume } = data;
+                const player = usePlayerStore.getState();
+                const isLocallyPlaying = Boolean(player.isPlaying && player.currentTrack);
+                const hasLocalSession = Boolean(get().isLocalActive && player.currentTrack);
+                const remoteIsActivelyPlaying = Boolean(
+                  activeDeviceId && activeDeviceId !== deviceId && isPlaying
+                );
+                const isLocal =
+                  isLocallyPlaying ||
+                  (hasLocalSession && !remoteIsActivelyPlaying) ||
+                  activeDeviceId === deviceId;
+
+                set({
+                  activeDeviceId: isLocal ? deviceId : activeDeviceId,
+                  activeDeviceName: isLocal ? get().deviceName : activeDeviceName,
+                  isLocalActive: isLocal,
+                });
+
+                if (!isLocal && !isLocallyPlaying) {
+                  // Lightweight tick: advance playback slider and update playing status without touching queue arrays or re-rendering lists
+                  const updates: any = {};
+                  if (currentTime !== undefined) updates.currentTime = currentTime;
+                  if (duration !== undefined && duration > 0) updates.duration = duration;
+                  if (isPlaying !== undefined) updates.isPlaying = Boolean(isPlaying);
+                  if (currentIndex !== undefined && currentIndex !== player.currentIndex) updates.currentIndex = currentIndex;
+                  if (volume !== undefined && Math.abs(volume - player.volume) > 0.05) updates.volume = volume;
+
+                  usePlayerStore.setState(updates);
+                }
+                break;
+              }
+
               case 'PLAYBACK_UPDATE': {
                 const { activeDeviceId, activeDeviceName, state } = data;
                 const player = usePlayerStore.getState();
@@ -250,17 +283,20 @@ export const useSyncStore = create<SyncState>((set, get) => {
 
                 if (!isLocal && state && !isLocallyPlaying) {
                   // Mirror playback onto passive UI without playing local sound
-                  usePlayerStore.setState({
-                    currentTrack: state.track ?? null,
+                  const updates: any = {
                     isPlaying: Boolean(state.isPlaying),
                     currentTime: state.currentTime || 0,
                     duration: state.duration || 0,
-                    queue: state.queue || [],
-                    originalQueue: state.originalQueue || [],
-                    currentIndex: state.currentIndex ?? 0,
+                    currentIndex: state.currentIndex ?? player.currentIndex,
                     shuffle: Boolean(state.shuffle),
                     repeat: state.repeat || 'off',
-                  });
+                  };
+                  if (state.track !== undefined) updates.currentTrack = state.track;
+                  if (state.queue !== undefined) updates.queue = state.queue;
+                  if (state.originalQueue !== undefined) updates.originalQueue = state.originalQueue;
+                  if (state.volume !== undefined) updates.volume = state.volume;
+
+                  usePlayerStore.setState(updates);
                 }
                 break;
               }
