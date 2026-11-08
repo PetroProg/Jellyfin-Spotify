@@ -463,6 +463,11 @@ server.get('/api/user/settings', { preHandler: [(server as any).authenticate] },
 
 server.put('/api/user/settings', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const userId = req.user.id;
+  const limitCheck = consumeRateLimit('user_settings:' + userId, 30, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на обновление настроек. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const body = req.body || {};
   const upsert = db.prepare(`
     INSERT INTO user_settings (user_id, key, value, updated_at)
@@ -470,14 +475,35 @@ server.put('/api/user/settings', { preHandler: [(server as any).authenticate] },
     ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
   `);
 
+  const countRow: any = db.prepare('SELECT COUNT(*) as count FROM user_settings WHERE user_id = ?').get(userId);
+  let currentKeyCount = countRow?.count || 0;
+
   const saveItem = (k: string, v: any) => {
-    if (typeof k === 'string' && /^[a-zA-Z0-9_.-]{1,64}$/.test(k)) {
-      let valStr = typeof v === 'string' ? v : JSON.stringify(v);
-      if (valStr.length > 4096) {
-        valStr = valStr.slice(0, 4096);
-      }
-      upsert.run(userId, k, valStr);
+    if (typeof k !== 'string' || !/^[a-zA-Z0-9_.-]{1,64}$/.test(k)) {
+      return;
     }
+    let valStr: string;
+    if (v === undefined || v === null) {
+      valStr = '';
+    } else if (typeof v === 'string') {
+      valStr = v;
+    } else {
+      try {
+        valStr = JSON.stringify(v) ?? '';
+      } catch {
+        valStr = '';
+      }
+    }
+    if (valStr.length > 4096) {
+      valStr = valStr.slice(0, 4096);
+    }
+
+    const exists = db.prepare('SELECT 1 FROM user_settings WHERE user_id = ? AND key = ?').get(userId, k);
+    if (!exists) {
+      if (currentKeyCount >= 200) return;
+      currentKeyCount++;
+    }
+    upsert.run(userId, k, valStr);
   };
 
   const saveManyTx = db.transaction((entries: [string, any][]) => {
@@ -575,7 +601,20 @@ const handleAccountDelete = async (req: any, reply: any) => {
 
   resetRateLimit(rateKey);
   invalidateUserCache(req.user.id);
+  invalidateUserBlacklistCache(req.user.id);
   terminateUserSessions(req.user.id);
+
+  try {
+    const userPlaylists: any[] = db.prepare('SELECT id FROM playlists WHERE user_id = ?').all(req.user.id);
+    for (const pl of userPlaylists) {
+      try { cancelPlaylistDownloads(pl.id); } catch (_) {}
+      const coverPath = path.join(process.cwd(), 'data', 'covers', `playlist_${pl.id}.jpg`);
+      if (fs.existsSync(coverPath)) {
+        try { fs.unlinkSync(coverPath); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+
   db.prepare('DELETE FROM download_jobs WHERE user_id = ?').run(req.user.id);
   db.prepare('DELETE FROM users WHERE id = ?').run(req.user.id);
   return { success: true, message: 'Аккаунт успешно удален' };
@@ -585,7 +624,12 @@ server.delete('/api/auth/account', { preHandler: [(server as any).authenticate] 
 server.delete('/api/user/account', { preHandler: [(server as any).authenticate] }, handleAccountDelete);
 
 // ----------------- BACKUP & RESTORE -----------------
-server.get('/api/user/library/backup', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+server.get('/api/user/library/backup', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('user_backup:' + req.user.id, 5, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на создание резервной копии. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const userId = req.user.id;
   const user: any = db.prepare('SELECT username, display_name, timezone FROM users WHERE id = ?').get(userId);
 
@@ -964,6 +1008,11 @@ function validateClientTimezone(rawTz: any): string | undefined {
 }
 
 server.get('/api/daily-mixes', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('daily_mixes_get:' + req.user.id, 20, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов к плейлистам дня. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   try {
     const clientTz = validateClientTimezone(req.headers['x-timezone']);
     if (clientTz) {
@@ -1167,8 +1216,11 @@ server.put('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
   if (!playlistId || !Number.isInteger(playlistId) || playlistId <= 0) {
     return reply.status(400).send({ error: 'Некорректный ID плейлиста' });
   }
-  const playlist: any = db.prepare('SELECT id, name, description FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
+  const playlist: any = db.prepare('SELECT id, name, description, is_daily_mix FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
   if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
+  if (playlist.is_daily_mix) {
+    return reply.status(400).send({ error: 'Нельзя переименовывать ежедневный микс' });
+  }
 
   const body = req.body || {};
   const name = body.name ? String(body.name).trim().slice(0, 100) : null;
@@ -1178,8 +1230,20 @@ server.put('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
     return reply.status(400).send({ error: 'Название плейлиста не может быть пустым' });
   }
 
-  if (name.toLowerCase() === 'любимые треки' || name.toLowerCase() === 'liked songs') {
-    return reply.status(400).send({ error: 'Имя «Любимые треки» зарезервировано для системного раздела' });
+  const lowerName = name.toLowerCase();
+  if (
+    lowerName === 'любимые треки' || 
+    lowerName === 'liked songs' || 
+    lowerName.includes('daily mix') || 
+    lowerName.includes('микс дня') || 
+    lowerName.includes('ежедневный микс')
+  ) {
+    return reply.status(400).send({ error: 'Это название зарезервировано для системных плейлистов' });
+  }
+
+  const duplicate = db.prepare('SELECT id FROM playlists WHERE user_id = ? AND id != ? AND LOWER(name) = LOWER(?)').get(req.user.id, playlistId, name);
+  if (duplicate) {
+    return reply.status(400).send({ error: 'Плейлист с таким названием уже существует' });
   }
 
   if (description !== undefined) {
@@ -1195,6 +1259,11 @@ server.put('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
 });
 
 server.put('/api/playlists/:id/cover', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('pl_cover:' + req.user.id, 15, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на смену обложки. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const playlistId = Number(req.params.id);
   if (!playlistId || !Number.isInteger(playlistId) || playlistId <= 0) {
     return reply.status(400).send({ error: 'Некорректный ID плейлиста' });
@@ -1239,6 +1308,10 @@ server.put('/api/playlists/:id/cover', { preHandler: [(server as any).authentica
       return reply.status(400).send({ error: 'Недопустимый URL обложки. Разрешены только HTTP(S) ссылки или внутренние пути' });
     }
     finalUrl = cover_url.slice(0, 2048);
+    const localCoverPath = path.join(process.cwd(), 'data', 'covers', `playlist_${playlistId}.jpg`);
+    if (fs.existsSync(localCoverPath)) {
+      try { await fs.promises.unlink(localCoverPath); } catch (_) {}
+    }
   }
 
   if (!finalUrl) {
@@ -1270,7 +1343,11 @@ server.get('/api/playlists/:id/cover', { config: { compress: false } }, async (r
       'Last-Modified': stat.mtime.toUTCString(),
       'Content-Length': stat.size
     });
-    return reply.send(fs.createReadStream(filePath));
+    const stream = fs.createReadStream(filePath);
+    req.raw.on('close', () => {
+      stream.destroy();
+    });
+    return reply.send(stream);
   } catch (_) {
     reply.status(404).send('Cover not found');
   }
@@ -1356,6 +1433,15 @@ server.post('/api/playlists/:id/tracks', { preHandler: [(server as any).authenti
     return reply.status(400).send({ error: 'Нельзя добавлять треки в ежедневный микс' });
   }
 
+  const track: any = db.prepare('SELECT id, title, artist FROM tracks WHERE id = ?').get(trackId);
+  if (!track) {
+    return reply.status(404).send({ error: 'Трек не найден' });
+  }
+
+  if (isTrackBlacklistedForUser(req.user.id, track.title, track.artist)) {
+    return reply.status(400).send({ error: 'Трек находится в черном списке' });
+  }
+
   const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
   const nextPos = (maxPosRow?.maxPos !== null && maxPosRow?.maxPos !== undefined) ? maxPosRow.maxPos + 1 : 0;
 
@@ -1433,7 +1519,17 @@ server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] 
       return reply.status(400).send({ error: 'Не удалось извлечь треки по указанной ссылке Spotify' });
     }
 
-    const safeName = String(playlistData.name || 'Spotify Playlist').trim().slice(0, 100);
+    let safeName = String(playlistData.name || 'Spotify Playlist').trim().slice(0, 100);
+    const lowerSafeName = safeName.toLowerCase();
+    if (
+      lowerSafeName === 'любимые треки' || 
+      lowerSafeName === 'liked songs' || 
+      lowerSafeName.includes('daily mix') || 
+      lowerSafeName.includes('микс дня') || 
+      lowerSafeName.includes('ежедневный микс')
+    ) {
+      safeName = `${safeName} (Spotify)`.slice(0, 100);
+    }
     const safeDesc = String(playlistData.description || 'Импортировано из Spotify').trim().slice(0, 500);
     const safeCoverUrl = playlistData.cover_url ? String(playlistData.cover_url).slice(0, 2048) : '';
 
@@ -1834,15 +1930,23 @@ server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenti
   }
 });
 
+const activeUserPlaylistsImports = new Set<number>();
+
 server.post('/api/spotify/import-user-playlists', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const limitCheck = consumeRateLimit('sp_import_user_pl:' + req.user.id, 3, 60000);
   if (limitCheck.blocked) {
     return reply.status(429).send({ error: `Слишком много запросов на импорт плейлистов. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
   }
 
+  if (activeUserPlaylistsImports.has(req.user.id)) {
+    return reply.status(409).send({ error: 'Синхронизация плейлистов уже выполняется. Дождитесь завершения.' });
+  }
+  activeUserPlaylistsImports.add(req.user.id);
+
   try {
     const spotifyPlaylists = await fetchSpotifyUserPlaylists(req.user.id);
     if (!spotifyPlaylists || spotifyPlaylists.length === 0) {
+      activeUserPlaylistsImports.delete(req.user.id);
       return { success: true, message: 'В вашем аккаунте Spotify не найдено плейлистов', totalPlaylists: 0, queuedPlaylists: 0 };
     }
 
@@ -1854,28 +1958,48 @@ server.post('/api/spotify/import-user-playlists', { preHandler: [(server as any)
     `);
 
     for (const sp of spotifyPlaylists) {
-      let existing: any = findPlStmt.get(req.user.id, sp.id);
+      if (!sp || !sp.id) continue;
+      const cleanSpId = String(sp.id).trim().slice(0, 100);
+      let safeName = String(sp.name || 'Spotify Playlist').trim().slice(0, 100);
+      const lowerName = safeName.toLowerCase();
+      if (
+        lowerName === 'любимые треки' || 
+        lowerName === 'liked songs' || 
+        lowerName.includes('daily mix') || 
+        lowerName.includes('микс дня') || 
+        lowerName.includes('ежедневный микс')
+      ) {
+        safeName = `${safeName} (Spotify)`.slice(0, 100);
+      }
+      const safeDesc = sp.description ? String(sp.description).trim().slice(0, 500) : 'Импортировано из Spotify';
+      const safeCover = sp.cover_url ? String(sp.cover_url).trim().slice(0, 2048) : null;
+
+      let existing: any = findPlStmt.get(req.user.id, cleanSpId);
       let playlistId: number;
 
       if (!existing) {
-        const info = insertPlStmt.run(req.user.id, sp.name, sp.description || 'Импортировано из Spotify', sp.cover_url || null, sp.id);
+        const info = insertPlStmt.run(req.user.id, safeName, safeDesc, safeCover, cleanSpId);
         playlistId = Number(info.lastInsertRowid);
       } else {
         playlistId = existing.id;
       }
-      playlistsToQueue.push({ id: playlistId, name: sp.name });
+      playlistsToQueue.push({ id: playlistId, name: safeName });
     }
 
     // Queue sequentially in background with polite delay to avoid Spotify API 429 rate limit
     (async () => {
-      for (const item of playlistsToQueue) {
-        try {
-          await resumePlaylistDownload(item.id);
-          // Wait 600ms between playlist expansions to respect Spotify API rate limit
-          await new Promise((r) => setTimeout(r, 600));
-        } catch (err: any) {
-          console.warn(`[Sync Playlist Background] Failed to queue ${item.name}:`, err.message);
+      try {
+        for (const item of playlistsToQueue) {
+          try {
+            await resumePlaylistDownload(item.id);
+            // Wait 600ms between playlist expansions to respect Spotify API rate limit
+            await new Promise((r) => setTimeout(r, 600));
+          } catch (err: any) {
+            console.warn(`[Sync Playlist Background] Failed to queue ${item.name}:`, err.message);
+          }
         }
+      } finally {
+        activeUserPlaylistsImports.delete(req.user.id);
       }
     })().catch((err) => console.error('[Sync Playlists Fatal]', err));
 
@@ -1886,6 +2010,7 @@ server.post('/api/spotify/import-user-playlists', { preHandler: [(server as any)
       queuedPlaylists: playlistsToQueue.length
     };
   } catch (err: any) {
+    activeUserPlaylistsImports.delete(req.user.id);
     return reply.status(500).send({ error: err.message || 'Ошибка импорта плейлистов' });
   }
 });
@@ -2354,10 +2479,10 @@ server.get('/api/likes', { preHandler: [(server as any).authenticate] }, async (
   return { version: currentVersion, tracks: validTracks };
 });
 
-server.post('/api/likes/:trackId', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+server.post('/api/likes/:trackId', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const trackId = Number(req.params.trackId);
-  if (!trackId || isNaN(trackId) || trackId <= 0) {
-    return { liked: false };
+  if (!trackId || !Number.isInteger(trackId) || trackId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID трека' });
   }
   const body = req.body || {};
   const explicitLiked = typeof body.liked === 'boolean' ? body.liked : null;
@@ -2370,15 +2495,16 @@ server.post('/api/likes/:trackId', { preHandler: [(server as any).authenticate] 
     newLikedState = !exists;
   }
 
+  let trackRow: any = null;
   if (newLikedState) {
+    trackRow = db.prepare('SELECT id, title, artist, album, duration_ms, cover_url FROM tracks WHERE id = ?').get(trackId);
+    if (!trackRow) {
+      return reply.status(404).send({ error: 'Трек не найден' });
+    }
     db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(req.user.id, trackId);
   } else {
     db.prepare('DELETE FROM liked_tracks WHERE user_id = ? AND track_id = ?').run(req.user.id, trackId);
   }
-
-  const trackRow = newLikedState
-    ? db.prepare('SELECT id, title, artist, album, duration_ms, cover_url FROM tracks WHERE id = ?').get(trackId)
-    : null;
 
   broadcastToUser(req.user.id, {
     type: 'LIKES_UPDATED',
@@ -2399,6 +2525,16 @@ server.get('/api/blacklist', { preHandler: [(server as any).authenticate] }, asy
 });
 
 server.post('/api/blacklist', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('blacklist_add:' + req.user.id, 30, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов к черному списку. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
+  const countRow: any = db.prepare('SELECT COUNT(*) as count FROM blacklist WHERE user_id = ?').get(req.user.id);
+  if ((countRow?.count || 0) >= 1000) {
+    return reply.status(400).send({ error: 'Превышен лимит записей в черном списке (максимум 1000)' });
+  }
+
   const body = req.body || {};
   let { title, artist, spotify_id, track_id } = body;
   if (!title || !artist) return reply.status(400).send({ error: 'Название и артист обязательны' });

@@ -21,6 +21,21 @@ export interface SpotifyPlaylistData {
 let spotifyAccessToken: string | null = null;
 let tokenExpiresAt = 0;
 
+const consumedOAuthStates = new Map<string, number>();
+function isOAuthStateConsumedOrExpired(sig: string, exp: number): boolean {
+  const now = Date.now();
+  if (consumedOAuthStates.size > 200) {
+    for (const [k, expiry] of consumedOAuthStates.entries()) {
+      if (now > expiry) consumedOAuthStates.delete(k);
+    }
+  }
+  if (consumedOAuthStates.has(sig)) {
+    return true;
+  }
+  consumedOAuthStates.set(sig, exp || (now + 10 * 60 * 1000));
+  return false;
+}
+
 export function getSpotifyCredentials() {
   const envId = process.env.SPOTIFY_CLIENT_ID;
   const envSecret = process.env.SPOTIFY_CLIENT_SECRET;
@@ -189,11 +204,20 @@ export async function handleSpotifyOAuthCallback(code: string, stateStr: string)
       throw new Error('Срок действия OAuth state истек. Пожалуйста, повторите попытку авторизации.');
     }
 
+    if (isOAuthStateConsumedOrExpired(rawParsed.s, data.exp)) {
+      throw new Error('Данный код авторизации уже был использован или устарел');
+    }
+
     userId = data.userId;
     origin = data.origin || '';
     redirectUri = data.redirectUri;
   } catch (e: any) {
     throw new Error('Неверный параметр state в ответе Spotify: ' + e.message);
+  }
+
+  const userExists = db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
+  if (!userExists) {
+    throw new Error('Пользователь не найден в системе');
   }
 
   // Sanitize origin to prevent open-redirect vulnerabilities
@@ -241,8 +265,8 @@ export async function handleSpotifyOAuthCallback(code: string, stateStr: string)
     });
     if (meRes.ok) {
       const meData: any = await meRes.json();
-      spotifyUserId = meData.id || '';
-      spotifyDisplayName = meData.display_name || meData.id || '';
+      spotifyUserId = String(meData.id || '').trim().slice(0, 100);
+      spotifyDisplayName = String(meData.display_name || meData.id || '').trim().slice(0, 200);
     }
   } catch (_) {}
 
@@ -518,7 +542,7 @@ export async function fetchSpotifyAlbum(albumId: string, userId?: number): Promi
     throw new Error(`Не удалось загрузить альбом Spotify (${res.status})`);
   }
 
-  const html = await res.text();
+  const html = await readLimitedText(res, 2 * 1024 * 1024);
   const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
   if (nextDataMatch) {
     try {
@@ -620,7 +644,7 @@ export async function fetchSpotifyArtistTopTracks(artistId: string, userId?: num
     throw new Error(`Не удалось загрузить страницу исполнителя Spotify (${res.status})`);
   }
 
-  const html = await res.text();
+  const html = await readLimitedText(res, 2 * 1024 * 1024);
   const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
   if (nextDataMatch) {
     try {
@@ -829,7 +853,7 @@ export async function fetchSpotifyPlaylist(urlOrId: string, userId?: number): Pr
     throw new Error(`Не удалось загрузить плейлист Spotify (${res.status})`);
   }
 
-  const html = await res.text();
+  const html = await readLimitedText(res, 2 * 1024 * 1024);
   
   // Extract JSON payload embedded inside <script id="__NEXT_DATA__"> or resource data
   const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
@@ -959,7 +983,7 @@ export async function resolveSpotifyTrackDetails(trackId: string): Promise<Spoti
       }
     });
     if (embedRes.ok) {
-      const html = await embedRes.text();
+      const html = await readLimitedText(embedRes, 2 * 1024 * 1024);
       const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
       if (nextDataMatch) {
         const nextData = JSON.parse(nextDataMatch[1]);

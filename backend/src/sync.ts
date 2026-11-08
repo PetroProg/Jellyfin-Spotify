@@ -709,6 +709,15 @@ export function terminateUserSessions(userId: number) {
     }
     userClients.delete(userId);
   }
+  const pending = unregisteredClients.get(userId);
+  if (pending) {
+    for (const ws of pending) {
+      try {
+        ws.close(1000, 'Session terminated');
+      } catch (_) {}
+    }
+    unregisteredClients.delete(userId);
+  }
   userPlayback.delete(userId);
   const timer = disconnectTimers.get(userId);
   if (timer) {

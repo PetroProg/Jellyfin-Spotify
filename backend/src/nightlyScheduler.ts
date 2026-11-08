@@ -262,15 +262,21 @@ export function updateNightlySchedule(userId: number, opts: { enabled?: boolean;
     db.prepare('UPDATE users SET nightly_mix_enabled = ? WHERE id = ?').run(opts.enabled ? 1 : 0, userId);
   }
   if (opts.hour !== undefined) {
-    const clampedHour = Math.max(0, Math.min(23, Number(opts.hour)));
-    db.prepare('UPDATE users SET nightly_mix_hour = ? WHERE id = ?').run(clampedHour, userId);
+    const rawH = Number(opts.hour);
+    if (Number.isFinite(rawH)) {
+      const clampedHour = Math.max(0, Math.min(23, Math.floor(rawH)));
+      db.prepare('UPDATE users SET nightly_mix_hour = ? WHERE id = ?').run(clampedHour, userId);
+    }
   }
-  if (opts.timezone) {
-    try {
-      // Validate timezone
-      new Intl.DateTimeFormat('en-US', { timeZone: opts.timezone });
-      db.prepare('UPDATE users SET timezone = ? WHERE id = ?').run(opts.timezone, userId);
-    } catch (_) {}
+  if (opts.timezone && typeof opts.timezone === 'string') {
+    const tz = opts.timezone.trim();
+    if (tz.length > 0 && tz.length <= 64) {
+      try {
+        // Validate timezone
+        new Intl.DateTimeFormat('en-US', { timeZone: tz });
+        db.prepare('UPDATE users SET timezone = ? WHERE id = ?').run(tz, userId);
+      } catch (_) {}
+    }
   }
   return getNightlySchedulerStatus(userId);
 }

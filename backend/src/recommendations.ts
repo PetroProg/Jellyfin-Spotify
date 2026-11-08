@@ -50,6 +50,10 @@ function shuffleArray<T>(arr: T[]): T[] {
   return result;
 }
 
+function escapeSqlLike(str: string): string {
+  return str.replace(/([%_\\])/g, '\\$1');
+}
+
 export async function getRecommendations(
   userId: number,
   seedArtists: string[],
@@ -95,12 +99,13 @@ export async function getRecommendations(
     // Also match primary artist with prefix for composite artist fields
     if (localCandidates.length < 10) {
       const primary = searchArtists[0];
+      const escapedPrimary = escapeSqlLike(primary);
       const likeMatched = db.prepare(`
         SELECT id, title, artist, album, duration_ms, cover_url, spotify_id
         FROM tracks
-        WHERE artist LIKE ? AND artist NOT IN (${placeholders})
+        WHERE artist LIKE ? ESCAPE '\\' AND artist NOT IN (${placeholders})
         LIMIT 30
-      `).all(`${primary}%`, ...searchArtists);
+      `).all(`${escapedPrimary}%`, ...searchArtists);
       localCandidates.push(...likeMatched);
     }
   }

@@ -779,20 +779,37 @@ function hashCode(str: string): number {
   return hash;
 }
 
+function escapeSqlLike(str: string): string {
+  return str.replace(/([%_\\])/g, '\\$1');
+}
+
 export function findLocalTrackByInfo(title: string, artist: string, spotifyId?: string | null): any {
   try {
     if (spotifyId) {
       const bySp: any = db.prepare('SELECT * FROM tracks WHERE spotify_id = ?').get(spotifyId);
-      if (bySp && bySp.file_path && fs.existsSync(bySp.file_path)) return bySp;
+      if (bySp && bySp.file_path && isPathInsideMusicDir(bySp.file_path) && fs.existsSync(bySp.file_path)) return bySp;
     }
     const cleanT = (title || '').toLowerCase().trim();
     const cleanA = extractPrimaryArtist(artist).toLowerCase().trim();
-    const cand: any = db.prepare(`
-      SELECT * FROM tracks
-      WHERE LOWER(title) = ? AND LOWER(artist) LIKE ?
-      LIMIT 1
-    `).get(cleanT, `%${cleanA}%`);
-    if (cand && cand.file_path && fs.existsSync(cand.file_path)) return cand;
+    if (!cleanT) return null;
+
+    let cand: any = null;
+    if (cleanA) {
+      const escapedA = escapeSqlLike(cleanA);
+      cand = db.prepare(`
+        SELECT * FROM tracks
+        WHERE LOWER(title) = ? AND LOWER(artist) LIKE ? ESCAPE '\\'
+        LIMIT 1
+      `).get(cleanT, `%${escapedA}%`);
+    } else {
+      cand = db.prepare(`
+        SELECT * FROM tracks
+        WHERE LOWER(title) = ?
+        LIMIT 1
+      `).get(cleanT);
+    }
+
+    if (cand && cand.file_path && isPathInsideMusicDir(cand.file_path) && fs.existsSync(cand.file_path)) return cand;
     return null;
   } catch (_) {
     return null;
@@ -942,6 +959,11 @@ export function getTodayDateKey(timeZone?: string): string {
  * Returns existing Daily Mixes for today, or generates new ones if none exist for today (or if forceRefresh = true).
  */
 export async function getOrGenerateDailyMixes(userId: number, forceRefresh = false, timeZone?: string): Promise<any[]> {
+  // Prevent concurrent duplicate generation for the same user upfront
+  if (generationInProgress.has(userId)) {
+    return await generationInProgress.get(userId)!;
+  }
+
   const resolvedTz = timeZone || getUserTimezone(userId);
   const today = getTodayDateKey(resolvedTz);
 
@@ -959,7 +981,7 @@ export async function getOrGenerateDailyMixes(userId: number, forceRefresh = fal
     }
   }
 
-  // Prevent concurrent duplicate generation for the same user
+  // Double check in case concurrent generation started while checking DB
   if (generationInProgress.has(userId)) {
     return await generationInProgress.get(userId)!;
   }

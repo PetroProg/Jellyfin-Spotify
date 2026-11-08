@@ -1437,7 +1437,7 @@ export async function downloadSingleSpotifyTrackDirect(
       }
       if (playlistId) {
         if (userId) {
-          const ownsPlaylist = db.prepare('SELECT 1 FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, userId);
+          const ownsPlaylist = db.prepare('SELECT 1 FROM playlists WHERE id = ? AND user_id = ? AND COALESCE(is_daily_mix, 0) = 0').get(playlistId, userId);
           if (!ownsPlaylist) return result;
         }
         const inPl: any = db.prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').get(playlistId, result.track.id);
