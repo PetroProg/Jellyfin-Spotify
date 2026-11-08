@@ -418,6 +418,9 @@ function extractEntityCoverUrl(entity: any): string {
 }
 
 export async function fetchSpotifyAlbum(albumId: string, userId?: number): Promise<SpotifyPlaylistData> {
+  if (!albumId || !/^[a-zA-Z0-9]{15,30}$/.test(albumId)) {
+    throw new Error('Некорректный идентификатор альбома Spotify');
+  }
   let token: string | null = null;
   if (userId) {
     token = await getUserSpotifyToken(userId);
@@ -546,6 +549,9 @@ export async function fetchSpotifyAlbum(albumId: string, userId?: number): Promi
 }
 
 export async function fetchSpotifyArtistTopTracks(artistId: string, userId?: number): Promise<SpotifyPlaylistData> {
+  if (!artistId || !/^[a-zA-Z0-9]{15,30}$/.test(artistId)) {
+    throw new Error('Некорректный идентификатор исполнителя Spotify');
+  }
   let token: string | null = null;
   if (userId) {
     token = await getUserSpotifyToken(userId);
@@ -643,6 +649,9 @@ export async function fetchSpotifyArtistTopTracks(artistId: string, userId?: num
 }
 
 export async function fetchSpotifySingleTrackAsPlaylist(trackId: string, userId?: number): Promise<SpotifyPlaylistData> {
+  if (!trackId || !/^[a-zA-Z0-9]{15,30}$/.test(trackId)) {
+    throw new Error('Некорректный идентификатор трека Spotify');
+  }
   let token: string | null = null;
   if (userId) {
     token = await getUserSpotifyToken(userId);
@@ -717,7 +726,11 @@ export async function fetchSpotifyPlaylist(urlOrId: string, userId?: number): Pr
     return fetchSpotifySingleTrackAsPlaylist(parsed.id, userId);
   }
 
-  const playlistId = parsed?.id || extractPlaylistId(urlOrId) || urlOrId.trim();
+  const rawPlaylistId = parsed?.id || extractPlaylistId(urlOrId) || urlOrId.trim();
+  if (!rawPlaylistId || !/^[a-zA-Z0-9]{15,30}$/.test(rawPlaylistId)) {
+    throw new Error('Некорректный идентификатор плейлиста Spotify');
+  }
+  const playlistId = rawPlaylistId;
   let token: string | null = null;
   if (userId) {
     token = await getUserSpotifyToken(userId);
@@ -888,12 +901,19 @@ function pruneTrackDetailsCache() {
         spotifyTrackDetailsCache.delete(k);
       }
     }
+    if (spotifyTrackDetailsCache.size > MAX_TRACK_DETAILS_CACHE_SIZE) {
+      let toRemove = spotifyTrackDetailsCache.size - Math.floor(MAX_TRACK_DETAILS_CACHE_SIZE * 0.8);
+      for (const k of spotifyTrackDetailsCache.keys()) {
+        spotifyTrackDetailsCache.delete(k);
+        if (--toRemove <= 0) break;
+      }
+    }
   }
 }
 
 export async function resolveSpotifyTrackDetails(trackId: string): Promise<SpotifyTrackDetails> {
   const result: SpotifyTrackDetails = {};
-  if (!trackId) return result;
+  if (!trackId || !/^[a-zA-Z0-9]{15,30}$/.test(trackId)) return result;
 
   const cached = spotifyTrackDetailsCache.get(trackId);
   if (cached && Date.now() < cached.expires) {
@@ -988,6 +1008,13 @@ function pruneDeezerCache() {
     for (const [k, v] of deezerInfoCache.entries()) {
       if (now > v.expires) {
         deezerInfoCache.delete(k);
+      }
+    }
+    if (deezerInfoCache.size > MAX_DEEZER_CACHE_SIZE) {
+      let toRemove = deezerInfoCache.size - Math.floor(MAX_DEEZER_CACHE_SIZE * 0.8);
+      for (const k of deezerInfoCache.keys()) {
+        deezerInfoCache.delete(k);
+        if (--toRemove <= 0) break;
       }
     }
   }
@@ -1193,6 +1220,13 @@ function pruneSearchCache() {
         searchCache.delete(k);
       }
     }
+    if (searchCache.size > MAX_SEARCH_CACHE_SIZE) {
+      let toRemove = searchCache.size - Math.floor(MAX_SEARCH_CACHE_SIZE * 0.8);
+      for (const k of searchCache.keys()) {
+        searchCache.delete(k);
+        if (--toRemove <= 0) break;
+      }
+    }
   }
 }
 
@@ -1378,6 +1412,8 @@ export async function parseTrackListText(text: string, userId?: number): Promise
   const rawTracks: SpotifyTrack[] = [];
   const token = (userId ? await getUserSpotifyToken(userId) : null) || await getAccessToken();
   let complexEntitiesCount = 0;
+  let resolvedSingleTrackCount = 0;
+  const MAX_SINGLE_TRACK_RESOLVES = 40;
 
   for (const line of lines) {
     if (rawTracks.length >= 500) break;
@@ -1387,6 +1423,11 @@ export async function parseTrackListText(text: string, userId?: number): Promise
     if (entity) {
       try {
         if (entity.type === 'track') {
+          if (resolvedSingleTrackCount >= MAX_SINGLE_TRACK_RESOLVES) {
+            console.warn(`[parseTrackListText] Skipping track entity (${entity.id}): resolve limit reached (${MAX_SINGLE_TRACK_RESOLVES})`);
+            continue;
+          }
+          resolvedSingleTrackCount++;
           const trackId = entity.id;
           if (token) {
             const sRes = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {

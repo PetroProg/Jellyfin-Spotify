@@ -1,7 +1,7 @@
 import fs from 'fs';
 import { db } from './db';
 import { SpotifyTrack, getSpotifyCredentials, getAccessToken } from './spotify';
-import { enqueuePlaylistDownload, cancelPlaylistDownloads, isTrackBlacklistedForUser } from './downloader';
+import { enqueuePlaylistDownload, cancelPlaylistDownloads, isTrackBlacklistedForUser, isPathInsideMusicDir } from './downloader';
 
 export interface CategoryConfig {
   key: string;
@@ -749,7 +749,7 @@ export function cleanupOrphanDailyMixTracks() {
     const deleteStmt = db.prepare('DELETE FROM tracks WHERE id = ?');
     const deleteTx = db.transaction((items: any[]) => {
       for (const item of items) {
-        if (item.file_path && fs.existsSync(item.file_path)) {
+        if (item.file_path && fs.existsSync(item.file_path) && isPathInsideMusicDir(item.file_path)) {
           try {
             fs.unlinkSync(item.file_path);
           } catch (_) {}

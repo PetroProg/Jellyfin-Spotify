@@ -30,6 +30,13 @@ function pruneRecCache() {
         recCache.delete(k);
       }
     }
+    if (recCache.size > MAX_REC_CACHE_SIZE) {
+      let toRemove = recCache.size - Math.floor(MAX_REC_CACHE_SIZE * 0.8);
+      for (const k of recCache.keys()) {
+        recCache.delete(k);
+        if (--toRemove <= 0) break;
+      }
+    }
   }
 }
 

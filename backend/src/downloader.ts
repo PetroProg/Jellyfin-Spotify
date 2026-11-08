@@ -42,6 +42,13 @@ export function getSafeArtistDir(artist: string): string {
   return targetDir;
 }
 
+export function isPathInsideMusicDir(filePath: string): boolean {
+  if (!filePath || typeof filePath !== 'string') return false;
+  const resolvedFile = path.resolve(filePath);
+  const resolvedMusic = path.resolve(MUSIC_DIR);
+  return resolvedFile.startsWith(resolvedMusic + path.sep);
+}
+
 export function resolveAudioFilePath(targetDir: string, safeTitle: string): string | null {
   const extensions = ['.mp3', '.m4a', '.opus', '.webm', '.flac', '.ogg'];
   for (const ext of extensions) {
@@ -102,7 +109,7 @@ interface QueuedDownloadRequest {
   id: number;
   priority: DownloadPriority;
   taskName: string;
-  resolve: () => void;
+  resolve: (acquired: boolean) => void;
   queuedAt: number;
 }
 
@@ -110,12 +117,13 @@ let nextRequestId = 1;
 const downloadWaitQueue: QueuedDownloadRequest[] = [];
 const MAX_WAIT_QUEUE = 200;
 
-function enqueueRequest(priority: DownloadPriority, taskName: string, resolve: () => void) {
+function enqueueRequest(priority: DownloadPriority, taskName: string, resolve: (acquired: boolean) => void) {
   if (downloadWaitQueue.length >= MAX_WAIT_QUEUE) {
     // Drop the lowest priority item from the tail to prevent unbounded memory growth
     const dropped = downloadWaitQueue.pop();
     if (dropped) {
       console.warn(`[DownloadScheduler] Wait queue saturated (${MAX_WAIT_QUEUE}). Dropped lowest priority task "${dropped.taskName}"`);
+      try { dropped.resolve(false); } catch (_) {}
     }
   }
 
@@ -147,7 +155,7 @@ function processDownloadQueue() {
     activeDownloads++;
     const waitMs = Date.now() - next.queuedAt;
     console.log(`[DownloadScheduler] Dispatched #${next.id} [${DownloadPriority[next.priority]}] "${next.taskName}" (waited ${waitMs}ms). Active: ${activeDownloads}/${MAX_CONCURRENT_DOWNLOADS}`);
-    next.resolve();
+    try { next.resolve(true); } catch (_) {}
   }
 }
 
@@ -157,10 +165,13 @@ export async function runWithPrioritySlot<T>(
   fn: () => Promise<T>
 ): Promise<T> {
   if (activeDownloads >= MAX_CONCURRENT_DOWNLOADS || downloadWaitQueue.length > 0) {
-    await new Promise<void>((resolve) => {
+    const acquired = await new Promise<boolean>((resolve) => {
       enqueueRequest(priority, taskName, resolve);
       processDownloadQueue();
     });
+    if (!acquired) {
+      throw new Error(`Download wait queue saturated. Task "${taskName}" was dropped.`);
+    }
   } else {
     activeDownloads++;
     console.log(`[DownloadScheduler] Direct dispatch [${DownloadPriority[priority]}] "${taskName}". Active: ${activeDownloads}/${MAX_CONCURRENT_DOWNLOADS}`);
@@ -200,6 +211,25 @@ interface BlacklistCacheEntry {
 }
 const userBlacklistMemoryCache = new Map<number, BlacklistCacheEntry>();
 const BLACKLIST_CACHE_TTL_MS = 30000; // 30 seconds in-memory TTL to eliminate N+1 queries
+const MAX_BLACKLIST_CACHE_SIZE = 500;
+
+function pruneBlacklistCache() {
+  if (userBlacklistMemoryCache.size > MAX_BLACKLIST_CACHE_SIZE) {
+    const now = Date.now();
+    for (const [k, v] of userBlacklistMemoryCache.entries()) {
+      if (now - v.cachedAt > BLACKLIST_CACHE_TTL_MS) {
+        userBlacklistMemoryCache.delete(k);
+      }
+    }
+    if (userBlacklistMemoryCache.size > MAX_BLACKLIST_CACHE_SIZE) {
+      let toRemove = userBlacklistMemoryCache.size - Math.floor(MAX_BLACKLIST_CACHE_SIZE * 0.8);
+      for (const k of userBlacklistMemoryCache.keys()) {
+        userBlacklistMemoryCache.delete(k);
+        if (--toRemove <= 0) break;
+      }
+    }
+  }
+}
 
 export function invalidateUserBlacklistCache(userId?: number) {
   if (userId !== undefined) {
@@ -218,6 +248,7 @@ function getUserBlacklistRows(userId: number): any[] {
   const rows: any[] = db.prepare(`
     SELECT title, artist, spotify_id FROM blacklist WHERE user_id = ?
   `).all(userId);
+  pruneBlacklistCache();
   userBlacklistMemoryCache.set(userId, { rows, cachedAt: now });
   return rows;
 }
@@ -441,7 +472,9 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
     ], { detached: true });
 
     let stdout = '';
-    proc.stdout.on('data', d => stdout += d.toString());
+    proc.stdout.on('data', d => {
+      if (stdout.length < 512 * 1024) stdout += d.toString();
+    });
     proc.on('close', (code) => {
       if (code !== 0) {
         return finish({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: 'PROBE_FAILED' });
@@ -678,6 +711,10 @@ export async function resumePlaylistDownload(playlistId: number, existingJobId?:
       ));
 
       if (!isAlreadyAdded && !alreadyInQueue) {
+        if (queue.length >= MAX_PLAYLIST_QUEUE_SIZE) {
+          console.warn(`[Downloader] Queue reached maximum capacity (${MAX_PLAYLIST_QUEUE_SIZE}) during playlist resume.`);
+          return;
+        }
         const customPos = (track as any).position;
         queue.push({
           jobId: jobId!,
@@ -821,7 +858,9 @@ export async function findBestStudioAudioSource(
 
       const proc = spawn('yt-dlp', args, { detached: true });
       let stdout = '';
-      proc.stdout.on('data', d => stdout += d.toString());
+      proc.stdout.on('data', d => {
+        if (stdout.length < 2 * 1024 * 1024) stdout += d.toString();
+      });
       proc.stderr.on('data', () => {});
       const timer = setTimeout(() => {
         killProcessGroup(proc, 'SIGKILL');
@@ -1019,6 +1058,13 @@ export async function findBestStudioAudioSource(
           for (const [k, v] of studioCandidateCache.entries()) {
             if (now - v.cachedAt > CANDIDATE_CACHE_TTL_MS) {
               studioCandidateCache.delete(k);
+            }
+          }
+          if (studioCandidateCache.size > 2000) {
+            let toRemove = studioCandidateCache.size - 1600;
+            for (const k of studioCandidateCache.keys()) {
+              studioCandidateCache.delete(k);
+              if (--toRemove <= 0) break;
             }
           }
         }
@@ -1704,9 +1750,9 @@ export async function upgradeSingleTrackFile(tr: any): Promise<boolean> {
   const newExt = path.extname(tempFound);
   const destinationFile = path.join(targetDir, `${safeTitle}${newExt}`);
   try {
-    if (tr.file_path && fs.existsSync(tr.file_path) && tr.file_path !== destinationFile) {
+    if (tr.file_path && fs.existsSync(tr.file_path) && tr.file_path !== destinationFile && isPathInsideMusicDir(tr.file_path)) {
       fs.unlinkSync(tr.file_path);
-    } else if (fs.existsSync(destinationFile)) {
+    } else if (fs.existsSync(destinationFile) && isPathInsideMusicDir(destinationFile)) {
       fs.unlinkSync(destinationFile);
     }
     fs.renameSync(tempFound, destinationFile);
@@ -2004,10 +2050,10 @@ async function redownloadTrackStudioMasterInternal(trackId: number): Promise<{ s
 
     // Now safely replace the old file with the verified new studio master
     const finalFile = path.join(targetDir, `${safeTitle}${path.extname(tempFile)}`);
-    if (track.file_path && fs.existsSync(track.file_path) && track.file_path !== finalFile) {
+    if (track.file_path && fs.existsSync(track.file_path) && track.file_path !== finalFile && isPathInsideMusicDir(track.file_path)) {
       try { fs.unlinkSync(track.file_path); } catch (_) {}
     }
-    if (fs.existsSync(finalFile)) {
+    if (fs.existsSync(finalFile) && isPathInsideMusicDir(finalFile)) {
       try { fs.unlinkSync(finalFile); } catch (_) {}
     }
     fs.renameSync(tempFile, finalFile);

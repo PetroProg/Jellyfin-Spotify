@@ -250,12 +250,33 @@ if (fs.existsSync(publicDir)) {
 
 // In-memory cache for fast user validity checks without DB round-trips on every request
 const userValidityCache = new Map<number, { valid: boolean; exp: number }>();
+const MAX_USER_VALIDITY_CACHE_SIZE = 1000;
+
+function pruneUserValidityCache() {
+  if (userValidityCache.size > MAX_USER_VALIDITY_CACHE_SIZE) {
+    const now = Date.now();
+    for (const [k, v] of userValidityCache.entries()) {
+      if (now > v.exp) {
+        userValidityCache.delete(k);
+      }
+    }
+    if (userValidityCache.size > MAX_USER_VALIDITY_CACHE_SIZE) {
+      let toRemove = userValidityCache.size - Math.floor(MAX_USER_VALIDITY_CACHE_SIZE * 0.8);
+      for (const k of userValidityCache.keys()) {
+        userValidityCache.delete(k);
+        if (--toRemove <= 0) break;
+      }
+    }
+  }
+}
+
 export function isUserValid(userId: number): boolean {
   const now = Date.now();
   const cached = userValidityCache.get(userId);
   if (cached && cached.exp > now) return cached.valid;
   const row = db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
   const valid = Boolean(row);
+  pruneUserValidityCache();
   userValidityCache.set(userId, { valid, exp: now + 30000 }); // 30s cache
   return valid;
 }
@@ -294,6 +315,12 @@ function getSafeHost(req: any): string {
     return rawHost;
   }
   return `localhost:${PORT}`;
+}
+
+function getSafeProto(req: any): string {
+  const rawProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  if (rawProto === 'https' || rawProto === 'http') return rawProto;
+  return req.raw?.socket?.encrypted ? 'https' : 'http';
 }
 
 // Strip internal server paths before returning track to client
@@ -634,6 +661,11 @@ server.get('/api/user/library/backup', { preHandler: [(server as any).authentica
 });
 
 server.post('/api/user/library/restore', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('lib_restore:' + req.user.id, 3, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на восстановление библиотеки. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const userId = req.user.id;
   const payload = req.body;
   if (!payload || typeof payload !== 'object' || (!Array.isArray(payload.playlists) && !Array.isArray(payload.likedTracks) && !Array.isArray(payload.blacklist))) {
@@ -970,8 +1002,12 @@ server.post('/api/daily-mixes/refresh', { preHandler: [(server as any).authentic
 });
 
 server.post('/api/daily-mixes/:id/save', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const mixId = Number(req.params.id);
+  if (!mixId || !Number.isInteger(mixId) || mixId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID микса' });
+  }
   try {
-    const result = saveDailyMixAsPlaylist(req.user.id, Number(req.params.id));
+    const result = saveDailyMixAsPlaylist(req.user.id, mixId);
     return result;
   } catch (err: any) {
     return reply.status(400).send({ error: err.message || 'Ошибка сохранения плейлиста' });
@@ -1033,6 +1069,9 @@ server.post('/api/playlists', { preHandler: [(server as any).authenticate] }, as
 
 server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
+  if (!playlistId || !Number.isInteger(playlistId) || playlistId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID плейлиста' });
+  }
   const playlist: any = db.prepare('SELECT * FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
   if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
 
@@ -1110,6 +1149,9 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
 
 server.put('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
+  if (!playlistId || !Number.isInteger(playlistId) || playlistId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID плейлиста' });
+  }
   const playlist: any = db.prepare('SELECT id, name, description FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
   if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
 
@@ -1139,6 +1181,9 @@ server.put('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
 
 server.put('/api/playlists/:id/cover', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
+  if (!playlistId || !Number.isInteger(playlistId) || playlistId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID плейлиста' });
+  }
   const playlist = db.prepare('SELECT id FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
   if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
 
@@ -1191,6 +1236,9 @@ server.put('/api/playlists/:id/cover', { preHandler: [(server as any).authentica
 
 server.get('/api/playlists/:id/cover', { config: { compress: false } }, async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
+  if (!playlistId || !Number.isInteger(playlistId) || playlistId <= 0) {
+    return reply.status(400).send('Invalid playlist ID');
+  }
   const coversDir = path.join(process.cwd(), 'data', 'covers');
   const filePath = path.join(coversDir, `playlist_${playlistId}.jpg`);
   try {
@@ -1215,6 +1263,9 @@ server.get('/api/playlists/:id/cover', { config: { compress: false } }, async (r
 
 server.delete('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
+  if (!playlistId || !Number.isInteger(playlistId) || playlistId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID плейлиста' });
+  }
   const playlist: any = db.prepare('SELECT id, cover_url FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
   if (!playlist) {
     return reply.status(404).send({ error: 'Плейлист не найден или нет доступа' });
@@ -1239,6 +1290,9 @@ server.delete('/api/playlists/:id', { preHandler: [(server as any).authenticate]
 server.delete('/api/playlists/:id/tracks/:trackId', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
   const trackId = Number(req.params.trackId);
+  if (!playlistId || !Number.isInteger(playlistId) || playlistId <= 0 || !trackId || !Number.isInteger(trackId) || trackId <= 0) {
+    return reply.status(400).send({ error: 'Некорректные идентификаторы плейлиста или трека' });
+  }
 
   const playlist: any = db.prepare('SELECT id, daily_mix_tracks_json FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
   if (!playlist) {
@@ -1274,9 +1328,12 @@ server.delete('/api/playlists/:id/tracks/:trackId', { preHandler: [(server as an
 
 server.post('/api/playlists/:id/tracks', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
+  if (!playlistId || !Number.isInteger(playlistId) || playlistId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID плейлиста' });
+  }
   const body = req.body || {};
   const trackId = Number(body.trackId);
-  if (!trackId) return reply.status(400).send({ error: 'trackId обязателен' });
+  if (!trackId || !Number.isInteger(trackId) || trackId <= 0) return reply.status(400).send({ error: 'trackId обязателен и должен быть целым числом' });
 
   const playlist: any = db.prepare('SELECT id, is_daily_mix, name FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
   if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
@@ -1297,13 +1354,19 @@ server.post('/api/playlists/:id/tracks', { preHandler: [(server as any).authenti
 
 server.get('/api/tracks/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const trackId = Number(req.params.id);
+  if (!trackId || !Number.isInteger(trackId) || trackId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID трека' });
+  }
   const track: any = db.prepare('SELECT id, title, artist, album, duration_ms, cover_url, spotify_id FROM tracks WHERE id = ?').get(trackId);
   if (!track) return reply.status(404).send({ error: 'Трек не найден' });
   return { track };
 });
 
-server.get('/api/tracks/:id/playlists', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+server.get('/api/tracks/:id/playlists', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const trackId = Number(req.params.id);
+  if (!trackId || !Number.isInteger(trackId) || trackId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID трека' });
+  }
   const playlists = db.prepare(`
     SELECT p.id, p.name, p.cover_url, COUNT(pt_all.track_id) as track_count,
            CASE WHEN EXISTS (SELECT 1 FROM playlist_tracks pt WHERE pt.playlist_id = p.id AND pt.track_id = ?) THEN 1 ELSE 0 END as has_track
@@ -1490,6 +1553,14 @@ server.delete('/api/spotify/jobs', { preHandler: [(server as any).authenticate] 
 
 server.post('/api/playlists/:id/resume', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
+  if (!playlistId || !Number.isInteger(playlistId) || playlistId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID плейлиста' });
+  }
+  const limitCheck = consumeRateLimit('pl_resume:' + req.user.id, 5, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на возобновление скачивания. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const playlist = db.prepare('SELECT id FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
   if (!playlist) {
     return reply.status(404).send({ error: 'Плейлист не найден или нет доступа' });
@@ -1503,7 +1574,7 @@ server.get('/api/spotify/status', { preHandler: [(server as any).authenticate] }
   const creds = getSpotifyCredentials();
   const userRow: any = db.prepare('SELECT spotify_access_token, spotify_display_name, spotify_user_id FROM users WHERE id = ?').get(req.user.id);
   const host = getSafeHost(req);
-  const proto = req.headers['x-forwarded-proto'] || (req.raw.socket.encrypted ? 'https' : 'http');
+  const proto = getSafeProto(req);
   const redirectUri = `${proto}://${host}/api/spotify/callback`;
 
   const hasCredentials = Boolean(creds.clientId && creds.clientSecret);
@@ -1543,7 +1614,7 @@ server.get('/api/spotify/auth-url', { preHandler: [(server as any).authenticate]
   try {
     const userRow: any = db.prepare('SELECT spotify_access_token, spotify_display_name, spotify_user_id FROM users WHERE id = ?').get(req.user.id);
     const host = getSafeHost(req);
-    const proto = req.headers['x-forwarded-proto'] || (req.raw.socket.encrypted ? 'https' : 'http');
+    const proto = getSafeProto(req);
     const redirectUri = `${proto}://${host}/api/spotify/callback`;
     const origin = `${proto}://${host}`;
 
@@ -2023,10 +2094,24 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
 });
 
 server.post('/api/tracks/download-single', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('dl_single:' + req.user.id, 10, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на скачивание трека. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const body = req.body || {};
   const { track, playlistId, isLikedOnly } = body;
   if (!track || !track.title || !track.artist) {
     return reply.status(400).send({ error: 'Трек не указан или отсутствуют данные' });
+  }
+
+  let validPlaylistId: number | undefined = undefined;
+  if (playlistId !== undefined && playlistId !== null) {
+    const pId = Number(playlistId);
+    if (!Number.isInteger(pId) || pId <= 0) {
+      return reply.status(400).send({ error: 'Некорректный ID плейлиста' });
+    }
+    validPlaylistId = pId;
   }
 
   // Sanitize and cap length to prevent DoS
@@ -2037,7 +2122,7 @@ server.post('/api/tracks/download-single', { preHandler: [(server as any).authen
   const result = await downloadSingleSpotifyTrackDirect(
     track,
     req.user.id,
-    playlistId !== undefined && playlistId !== null ? Number(playlistId) : undefined,
+    validPlaylistId,
     Boolean(isLikedOnly)
   );
   if (!result.success) {
@@ -2050,6 +2135,11 @@ server.post('/api/tracks/download-single', { preHandler: [(server as any).authen
 });
 
 server.post('/api/tracks/play-instant', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('play_instant:' + req.user.id, 15, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на мгновенное воспроизведение. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const body = req.body || {};
   const { track } = body;
   if (!track || !track.title || !track.artist) {
