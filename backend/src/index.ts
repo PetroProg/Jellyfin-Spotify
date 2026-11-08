@@ -63,7 +63,10 @@ const globalDispatcher = new Agent({
 });
 setGlobalDispatcher(globalDispatcher);
 
-const server = Fastify({ logger: false });
+const server = Fastify({ 
+  logger: false,
+  bodyLimit: 15 * 1024 * 1024 // 15 MB limit for high-res cover uploads and bulk sync payloads
+});
 
 const PORT = Number(process.env.PORT) || 5050;
 

@@ -251,8 +251,16 @@ export function setupWebSocketSync(server: FastifyInstance) {
             if (state.isPlaying !== undefined) playback.isPlaying = state.isPlaying;
             if (state.currentTime !== undefined) playback.currentTime = state.currentTime;
             if (state.duration !== undefined) playback.duration = state.duration;
-            if (state.queue !== undefined) playback.queue = state.queue;
-            if (state.originalQueue !== undefined) playback.originalQueue = state.originalQueue;
+            if (state.queue !== undefined) {
+              playback.queue = Array.isArray(state.queue) && state.queue.length > 500
+                ? state.queue.slice(0, 500)
+                : state.queue;
+            }
+            if (state.originalQueue !== undefined) {
+              playback.originalQueue = Array.isArray(state.originalQueue) && state.originalQueue.length > 500
+                ? state.originalQueue.slice(0, 500)
+                : state.originalQueue;
+            }
             if (state.currentIndex !== undefined) playback.currentIndex = state.currentIndex;
             if (state.shuffle !== undefined) playback.shuffle = state.shuffle;
             if (state.repeat !== undefined) playback.repeat = state.repeat;
@@ -351,8 +359,16 @@ export function setupWebSocketSync(server: FastifyInstance) {
               if (clientState.isPlaying !== undefined) playback.isPlaying = clientState.isPlaying;
               if (clientState.currentTime !== undefined) playback.currentTime = clientState.currentTime;
               if (clientState.duration !== undefined) playback.duration = clientState.duration;
-              if (clientState.queue) playback.queue = clientState.queue;
-              if (clientState.originalQueue) playback.originalQueue = clientState.originalQueue;
+              if (clientState.queue) {
+                playback.queue = Array.isArray(clientState.queue) && clientState.queue.length > 500
+                  ? clientState.queue.slice(0, 500)
+                  : clientState.queue;
+              }
+              if (clientState.originalQueue) {
+                playback.originalQueue = Array.isArray(clientState.originalQueue) && clientState.originalQueue.length > 500
+                  ? clientState.originalQueue.slice(0, 500)
+                  : clientState.originalQueue;
+              }
               if (clientState.currentIndex !== undefined) playback.currentIndex = clientState.currentIndex;
               if (clientState.shuffle !== undefined) playback.shuffle = clientState.shuffle;
               if (clientState.repeat !== undefined) playback.repeat = clientState.repeat;
@@ -429,6 +445,12 @@ export function setupWebSocketSync(server: FastifyInstance) {
             playback.activeDeviceId = null;
             playback.activeDeviceName = null;
 
+            // If user has zero active connections, free heavy queue memory to prevent RAM retention
+            if (!currentClients || currentClients.size === 0) {
+              playback.queue = [];
+              playback.originalQueue = [];
+            }
+
             broadcastToUser(userId, {
               type: 'DEVICES_CHANGED',
               activeDeviceId: playback.activeDeviceId,
@@ -475,6 +497,19 @@ export function setupWebSocketSync(server: FastifyInstance) {
       }
       if (clients.size === 0) {
         userClients.delete(userId);
+      }
+    }
+
+    // Sweep offline inactive userPlayback states older than 15 minutes to prevent RAM leaks
+    const now = Date.now();
+    for (const [userId, playback] of userPlayback.entries()) {
+      const clients = userClients.get(userId);
+      const isOnline = clients && clients.size > 0;
+      if (!isOnline && !playback.isPlaying && (now - playback.updatedAt) > 15 * 60 * 1000) {
+        playback.queue = [];
+        playback.originalQueue = [];
+        playback.track = null;
+        userPlayback.delete(userId);
       }
     }
   }, 30000);
