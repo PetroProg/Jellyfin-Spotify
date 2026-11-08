@@ -47,9 +47,10 @@ import {
 } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
-import { setupWebSocketSync, broadcastToUser } from './sync';
+import { setupWebSocketSync, broadcastToUser, terminateUserSessions } from './sync';
 import { getOrGenerateDailyMixes, saveDailyMixAsPlaylist } from './dailyMix';
 import { startNightlyScheduler, getNightlySchedulerStatus, updateNightlySchedule } from './nightlyScheduler';
+import { getOrGenerateJwtSecret } from './authSecret';
 
 dotenv.config();
 
@@ -72,25 +73,8 @@ const server = Fastify({
 
 const PORT = Number(process.env.PORT) || 5050;
 
-// Security: Generate a persistent random secret if not provided in environment
-function getOrGenerateJwtSecret(): string {
-  const envSecret = process.env.JWT_SECRET;
-  if (envSecret && !envSecret.includes('catppuccin-jellyfin-spotify-secret-key')) {
-    return envSecret;
-  }
-  const secretFile = path.join(process.cwd(), 'data', '.jwt_secret');
-  try {
-    if (fs.existsSync(secretFile)) {
-      const saved = fs.readFileSync(secretFile, 'utf-8').trim();
-      if (saved.length >= 32) return saved;
-    }
-    const generated = crypto.randomBytes(32).toString('hex');
-    fs.writeFileSync(secretFile, generated, { encoding: 'utf-8' });
-    return generated;
-  } catch (_) {
-    return envSecret || crypto.randomBytes(32).toString('hex');
-  }
-}
+// Security: Use shared persistent secret
+export { getOrGenerateJwtSecret };
 const JWT_SECRET = getOrGenerateJwtSecret();
 const MUSIC_DIR = process.env.MUSIC_DIR || path.join(process.cwd(), 'music');
 
@@ -133,9 +117,21 @@ function resetAuthLimit(key: string) {
   authAttempts.delete(key);
 }
 
-// Register Plugins
+// Register Plugins & Security Headers
+server.addHook('onSend', async (_request, reply) => {
+  reply.header('X-Content-Type-Options', 'nosniff');
+  reply.header('X-Frame-Options', 'SAMEORIGIN');
+  reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+});
+
 server.register(cors, { origin: true });
-server.register(jwt, { secret: JWT_SECRET });
+server.register(jwt, { 
+  secret: JWT_SECRET,
+  sign: {
+    expiresIn: '30d'
+  }
+});
 server.register(compress, {
   global: true,
   threshold: 1024,
@@ -187,14 +183,60 @@ if (fs.existsSync(publicDir)) {
   });
 }
 
+// In-memory cache for fast user validity checks without DB round-trips on every request
+const userValidityCache = new Map<number, { valid: boolean; exp: number }>();
+export function isUserValid(userId: number): boolean {
+  const now = Date.now();
+  const cached = userValidityCache.get(userId);
+  if (cached && cached.exp > now) return cached.valid;
+  const row = db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
+  const valid = Boolean(row);
+  userValidityCache.set(userId, { valid, exp: now + 30000 }); // 30s cache
+  return valid;
+}
+export function invalidateUserCache(userId: number) {
+  userValidityCache.delete(userId);
+}
+
 // Authentication Decorator
 server.decorate('authenticate', async (request: any, reply: any) => {
   try {
     await request.jwtVerify();
+    const userId = request.user?.id;
+    if (!userId || !isUserValid(userId)) {
+      return reply.status(401).send({ error: 'Пользователь не найден или сессия недействительна' });
+    }
   } catch (err) {
     reply.status(401).send({ error: 'Требуется авторизация' });
   }
 });
+
+// Admin check helper
+function isAdmin(req: any): boolean {
+  if (!req.user || !req.user.id) return false;
+  if (req.user.id === 1) return true;
+  const adminUser = process.env.ADMIN_USER;
+  if (adminUser) {
+    if (String(req.user.id) === adminUser || req.user.username === adminUser) return true;
+  }
+  return false;
+}
+
+// Host header sanitizer to prevent Host injection vulnerabilities
+function getSafeHost(req: any): string {
+  const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`).split(',')[0].trim();
+  if (/^[a-zA-Z0-9.:-]+$/.test(rawHost)) {
+    return rawHost;
+  }
+  return `localhost:${PORT}`;
+}
+
+// Strip internal server paths before returning track to client
+function sanitizeTrackForClient(track: any) {
+  if (!track) return track;
+  const { file_path, ...safe } = track;
+  return safe;
+}
 
 // ----------------- AUTH ROUTES -----------------
 server.post('/api/auth/register', async (req: any, reply: any) => {
@@ -242,7 +284,7 @@ server.post('/api/auth/register', async (req: any, reply: any) => {
   // Check and notify if users >= 5
   checkAndNotifyUserLimit(totalUsers).catch(() => {});
 
-  const token = server.jwt.sign({ id: userId, username: cleanUser });
+  const token = server.jwt.sign({ id: userId, username: cleanUser }, { expiresIn: '30d' });
   return {
     token,
     user: { id: userId, username: cleanUser, display_name: display_name || cleanUser, email: resolvedEmail }
@@ -273,7 +315,7 @@ server.post('/api/auth/login', async (req: any, reply: any) => {
 
   resetAuthLimit(rateLimitKey);
 
-  const token = server.jwt.sign({ id: user.id, username: user.username });
+  const token = server.jwt.sign({ id: user.id, username: user.username }, { expiresIn: '30d' });
   const settings = getUserSettings(user.id);
   return {
     token,
@@ -304,7 +346,7 @@ server.get('/api/user/settings', { preHandler: [(server as any).authenticate] },
   return { settings };
 });
 
-server.put('/api/user/settings', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+server.put('/api/user/settings', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const userId = req.user.id;
   const body = req.body || {};
   const upsert = db.prepare(`
@@ -314,14 +356,18 @@ server.put('/api/user/settings', { preHandler: [(server as any).authenticate] },
   `);
 
   const saveItem = (k: string, v: any) => {
-    if (typeof k === 'string' && k.length > 0 && k.length <= 64) {
-      const valStr = typeof v === 'string' ? v : JSON.stringify(v);
+    if (typeof k === 'string' && /^[a-zA-Z0-9_.-]{1,64}$/.test(k)) {
+      let valStr = typeof v === 'string' ? v : JSON.stringify(v);
+      if (valStr.length > 4096) {
+        valStr = valStr.slice(0, 4096);
+      }
       upsert.run(userId, k, valStr);
     }
   };
 
   const saveManyTx = db.transaction((entries: [string, any][]) => {
-    for (const [k, v] of entries) {
+    // Restrict to max 50 keys in a single update
+    for (const [k, v] of entries.slice(0, 50)) {
       saveItem(k, v);
     }
   });
@@ -348,7 +394,7 @@ const handleProfileUpdate = async (req: any, reply: any) => {
   if (!displayName || !String(displayName).trim()) {
     return reply.status(400).send({ error: 'Имя не может быть пустым' });
   }
-  const clean = String(displayName).trim();
+  const clean = String(displayName).trim().slice(0, 100);
   db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(clean, req.user.id);
   return { success: true, display_name: clean };
 };
@@ -357,18 +403,28 @@ server.put('/api/auth/profile', { preHandler: [(server as any).authenticate] }, 
 server.put('/api/user/profile', { preHandler: [(server as any).authenticate] }, handleProfileUpdate);
 
 const handlePasswordUpdate = async (req: any, reply: any) => {
+  const rateKey = `pwd_action:${req.user.id}`;
+  const limitCheck = checkRateLimit(rateKey, 5);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({
+      error: `Слишком много неудачных попыток. Попробуйте снова через ${limitCheck.retryAfterSec || 60} сек.`
+    });
+  }
+
   const body = req.body || {};
   const currentPassword = body.current_password || body.currentPassword;
   const newPassword = body.new_password || body.newPassword;
   const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
 
   if (!user || !(await bcrypt.compare(currentPassword, user.password_hash))) {
+    recordFailedAuth(rateKey, 5);
     return reply.status(400).send({ error: 'Текущий пароль указан неверно' });
   }
   if (!newPassword || newPassword.length < 4) {
     return reply.status(400).send({ error: 'Новый пароль слишком короткий' });
   }
 
+  resetAuthLimit(rateKey);
   const newHash = await bcrypt.hash(newPassword, 10);
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(newHash, req.user.id);
   return { success: true, message: 'Пароль успешно обновлен' };
@@ -378,13 +434,26 @@ server.put('/api/auth/password', { preHandler: [(server as any).authenticate] },
 server.put('/api/user/password', { preHandler: [(server as any).authenticate] }, handlePasswordUpdate);
 
 const handleAccountDelete = async (req: any, reply: any) => {
+  const rateKey = `pwd_action:${req.user.id}`;
+  const limitCheck = checkRateLimit(rateKey, 5);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({
+      error: `Слишком много неудачных попыток. Попробуйте снова через ${limitCheck.retryAfterSec || 60} сек.`
+    });
+  }
+
   const body = req.body || {};
   const password = body.password;
   const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
   if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+    recordFailedAuth(rateKey, 5);
     return reply.status(400).send({ error: 'Неверный пароль. Удаление отменено.' });
   }
 
+  resetAuthLimit(rateKey);
+  invalidateUserCache(req.user.id);
+  terminateUserSessions(req.user.id);
+  db.prepare('DELETE FROM download_jobs WHERE user_id = ?').run(req.user.id);
   db.prepare('DELETE FROM users WHERE id = ?').run(req.user.id);
   return { success: true, message: 'Аккаунт успешно удален' };
 };
@@ -934,17 +1003,41 @@ server.put('/api/playlists/:id/cover', { preHandler: [(server as any).authentica
 
   const body = req.body || {};
   const { image_base64, cover_url } = body;
-  let finalUrl = cover_url;
+  let finalUrl = '';
 
   if (image_base64) {
+    if (typeof image_base64 !== 'string') {
+      return reply.status(400).send({ error: 'Неверный формат изображения' });
+    }
+    const base64Data = image_base64.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    // Security: Max 5 MB limit
+    if (buffer.length > 5 * 1024 * 1024) {
+      return reply.status(400).send({ error: 'Размер изображения превышает 5 МБ' });
+    }
+
+    // Security: Magic bytes verification (JPEG, PNG, WebP, GIF)
+    const isJpeg = buffer.length > 3 && buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF;
+    const isPng = buffer.length > 8 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47;
+    const isWebp = buffer.length > 12 && buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP';
+    const isGif = buffer.length > 3 && buffer.subarray(0, 3).toString('ascii') === 'GIF';
+
+    if (!isJpeg && !isPng && !isWebp && !isGif) {
+      return reply.status(400).send({ error: 'Недопустимый формат файла. Допускаются только JPEG, PNG или WebP' });
+    }
+
     const coversDir = path.join(process.cwd(), 'data', 'covers');
     if (!fs.existsSync(coversDir)) fs.mkdirSync(coversDir, { recursive: true });
 
-    const base64Data = image_base64.replace(/^data:image\/\w+;base64,/, '');
-    const buffer = Buffer.from(base64Data, 'base64');
     const filePath = path.join(coversDir, `playlist_${playlistId}.jpg`);
     await fs.promises.writeFile(filePath, buffer);
     finalUrl = `/api/playlists/${playlistId}/cover?t=${Date.now()}`;
+  } else if (cover_url) {
+    if (typeof cover_url !== 'string' || (!cover_url.startsWith('https://') && !cover_url.startsWith('http://') && !cover_url.startsWith('/api/'))) {
+      return reply.status(400).send({ error: 'Недопустимый URL обложки. Разрешены только HTTP(S) ссылки или внутренние пути' });
+    }
+    finalUrl = cover_url.slice(0, 2048);
   }
 
   if (!finalUrl) {
@@ -1063,7 +1156,7 @@ server.post('/api/playlists/:id/tracks', { preHandler: [(server as any).authenti
 
 server.get('/api/tracks/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const trackId = Number(req.params.id);
-  const track: any = db.prepare('SELECT id, title, artist, album, duration_ms, cover_url, file_path, spotify_id FROM tracks WHERE id = ?').get(trackId);
+  const track: any = db.prepare('SELECT id, title, artist, album, duration_ms, cover_url, spotify_id FROM tracks WHERE id = ?').get(trackId);
   if (!track) return reply.status(404).send({ error: 'Трек не найден' });
   return { track };
 });
@@ -1259,17 +1352,18 @@ server.post('/api/playlists/:id/resume', { preHandler: [(server as any).authenti
 server.get('/api/spotify/status', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const creds = getSpotifyCredentials();
   const userRow: any = db.prepare('SELECT spotify_access_token, spotify_display_name, spotify_user_id FROM users WHERE id = ?').get(req.user.id);
-  const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
+  const host = getSafeHost(req);
   const proto = req.headers['x-forwarded-proto'] || (req.raw.socket.encrypted ? 'https' : 'http');
   const redirectUri = `${proto}://${host}/api/spotify/callback`;
 
   const hasCredentials = Boolean(creds.clientId && creds.clientSecret);
   const isConnected = Boolean(userRow?.spotify_access_token);
+  const userIsAdmin = isAdmin(req);
 
   return {
     hasCredentials,
     isConnected,
-    clientId: creds.clientId || '',
+    clientId: userIsAdmin ? (creds.clientId || '') : (creds.clientId ? `${creds.clientId.slice(0, 6)}...` : ''),
     redirectUri,
     spotifyDisplayName: userRow?.spotify_display_name || userRow?.spotify_user_id || null,
     updatedAt: new Date().toISOString()
@@ -1277,6 +1371,10 @@ server.get('/api/spotify/status', { preHandler: [(server as any).authenticate] }
 });
 
 server.post('/api/spotify/credentials', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  if (!isAdmin(req)) {
+    return reply.status(403).send({ error: 'Доступ разрешен только администратору' });
+  }
+
   const body = req.body || {};
   const clientId = (body.clientId || body.spotify_client_id || '').trim();
   const clientSecret = (body.clientSecret || body.spotify_client_secret || '').trim();
@@ -1294,7 +1392,7 @@ server.post('/api/spotify/credentials', { preHandler: [(server as any).authentic
 server.get('/api/spotify/auth-url', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   try {
     const userRow: any = db.prepare('SELECT spotify_access_token, spotify_display_name, spotify_user_id FROM users WHERE id = ?').get(req.user.id);
-    const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
+    const host = getSafeHost(req);
     const proto = req.headers['x-forwarded-proto'] || (req.raw.socket.encrypted ? 'https' : 'http');
     const redirectUri = `${proto}://${host}/api/spotify/callback`;
     const origin = `${proto}://${host}`;
@@ -1544,8 +1642,13 @@ server.post('/api/spotify/import-user-playlists', { preHandler: [(server as any)
 server.post('/api/spotify/import-list', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const body = req.body || {};
   const { text, playlistName, playlistId: requestedPlaylistId } = body;
-  if (!text || !text.trim()) {
+  if (!text || typeof text !== 'string' || !text.trim()) {
     return reply.status(400).send({ error: 'Вставьте список треков или ссылок' });
+  }
+
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+  if (lines.length > 500) {
+    return reply.status(400).send({ error: 'Превышен лимит строк для разового импорта (максимум 500 треков)' });
   }
 
   try {
@@ -1708,7 +1811,7 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
         ...st,
         is_downloaded: !!matchedLocal,
         local_track_id: matchedLocal?.id || null,
-        local_track: matchedLocal || null
+        local_track: sanitizeTrackForClient(matchedLocal) || null
       };
     });
 
@@ -1717,7 +1820,7 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
 
   // 1. Search Local Database (up to 5 tracks, deduplicated by title & artist)
   const localTracks = db.prepare(`
-    SELECT * FROM tracks
+    SELECT id, title, artist, album, duration_ms, cover_url, spotify_id FROM tracks
     WHERE LOWER(title) LIKE LOWER(?) OR LOWER(artist) LIKE LOWER(?) OR LOWER(album) LIKE LOWER(?)
     GROUP BY LOWER(title), LOWER(artist)
     ORDER BY
@@ -1747,7 +1850,7 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
       ...st,
       is_downloaded: !!matchedLocal,
       local_track_id: matchedLocal?.id || null,
-      local_track: matchedLocal || null
+      local_track: sanitizeTrackForClient(matchedLocal) || null
     };
   });
 
@@ -1760,6 +1863,11 @@ server.post('/api/tracks/download-single', { preHandler: [(server as any).authen
   if (!track || !track.title || !track.artist) {
     return reply.status(400).send({ error: 'Трек не указан или отсутствуют данные' });
   }
+
+  // Sanitize and cap length to prevent DoS
+  track.title = String(track.title).slice(0, 250);
+  track.artist = String(track.artist).slice(0, 250);
+  if (track.album) track.album = String(track.album).slice(0, 250);
 
   const result = await downloadSingleSpotifyTrackDirect(
     track,
@@ -1780,6 +1888,11 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
     return reply.status(400).send({ error: 'Трек не указан или отсутствуют данные' });
   }
 
+  // Sanitize and cap length to prevent DoS
+  track.title = String(track.title).slice(0, 250);
+  track.artist = String(track.artist).slice(0, 250);
+  if (track.album) track.album = String(track.album).slice(0, 250);
+
   // 1. Check if track already exists locally in DB
   const existing: any = db.prepare(`
     SELECT * FROM tracks 
@@ -1794,7 +1907,7 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
     return {
       isExisting: true,
       isPreview: false,
-      track: existing,
+      track: sanitizeTrackForClient(existing),
       streamUrl: `/api/stream/${existing.id}`
     };
   }
@@ -1806,7 +1919,7 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
       broadcastToUser(req.user.id, {
         type: 'INSTANT_TRACK_DOWNLOADED',
         spotifyId: track.id,
-        track: res.track
+        track: sanitizeTrackForClient(res.track)
       });
     }
   }).catch((err) => {
@@ -1891,7 +2004,10 @@ server.get('/api/tracks/quality-stats', { preHandler: [(server as any).authentic
   return getQualityAuditStats();
 });
 
-server.post('/api/tracks/upgrade-quality', { preHandler: [(server as any).authenticate] }, async () => {
+server.post('/api/tracks/upgrade-quality', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  if (!isAdmin(req)) {
+    return reply.status(403).send({ error: 'Доступ разрешен только администратору' });
+  }
   return await reDownloadAllTracksInHighQuality();
 });
 
@@ -1899,7 +2015,10 @@ server.get('/api/tracks/upgrade-quality/status', { preHandler: [(server as any).
   return getUpgradeProgress();
 });
 
-server.post('/api/tracks/upgrade-quality/stop', { preHandler: [(server as any).authenticate] }, async () => {
+server.post('/api/tracks/upgrade-quality/stop', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  if (!isAdmin(req)) {
+    return reply.status(403).send({ error: 'Доступ разрешен только администратору' });
+  }
   return { stopped: stopQualityUpgrade() };
 });
 
@@ -2098,7 +2217,11 @@ server.get('/api/settings', { preHandler: [(server as any).authenticate] }, asyn
   };
 });
 
-server.post('/api/settings', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+server.post('/api/settings', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  if (!isAdmin(req)) {
+    return reply.status(403).send({ error: 'Доступ разрешен только администратору' });
+  }
+
   const body = req.body || {};
   const { clientId, clientSecret } = body;
   if (clientId) {

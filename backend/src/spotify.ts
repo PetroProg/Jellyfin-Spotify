@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { db } from './db';
+import { getOrGenerateJwtSecret } from './authSecret';
 
 export interface SpotifyTrack {
   id: string;
@@ -135,8 +136,6 @@ export async function getUserSpotifyToken(userId: number): Promise<string | null
   return row.spotify_access_token;
 }
 
-const OAUTH_STATE_SECRET = process.env.JWT_SECRET || 'jellyfin-spotify-oauth-secret';
-
 export function getSpotifyAuthUrl(userId: number, redirectUri: string, origin: string): string {
   const { clientId } = getSpotifyCredentials();
   if (!clientId) throw new Error('Spotify Client ID не настроен в настройках приложения');
@@ -147,8 +146,10 @@ export function getSpotifyAuthUrl(userId: number, redirectUri: string, origin: s
     'user-library-read'
   ].join(' ');
 
-  const payload = JSON.stringify({ userId, origin, redirectUri });
-  const sig = crypto.createHmac('sha256', OAUTH_STATE_SECRET).update(payload).digest('base64url');
+  const exp = Date.now() + 10 * 60 * 1000; // 10 minutes TTL
+  const payload = JSON.stringify({ userId, origin, redirectUri, exp });
+  const secret = getOrGenerateJwtSecret();
+  const sig = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
   const statePayload = Buffer.from(JSON.stringify({ p: payload, s: sig })).toString('base64url');
 
   const params = new URLSearchParams({
@@ -170,22 +171,27 @@ export async function handleSpotifyOAuthCallback(code: string, stateStr: string)
 
   try {
     const rawParsed = JSON.parse(Buffer.from(stateStr, 'base64url').toString('utf-8'));
-    if (rawParsed && rawParsed.p && rawParsed.s) {
-      const expectedSig = crypto.createHmac('sha256', OAUTH_STATE_SECRET).update(rawParsed.p).digest('base64url');
-      if (expectedSig !== rawParsed.s) {
-        throw new Error('Подпись state не совпадает (возможна попытка CSRF-атаки)');
-      }
-      const data = JSON.parse(rawParsed.p);
-      userId = data.userId;
-      origin = data.origin || '';
-      redirectUri = data.redirectUri;
-    } else if (rawParsed && typeof rawParsed.userId === 'number') {
-      userId = rawParsed.userId;
-      origin = rawParsed.origin || '';
-      redirectUri = rawParsed.redirectUri;
-    } else {
-      throw new Error('Неверный формат state');
+    if (!rawParsed || typeof rawParsed !== 'object' || !rawParsed.p || !rawParsed.s || typeof rawParsed.p !== 'string' || typeof rawParsed.s !== 'string') {
+      throw new Error('Неверный или поврежденный формат OAuth state');
     }
+
+    const secret = getOrGenerateJwtSecret();
+    const expectedSig = crypto.createHmac('sha256', secret).update(rawParsed.p).digest('base64url');
+    
+    const sigBuf = Buffer.from(rawParsed.s, 'utf-8');
+    const expBuf = Buffer.from(expectedSig, 'utf-8');
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      throw new Error('Подпись state не совпадает (возможна попытка CSRF-атаки)');
+    }
+
+    const data = JSON.parse(rawParsed.p);
+    if (!data.exp || typeof data.exp !== 'number' || Date.now() > data.exp) {
+      throw new Error('Срок действия OAuth state истек. Пожалуйста, повторите попытку авторизации.');
+    }
+
+    userId = data.userId;
+    origin = data.origin || '';
+    redirectUri = data.redirectUri;
   } catch (e: any) {
     throw new Error('Неверный параметр state в ответе Spotify: ' + e.message);
   }
@@ -1275,7 +1281,8 @@ export async function parseTrackListText(text: string, userId?: number): Promise
   const lines = text
     .split(/\r?\n/)
     .map(l => l.trim())
-    .filter(l => l.length > 0 && !l.startsWith('#'));
+    .filter(l => l.length > 0 && !l.startsWith('#'))
+    .slice(0, 500);
 
   const rawTracks: SpotifyTrack[] = [];
   const token = (userId ? await getUserSpotifyToken(userId) : null) || await getAccessToken();

@@ -1,5 +1,6 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { FastifyInstance } from 'fastify';
+import { db } from './db';
 
 export interface DeviceInfo {
   id: string;
@@ -109,7 +110,10 @@ export function broadcastToUser(userId: number, message: any, excludeDeviceId?: 
 }
 
 export function setupWebSocketSync(server: FastifyInstance) {
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ 
+    noServer: true,
+    maxPayload: 512 * 1024 // 512 KB maximum frame/message payload to prevent OOM
+  });
 
   server.server.on('upgrade', (request, socket, head) => {
     try {
@@ -138,6 +142,14 @@ export function setupWebSocketSync(server: FastifyInstance) {
 
       const userId = decoded.id;
       if (!userId) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      // Check if user still exists in DB
+      const userExists = db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
+      if (!userExists) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
@@ -177,40 +189,57 @@ export function setupWebSocketSync(server: FastifyInstance) {
         switch (data.type) {
           case 'REGISTER': {
             const { deviceId, deviceName, deviceType, hasActivePlayback } = data;
-            if (!deviceId) return;
+            if (!deviceId || typeof deviceId !== 'string') return;
 
-            session.deviceId = deviceId;
-            session.deviceName = deviceName || 'Браузер';
-            session.deviceType = deviceType || 'desktop';
+            const cleanDeviceId = String(deviceId).trim().slice(0, 64);
+            const cleanDeviceName = String(deviceName || 'Устройство').trim().slice(0, 64);
+            const cleanDeviceType = (['desktop', 'mobile', 'tablet'].includes(deviceType) ? deviceType : 'desktop') as 'desktop' | 'mobile' | 'tablet';
+
+            session.deviceId = cleanDeviceId;
+            session.deviceName = cleanDeviceName;
+            session.deviceType = cleanDeviceType;
 
             let clients = userClients.get(userId);
             if (!clients) {
               clients = new Map<string, ClientSession>();
               userClients.set(userId, clients);
             }
-            clients.set(deviceId, session);
+
+            // Limit concurrent devices per user to 15 to prevent memory exhaustion
+            if (!clients.has(cleanDeviceId) && clients.size >= 15) {
+              const oldestId = clients.keys().next().value;
+              if (oldestId) {
+                const oldSession = clients.get(oldestId);
+                if (oldSession) {
+                  try { oldSession.ws.close(1008, 'Max devices exceeded'); } catch (_) {}
+                }
+                clients.delete(oldestId);
+              }
+            }
+
+            clients.set(cleanDeviceId, session);
 
             // Cancel any pending disconnect timer for this user if this was active device
-            if (playback.activeDeviceId === deviceId || hasActivePlayback) {
+            if (playback.activeDeviceId === cleanDeviceId || hasActivePlayback) {
               const timer = disconnectTimers.get(userId);
               if (timer) {
                 clearTimeout(timer);
                 disconnectTimers.delete(userId);
               }
-              playback.activeDeviceId = deviceId;
+              playback.activeDeviceId = cleanDeviceId;
               playback.activeDeviceName = session.deviceName;
             }
 
             // If no active device currently, make this device the active candidate
             if (!playback.activeDeviceId) {
-              playback.activeDeviceId = deviceId;
+              playback.activeDeviceId = cleanDeviceId;
               playback.activeDeviceName = session.deviceName;
             }
 
             // Send initial state to the registering client
             safeSend(ws, {
               type: 'SYNC_INIT',
-              myDeviceId: deviceId,
+              myDeviceId: cleanDeviceId,
               activeDeviceId: playback.activeDeviceId,
               activeDeviceName: playback.activeDeviceName,
               devices: getDeviceList(userId),
@@ -226,7 +255,7 @@ export function setupWebSocketSync(server: FastifyInstance) {
                 activeDeviceName: playback.activeDeviceName,
                 devices: getDeviceList(userId),
               },
-              deviceId
+              cleanDeviceId
             );
             break;
           }
@@ -545,5 +574,28 @@ export function broadcastToAll(message: any) {
     }
   }
 }
+
+/**
+ * Immediately closes and terminates all active WebSocket sessions and cached playback state
+ * for a deleted or deactivated user.
+ */
+export function terminateUserSessions(userId: number) {
+  const clients = userClients.get(userId);
+  if (clients) {
+    for (const client of clients.values()) {
+      try {
+        client.ws.close(1000, 'Session terminated');
+      } catch (_) {}
+    }
+    userClients.delete(userId);
+  }
+  userPlayback.delete(userId);
+  const timer = disconnectTimers.get(userId);
+  if (timer) {
+    clearTimeout(timer);
+    disconnectTimers.delete(userId);
+  }
+}
+
 
 

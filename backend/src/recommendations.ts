@@ -10,7 +10,6 @@ export interface RecommendationTrack {
   cover_url: string;
   duration_ms: number;
   is_local: boolean;
-  file_path?: string;
   spotify_id?: string;
 }
 
@@ -75,7 +74,7 @@ export async function getRecommendations(
   if (searchArtists.length > 0) {
     const placeholders = searchArtists.map(() => '?').join(',');
     const matched = db.prepare(`
-      SELECT id, title, artist, album, duration_ms, file_path, cover_url, spotify_id
+      SELECT id, title, artist, album, duration_ms, cover_url, spotify_id
       FROM tracks
       WHERE artist IN (${placeholders})
       LIMIT 60
@@ -86,7 +85,7 @@ export async function getRecommendations(
     if (localCandidates.length < 10) {
       const primary = searchArtists[0];
       const likeMatched = db.prepare(`
-        SELECT id, title, artist, album, duration_ms, file_path, cover_url, spotify_id
+        SELECT id, title, artist, album, duration_ms, cover_url, spotify_id
         FROM tracks
         WHERE artist LIKE ? AND artist NOT IN (${placeholders})
         LIMIT 30
@@ -98,7 +97,7 @@ export async function getRecommendations(
   // 2. Fast Fallback to local tracks if fewer than 6 candidates found (fast index scan instead of full table ORDER BY RANDOM())
   if (localCandidates.length < 6) {
     const moreLocal = db.prepare(`
-      SELECT id, title, artist, album, duration_ms, file_path, cover_url, spotify_id
+      SELECT id, title, artist, album, duration_ms, cover_url, spotify_id
       FROM tracks
       ORDER BY id DESC
       LIMIT 80
@@ -126,7 +125,6 @@ export async function getRecommendations(
       cover_url: tr.cover_url || '',
       duration_ms: tr.duration_ms || 180000,
       is_local: true,
-      file_path: tr.file_path,
       spotify_id: tr.spotify_id || undefined
     });
 
