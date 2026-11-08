@@ -313,16 +313,18 @@ server.put('/api/user/settings', { preHandler: [(server as any).authenticate] },
     }
   };
 
+  const saveManyTx = db.transaction((entries: [string, any][]) => {
+    for (const [k, v] of entries) {
+      saveItem(k, v);
+    }
+  });
+
   if (body.key !== undefined && body.value !== undefined) {
     saveItem(body.key, body.value);
   } else if (body.settings && typeof body.settings === 'object') {
-    for (const [k, v] of Object.entries(body.settings)) {
-      saveItem(k, v);
-    }
+    saveManyTx(Object.entries(body.settings));
   } else if (typeof body === 'object') {
-    for (const [k, v] of Object.entries(body)) {
-      saveItem(k, v);
-    }
+    saveManyTx(Object.entries(body));
   }
 
   const settings = getUserSettings(userId);
@@ -403,24 +405,43 @@ server.get('/api/user/library/backup', { preHandler: [(server as any).authentica
     ORDER BY id ASC
   `).all(userId);
 
-  const playlistsWithTracks = customPlaylists.map((pl) => {
-    const tracks: any[] = db.prepare(`
-      SELECT t.title, t.artist, t.album, t.duration_ms, t.spotify_id, t.cover_url, pt.position
-      FROM playlist_tracks pt
-      JOIN tracks t ON pt.track_id = t.id
-      WHERE pt.playlist_id = ?
-      ORDER BY pt.position ASC
-    `).all(pl.id);
-    return {
-      name: pl.name,
-      description: pl.description,
-      cover_url: pl.cover_url,
-      spotify_id: pl.spotify_id,
-      is_daily_mix: pl.is_daily_mix,
-      daily_mix_date: pl.daily_mix_date,
-      tracks,
-    };
-  });
+  // Single JOIN query for all user playlist tracks to eliminate N+1 queries
+  const allPlaylistTracks: any[] = db.prepare(`
+    SELECT pt.playlist_id, t.title, t.artist, t.album, t.duration_ms, t.spotify_id, t.cover_url, pt.position
+    FROM playlist_tracks pt
+    JOIN tracks t ON pt.track_id = t.id
+    JOIN playlists p ON pt.playlist_id = p.id
+    WHERE p.user_id = ?
+    ORDER BY pt.playlist_id, pt.position ASC
+  `).all(userId);
+
+  const tracksByPlaylistId = new Map<number, any[]>();
+  for (const tr of allPlaylistTracks) {
+    let list = tracksByPlaylistId.get(tr.playlist_id);
+    if (!list) {
+      list = [];
+      tracksByPlaylistId.set(tr.playlist_id, list);
+    }
+    list.push({
+      title: tr.title,
+      artist: tr.artist,
+      album: tr.album,
+      duration_ms: tr.duration_ms,
+      spotify_id: tr.spotify_id,
+      cover_url: tr.cover_url,
+      position: tr.position
+    });
+  }
+
+  const playlistsWithTracks = customPlaylists.map((pl) => ({
+    name: pl.name,
+    description: pl.description,
+    cover_url: pl.cover_url,
+    spotify_id: pl.spotify_id,
+    is_daily_mix: pl.is_daily_mix,
+    daily_mix_date: pl.daily_mix_date,
+    tracks: tracksByPlaylistId.get(pl.id) || [],
+  }));
 
   const blacklist: any[] = db.prepare(`
     SELECT title, artist, spotify_id FROM blacklist WHERE user_id = ?
@@ -450,86 +471,84 @@ server.post('/api/user/library/restore', { preHandler: [(server as any).authenti
   let restoredLikes = 0;
   let restoredPlaylists = 0;
   let restoredTracks = 0;
+  let restoredBlacklist = 0;
 
-  // 1. Restore Liked Tracks
-  if (Array.isArray(payload.likedTracks)) {
-    for (const t of payload.likedTracks) {
-      if (!t.title || !t.artist) continue;
-      const trackRow: any = db.prepare(`
-        SELECT id FROM tracks 
-        WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
-           OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
-        LIMIT 1
-      `).get(t.spotify_id || '', t.title, t.artist);
+  // Prepare reusable statements outside loops
+  const findTrackStmt = db.prepare(`
+    SELECT id FROM tracks 
+    WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+       OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+    LIMIT 1
+  `);
+  const insertLikeStmt = db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)');
+  const insertPlStmt = db.prepare(`
+    INSERT INTO playlists (user_id, name, description, cover_url, spotify_id, is_daily_mix, daily_mix_date)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  const insertPlTrackStmt = db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)');
+  const insertBlStmt = db.prepare('INSERT OR IGNORE INTO blacklist (user_id, title, artist, spotify_id) VALUES (?, ?, ?, ?)');
 
-      if (trackRow) {
-        db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, trackRow.id);
-        restoredLikes++;
+  // Execute all restores inside an atomic transaction
+  const restoreTx = db.transaction(() => {
+    // 1. Restore Liked Tracks
+    if (Array.isArray(payload.likedTracks)) {
+      for (const t of payload.likedTracks) {
+        if (!t.title || !t.artist) continue;
+        const trackRow: any = findTrackStmt.get(t.spotify_id || '', t.title, t.artist);
+        if (trackRow) {
+          insertLikeStmt.run(userId, trackRow.id);
+          restoredLikes++;
+        }
       }
     }
-  }
 
-  // 2. Restore Playlists
-  if (Array.isArray(payload.playlists)) {
-    for (const pl of payload.playlists) {
-      if (!pl.name) continue;
-      const info = db.prepare(`
-        INSERT INTO playlists (user_id, name, description, cover_url, spotify_id, is_daily_mix, daily_mix_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        userId,
-        pl.name,
-        pl.description || '',
-        pl.cover_url || null,
-        pl.spotify_id || null,
-        pl.is_daily_mix ? 1 : 0,
-        pl.daily_mix_date || null
-      );
-      const newPlaylistId = Number(info.lastInsertRowid);
-      restoredPlaylists++;
+    // 2. Restore Playlists
+    if (Array.isArray(payload.playlists)) {
+      for (const pl of payload.playlists) {
+        if (!pl.name) continue;
+        const info = insertPlStmt.run(
+          userId,
+          pl.name,
+          pl.description || '',
+          pl.cover_url || null,
+          pl.spotify_id || null,
+          pl.is_daily_mix ? 1 : 0,
+          pl.daily_mix_date || null
+        );
+        const newPlaylistId = Number(info.lastInsertRowid);
+        restoredPlaylists++;
 
-      if (Array.isArray(pl.tracks)) {
-        let pos = 0;
-        for (const t of pl.tracks) {
-          if (!t.title || !t.artist) continue;
-          const trackRow: any = db.prepare(`
-            SELECT id FROM tracks 
-            WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
-               OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
-            LIMIT 1
-          `).get(t.spotify_id || '', t.title, t.artist);
-
-          if (trackRow) {
-            db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)').run(
-              newPlaylistId,
-              trackRow.id,
-              pos++
-            );
-            restoredTracks++;
+        if (Array.isArray(pl.tracks)) {
+          let pos = 0;
+          for (const t of pl.tracks) {
+            if (!t.title || !t.artist) continue;
+            const trackRow: any = findTrackStmt.get(t.spotify_id || '', t.title, t.artist);
+            if (trackRow) {
+              insertPlTrackStmt.run(newPlaylistId, trackRow.id, pos++);
+              restoredTracks++;
+            }
           }
         }
       }
     }
-  }
 
-  // 3. Restore Blacklist
-  if (Array.isArray(payload.blacklist)) {
-    for (const b of payload.blacklist) {
-      if (b.title && b.artist) {
-        db.prepare('INSERT OR IGNORE INTO blacklist (user_id, title, artist, spotify_id) VALUES (?, ?, ?, ?)').run(
-          userId,
-          b.title,
-          b.artist,
-          b.spotify_id || null
-        );
+    // 3. Restore Blacklist
+    if (Array.isArray(payload.blacklist)) {
+      for (const b of payload.blacklist) {
+        if (b.title && b.artist) {
+          insertBlStmt.run(userId, b.title, b.artist, b.spotify_id || null);
+          restoredBlacklist++;
+        }
       }
     }
-  }
+  });
+
+  restoreTx();
 
   return {
     success: true,
     message: `Успешно восстановлено: ${restoredLikes} лайков, ${restoredPlaylists} плейлистов (${restoredTracks} треков)`,
-    stats: { restoredLikes, restoredPlaylists, restoredTracks }
+    stats: { restoredLikes, restoredPlaylists, restoredTracks, restoredBlacklist }
   };
 });
 
@@ -1365,25 +1384,39 @@ server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenti
     let immediatelyLinked = 0;
     const needDownload: typeof playlistData.tracks = [];
 
-    for (const st of missingFromLiked) {
-      const onDisk: any = db.prepare(`
-        SELECT id, spotify_id FROM tracks 
-        WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
-           OR (LOWER(title) = ? AND LOWER(artist) = ?)
-        LIMIT 1
-      `).get(st.id, st.title.toLowerCase().trim(), st.artist.toLowerCase().trim());
+    const findOnDiskStmt = db.prepare(`
+      SELECT id, spotify_id FROM tracks 
+      WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+         OR (LOWER(title) = ? AND LOWER(artist) = ?)
+      LIMIT 1
+    `);
 
+    const tracksToLink: { id: number; spotifyId?: string; hasSpotifyId: boolean }[] = [];
+
+    for (const st of missingFromLiked) {
+      const onDisk: any = findOnDiskStmt.get(st.id, st.title.toLowerCase().trim(), st.artist.toLowerCase().trim());
       if (onDisk) {
-        db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(req.user.id, onDisk.id);
-        if (st.id && !onDisk.spotify_id) {
-          try {
-            db.prepare('UPDATE tracks SET spotify_id = ? WHERE id = ?').run(st.id, onDisk.id);
-          } catch (_) {}
-        }
+        tracksToLink.push({ id: onDisk.id, spotifyId: st.id, hasSpotifyId: Boolean(onDisk.spotify_id) });
         immediatelyLinked++;
       } else {
         needDownload.push(st);
       }
+    }
+
+    if (tracksToLink.length > 0) {
+      const insertLikeStmt = db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)');
+      const updateSpotifyIdStmt = db.prepare('UPDATE tracks SET spotify_id = ? WHERE id = ?');
+      const linkBatchTx = db.transaction((items: typeof tracksToLink) => {
+        for (const item of items) {
+          insertLikeStmt.run(req.user.id, item.id);
+          if (item.spotifyId && !item.hasSpotifyId) {
+            try {
+              updateSpotifyIdStmt.run(item.spotifyId, item.id);
+            } catch (_) {}
+          }
+        }
+      });
+      linkBatchTx(tracksToLink);
     }
 
     const totalCountRow: any = db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(req.user.id);
@@ -1433,31 +1466,44 @@ server.post('/api/spotify/import-user-playlists', { preHandler: [(server as any)
       return { success: true, message: 'В вашем аккаунте Spotify не найдено плейлистов', totalPlaylists: 0, queuedPlaylists: 0 };
     }
 
-    let queuedCount = 0;
+    const playlistsToQueue: { id: number; name: string }[] = [];
+    const findPlStmt = db.prepare('SELECT id FROM playlists WHERE user_id = ? AND spotify_id = ?');
+    const insertPlStmt = db.prepare(`
+      INSERT INTO playlists (user_id, name, description, cover_url, spotify_id)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
     for (const sp of spotifyPlaylists) {
-      let existing: any = db.prepare('SELECT id FROM playlists WHERE user_id = ? AND spotify_id = ?').get(req.user.id, sp.id);
+      let existing: any = findPlStmt.get(req.user.id, sp.id);
       let playlistId: number;
 
       if (!existing) {
-        const info = db.prepare(`
-          INSERT INTO playlists (user_id, name, description, cover_url, spotify_id)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(req.user.id, sp.name, sp.description || 'Импортировано из Spotify', sp.cover_url || null, sp.id);
+        const info = insertPlStmt.run(req.user.id, sp.name, sp.description || 'Импортировано из Spotify', sp.cover_url || null, sp.id);
         playlistId = Number(info.lastInsertRowid);
       } else {
         playlistId = existing.id;
       }
-
-      // Automatically queue playlist for background sync & downloading
-      resumePlaylistDownload(playlistId).catch((err) => console.warn(`[Sync Playlist] Failed to queue ${sp.name}:`, err.message));
-      queuedCount++;
+      playlistsToQueue.push({ id: playlistId, name: sp.name });
     }
+
+    // Queue sequentially in background with polite delay to avoid Spotify API 429 rate limit
+    (async () => {
+      for (const item of playlistsToQueue) {
+        try {
+          await resumePlaylistDownload(item.id);
+          // Wait 600ms between playlist expansions to respect Spotify API rate limit
+          await new Promise((r) => setTimeout(r, 600));
+        } catch (err: any) {
+          console.warn(`[Sync Playlist Background] Failed to queue ${item.name}:`, err.message);
+        }
+      }
+    })().catch((err) => console.error('[Sync Playlists Fatal]', err));
 
     return {
       success: true,
-      message: `Начата синхронизация ${queuedCount} плейлистов из Spotify`,
+      message: `Начата синхронизация ${playlistsToQueue.length} плейлистов из Spotify`,
       totalPlaylists: spotifyPlaylists.length,
-      queuedPlaylists: queuedCount
+      queuedPlaylists: playlistsToQueue.length
     };
   } catch (err: any) {
     return reply.status(500).send({ error: err.message || 'Ошибка импорта плейлистов' });
@@ -1565,6 +1611,39 @@ server.post('/api/spotify/import-list', { preHandler: [(server as any).authentic
 });
 
 // ----------------- SEARCH (LOCAL MEDIATHEQUE & SPOTIFY) -----------------
+function batchMatchLocalTracks(tracks: any[]): Map<string, any> {
+  const result = new Map<string, any>();
+  if (!tracks || tracks.length === 0) return result;
+
+  const validIds = tracks.map((t) => t.id).filter(Boolean);
+  if (validIds.length > 0) {
+    const placeholders = validIds.map(() => '?').join(',');
+    const matched: any[] = db.prepare(`SELECT * FROM tracks WHERE spotify_id IN (${placeholders})`).all(...validIds);
+    for (const m of matched) {
+      if (m.spotify_id) {
+        result.set(`id:${m.spotify_id}`, m);
+      }
+    }
+  }
+
+  const findByTitleArtistStmt = db.prepare(`
+    SELECT * FROM tracks 
+    WHERE LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?) 
+    LIMIT 1
+  `);
+
+  for (const t of tracks) {
+    if (t.id && result.has(`id:${t.id}`)) continue;
+    const match = findByTitleArtistStmt.get(t.title, t.artist);
+    if (match) {
+      const key = t.id ? `id:${t.id}` : `ta:${(t.artist || '').toLowerCase().trim()}:::${(t.title || '').toLowerCase().trim()}`;
+      result.set(key, match);
+    }
+  }
+
+  return result;
+}
+
 server.get('/api/search', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const query = (req.query.q || '').trim();
   if (!query) {
@@ -1582,14 +1661,13 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
       console.warn('[Search Spotify URL Error]', err.message);
     }
 
+    const localMatchMap = batchMatchLocalTracks(spotifyRaw);
     const localTracks: any[] = [];
     const spotifyTracks = spotifyRaw.map((st) => {
-      const matchedLocal: any = db.prepare(`
-        SELECT * FROM tracks
-        WHERE (spotify_id IS NOT NULL AND spotify_id = ?)
-           OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
-        LIMIT 1
-      `).get(st.id, st.title, st.artist);
+      const key = (st.id && localMatchMap.has(`id:${st.id}`))
+        ? `id:${st.id}`
+        : `ta:${(st.artist || '').toLowerCase().trim()}:::${(st.title || '').toLowerCase().trim()}`;
+      const matchedLocal: any = localMatchMap.get(key) || null;
 
       if (matchedLocal && !localTracks.some((lt) => lt.id === matchedLocal.id)) {
         localTracks.push(matchedLocal);
@@ -1626,14 +1704,13 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
     console.warn('[Search External Error]', err.message);
   }
 
-  // Map each Spotify track and check if already downloaded
+  // Batch match external tracks against local DB
+  const localMatchMap = batchMatchLocalTracks(spotifyRaw);
   const spotifyTracks = spotifyRaw.map((st) => {
-    const matchedLocal: any = db.prepare(`
-      SELECT * FROM tracks
-      WHERE (spotify_id IS NOT NULL AND spotify_id = ?)
-         OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
-      LIMIT 1
-    `).get(st.id, st.title, st.artist);
+    const key = (st.id && localMatchMap.has(`id:${st.id}`))
+      ? `id:${st.id}`
+      : `ta:${(st.artist || '').toLowerCase().trim()}:::${(st.title || '').toLowerCase().trim()}`;
+    const matchedLocal: any = localMatchMap.get(key) || null;
 
     return {
       ...st,
@@ -1909,14 +1986,18 @@ server.post('/api/blacklist', { preHandler: [(server as any).authenticate] }, as
     }
   }
 
-  for (const tid of targetTrackIds) {
+  if (targetTrackIds.length > 0) {
+    const placeholders = targetTrackIds.map(() => '?').join(',');
     db.prepare(`
       DELETE FROM playlist_tracks 
-      WHERE track_id = ? 
+      WHERE track_id IN (${placeholders}) 
         AND playlist_id IN (SELECT id FROM playlists WHERE user_id = ?)
-    `).run(tid, req.user.id);
+    `).run(...targetTrackIds, req.user.id);
 
-    db.prepare('DELETE FROM liked_tracks WHERE user_id = ? AND track_id = ?').run(req.user.id, tid);
+    db.prepare(`
+      DELETE FROM liked_tracks 
+      WHERE user_id = ? AND track_id IN (${placeholders})
+    `).run(req.user.id, ...targetTrackIds);
   }
 
   // 4. Clean up daily_mix_tracks_json for all Daily Mixes of this user

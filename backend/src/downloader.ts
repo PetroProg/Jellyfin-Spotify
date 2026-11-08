@@ -481,9 +481,10 @@ export function cancelPlaylistDownloads(playlistIds: number[]) {
       queue.splice(i, 1);
     }
   }
-  for (const pid of playlistIds) {
+  if (playlistIds.length > 0) {
     try {
-      db.prepare('DELETE FROM download_jobs WHERE playlist_id = ?').run(pid);
+      const placeholders = playlistIds.map(() => '?').join(',');
+      db.prepare(`DELETE FROM download_jobs WHERE playlist_id IN (${placeholders})`).run(...playlistIds);
     } catch (_) {}
   }
 }

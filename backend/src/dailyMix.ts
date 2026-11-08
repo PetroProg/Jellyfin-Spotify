@@ -1315,9 +1315,8 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
   if (oldMixes.length > 0) {
     const oldIds = oldMixes.map(m => m.id);
     cancelPlaylistDownloads(oldIds);
-    for (const oldId of oldIds) {
-      db.prepare('DELETE FROM playlists WHERE id = ?').run(oldId);
-    }
+    const placeholders = oldIds.map(() => '?').join(',');
+    db.prepare(`DELETE FROM playlists WHERE id IN (${placeholders})`).run(...oldIds);
     cleanupOrphanDailyMixTracks();
   }
 
@@ -1688,14 +1687,15 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
 
     const mixPlaylistId = Number(insertRes.lastInsertRowid);
     const tracksToDownload: SpotifyTrack[] = [];
+    const localTracksToInsert: { trackId: number; position: number }[] = [];
 
     for (const item of finalMixItems) {
       if (item.type === 'familiar') {
-        insertPt.run(mixPlaylistId, item.track.id, item.position);
+        localTracksToInsert.push({ trackId: item.track.id, position: item.position });
       } else {
         const local = findLocalTrackByInfo(item.track.title, item.track.artist, item.track.id);
         if (local && local.id) {
-          insertPt.run(mixPlaylistId, local.id, item.position);
+          localTracksToInsert.push({ trackId: local.id, position: item.position });
         } else {
           tracksToDownload.push({
             ...item.track,
@@ -1703,6 +1703,15 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
           });
         }
       }
+    }
+
+    if (localTracksToInsert.length > 0) {
+      const insertManyPt = db.transaction((rows: { trackId: number; position: number }[]) => {
+        for (const r of rows) {
+          insertPt.run(mixPlaylistId, r.trackId, r.position);
+        }
+      });
+      insertManyPt(localTracksToInsert);
     }
 
     db.prepare('UPDATE playlists SET daily_mix_tracks_json = ? WHERE id = ?')
@@ -1771,8 +1780,13 @@ export function saveDailyMixAsPlaylist(userId: number, mixPlaylistId: number): {
     INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
     VALUES (?, ?, ?)
   `);
-  for (const t of tracks) {
-    insertPt.run(newPlaylistId, t.track_id, t.position);
+  if (tracks.length > 0) {
+    const insertAllPt = db.transaction((items: any[]) => {
+      for (const t of items) {
+        insertPt.run(newPlaylistId, t.track_id, t.position);
+      }
+    });
+    insertAllPt(tracks);
   }
 
   return { id: newPlaylistId, name: newName };
