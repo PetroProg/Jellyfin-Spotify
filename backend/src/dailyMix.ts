@@ -1,6 +1,6 @@
 import fs from 'fs';
 import { db } from './db';
-import { SpotifyTrack, getSpotifyCredentials } from './spotify';
+import { SpotifyTrack, getSpotifyCredentials, getAccessToken } from './spotify';
 import { enqueuePlaylistDownload, cancelPlaylistDownloads, isTrackBlacklistedForUser } from './downloader';
 
 export interface CategoryConfig {
@@ -238,34 +238,7 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
-let cachedClientSpotifyToken: string | null = null;
-let cachedClientTokenExp = 0;
-
-async function getSpotifyAppToken(): Promise<string | null> {
-  const { clientId, clientSecret } = getSpotifyCredentials();
-  if (!clientId || !clientSecret) return null;
-  if (cachedClientSpotifyToken && Date.now() < cachedClientTokenExp) {
-    return cachedClientSpotifyToken;
-  }
-  try {
-    const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-    const res = await fetchWithTimeout('https://accounts.spotify.com/api/token', {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${basic}`,
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: 'grant_type=client_credentials'
-    });
-    if (!res.ok) return null;
-    const data: any = await res.json();
-    cachedClientSpotifyToken = data.access_token;
-    cachedClientTokenExp = Date.now() + (data.expires_in - 60) * 1000;
-    return cachedClientSpotifyToken;
-  } catch {
-    return null;
-  }
-}
+// Note: Spotify client credentials token is unified in spotify.ts (getAccessToken) with in-flight deduplication
 
 /**
  * Checks if an artist is Russian / CIS music based on Cyrillic text, genres, or related artists.
@@ -540,7 +513,7 @@ export async function resolveArtistMetadata(artistName: string, sampleTrackTitle
 
   // 3. Spotify search (for additional genre precision)
   try {
-    const token = await getSpotifyAppToken();
+    const token = await getAccessToken();
     if (token) {
       const spRes = await fetchWithTimeout(
         `https://api.spotify.com/v1/search?type=artist&limit=2&q=${encodeURIComponent(primary)}`,
@@ -787,6 +760,11 @@ export function cleanupOrphanDailyMixTracks() {
 
     deleteTx(toDelete);
     console.log(`[DailyMix Cleanup] Removed ${toDelete.length} unliked orphan track(s) from old mixes.`);
+
+    // Clean up stale daily_mix_history older than 30 days to keep database compact
+    try {
+      db.prepare("DELETE FROM daily_mix_history WHERE created_at < datetime('now', '-30 days')").run();
+    } catch (_) {}
   } catch (err: any) {
     console.warn('[DailyMix Cleanup Warning]:', err.message);
   }
@@ -804,16 +782,18 @@ function hashCode(str: string): number {
 export function findLocalTrackByInfo(title: string, artist: string, spotifyId?: string | null): any {
   try {
     if (spotifyId) {
-      const bySp = db.prepare('SELECT * FROM tracks WHERE spotify_id = ?').get(spotifyId);
-      if (bySp) return bySp;
+      const bySp: any = db.prepare('SELECT * FROM tracks WHERE spotify_id = ?').get(spotifyId);
+      if (bySp && bySp.file_path && fs.existsSync(bySp.file_path)) return bySp;
     }
     const cleanT = (title || '').toLowerCase().trim();
     const cleanA = extractPrimaryArtist(artist).toLowerCase().trim();
-    return db.prepare(`
+    const cand: any = db.prepare(`
       SELECT * FROM tracks
       WHERE LOWER(title) = ? AND LOWER(artist) LIKE ?
       LIMIT 1
     `).get(cleanT, `%${cleanA}%`);
+    if (cand && cand.file_path && fs.existsSync(cand.file_path)) return cand;
+    return null;
   } catch (_) {
     return null;
   }
@@ -1787,6 +1767,39 @@ export function saveDailyMixAsPlaylist(userId: number, mixPlaylistId: number): {
       }
     });
     insertAllPt(tracks);
+  }
+
+  // If there are still pending/in-flight tracks from the Daily Mix, ensure they are also queued for the saved playlist
+  if (mix.daily_mix_tracks_json) {
+    try {
+      const pendingTracks: SpotifyTrack[] = JSON.parse(mix.daily_mix_tracks_json) || [];
+      const existingTrackIds = new Set(tracks.map(t => t.track_id));
+      const tracksToQueue: SpotifyTrack[] = [];
+      let nextPos = tracks.length;
+
+      for (const pt of pendingTracks) {
+        const customPos = (pt as any).position;
+        const local = findLocalTrackByInfo(pt.title, pt.artist, pt.id);
+        if (local && local.id && !existingTrackIds.has(local.id)) {
+          insertPt.run(newPlaylistId, local.id, typeof customPos === 'number' ? customPos : nextPos++);
+          existingTrackIds.add(local.id);
+        } else if (!local || !existingTrackIds.has(local.id)) {
+          tracksToQueue.push({
+            ...pt,
+            position: typeof customPos === 'number' ? customPos : nextPos++
+          } as any);
+        }
+      }
+
+      if (tracksToQueue.length > 0) {
+        const jobId = `save_dm_${newPlaylistId}_${Date.now().toString(36)}`;
+        db.prepare(`
+          INSERT INTO download_jobs (id, user_id, playlist_id, playlist_name, total_tracks, downloaded_tracks, status)
+          VALUES (?, ?, ?, ?, ?, ?, 'downloading')
+        `).run(jobId, userId, newPlaylistId, newName, tracks.length + tracksToQueue.length, tracks.length);
+        enqueuePlaylistDownload(jobId, userId, newPlaylistId, tracksToQueue);
+      }
+    } catch (_) {}
   }
 
   return { id: newPlaylistId, name: newName };

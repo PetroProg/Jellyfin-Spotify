@@ -40,20 +40,19 @@ export function cleanupPartialFiles(targetDir: string, safeTitle: string) {
   try {
     if (!fs.existsSync(targetDir)) return;
     const files = fs.readdirSync(targetDir);
+    const tempExts = ['.part', '.ytdl', '.temp', '.webp', '.png', '.jpg'];
+    const audioExts = ['.mp3', '.m4a', '.opus', '.webm', '.flac', '.ogg'];
+
     for (const f of files) {
-      if (
-        f.startsWith(safeTitle) &&
-        (f.endsWith('.part') ||
-          f.endsWith('.ytdl') ||
-          f.endsWith('.temp') ||
-          f.endsWith('.mp3') ||
-          f.endsWith('.m4a') ||
-          f.endsWith('.opus') ||
-          f.endsWith('.webm') ||
-          f.endsWith('.webp') ||
-          f.endsWith('.png') ||
-          f.endsWith('.jpg'))
-      ) {
+      // 1. Temporary/partial files starting with safeTitle followed by . or _
+      const isTempWithPrefix =
+        (f.startsWith(`${safeTitle}.`) || f.startsWith(`${safeTitle}_`)) &&
+        tempExts.some(ext => f.endsWith(ext));
+
+      // 2. Exact file matching safeTitle + audioExt (never match other tracks like "Title (Remix).mp3")
+      const isExactAudioFile = audioExts.some(ext => f === `${safeTitle}${ext}`);
+
+      if (isTempWithPrefix || isExactAudioFile) {
         try {
           fs.unlinkSync(path.join(targetDir, f));
         } catch (_) {}
@@ -395,6 +394,17 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
   }
 
   return new Promise<AudioProbeResult>((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const finish = (result: AudioProbeResult) => {
+      if (!settled) {
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(result);
+      }
+    };
+
     const proc = spawn('ffprobe', [
       '-v', 'error',
       '-select_streams', 'a:0',
@@ -402,13 +412,13 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
       '-show_format',
       '-of', 'json',
       filePath
-    ]);
+    ], { detached: true });
 
     let stdout = '';
     proc.stdout.on('data', d => stdout += d.toString());
     proc.on('close', (code) => {
       if (code !== 0) {
-        return resolve({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: 'PROBE_FAILED' });
+        return finish({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: 'PROBE_FAILED' });
       }
       try {
         const parsed = JSON.parse(stdout) || {};
@@ -440,7 +450,7 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
           if (isTruncated) reasons.push(`Обрезан (${Math.round(durationSec)}с вместо ${Math.round(expectedSec)}с)`);
           if (isLowBitrate) reasons.push(`Низкий битрейт/формат (${bitrateKbps} kbps ${ext})`);
           if (isSuboptimalSampleRate) reasons.push(`Частота дискретизации ${sampleRate} Hz (Format 18 вместо 48000 Hz Opus Master)`);
-          return resolve({
+          return finish({
             valid: true,
             durationSec,
             bitrateKbps,
@@ -450,7 +460,7 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
           });
         }
 
-        return resolve({
+        return finish({
           valid: true,
           durationSec,
           bitrateKbps,
@@ -458,17 +468,17 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
           isHighQuality: true
         });
       } catch (err: any) {
-        resolve({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: err.message });
+        finish({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: err.message });
       }
     });
 
     proc.on('error', (err) => {
-      resolve({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: err.message });
+      finish({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: err.message });
     });
 
-    setTimeout(() => {
-      try { proc.kill('SIGKILL'); } catch (_) {}
-      resolve({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: 'PROBE_TIMEOUT' });
+    timer = setTimeout(() => {
+      try { killProcessGroup(proc, 'SIGKILL'); } catch (_) {}
+      finish({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: 'PROBE_TIMEOUT' });
     }, 10000);
   });
 }
@@ -1155,12 +1165,12 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
     } catch (_) {}
   }
 
-  // Check if track already exists locally in DB
+  // Check if track already exists locally in DB AND file actually exists on disk
   const existing = db.prepare(`
     SELECT * FROM tracks WHERE spotify_id = ? OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
   `).get(track.id, track.title, track.artist) as any;
 
-  if (existing) {
+  if (existing && existing.file_path && fs.existsSync(existing.file_path)) {
     // If existing track had missing or playlist fallback album/cover, update it
     if (details.album && (!existing.album || existing.album === 'Любимые треки' || existing.album === '-')) {
       db.prepare('UPDATE tracks SET album = ? WHERE id = ?').run(details.album, existing.id);
@@ -1287,8 +1297,14 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
         probe.bitrateKbps || 320
       );
       trackId = info.lastInsertRowid;
-    } else if (probe.valid && probe.durationSec > 0) {
-      db.prepare('UPDATE tracks SET duration_ms = ?, bitrate = ? WHERE id = ?').run(actualDurationMs, probe.bitrateKbps || 320, trackId);
+    } else {
+      db.prepare(`
+        UPDATE tracks 
+        SET file_path = ?, duration_ms = ?, bitrate = ?,
+            album = CASE WHEN album IS NULL OR album = '' OR album = '-' OR album = 'Любимые треки' THEN ? ELSE album END,
+            cover_url = CASE WHEN cover_url IS NULL OR cover_url = '' OR cover_url LIKE '%mosaic.scdn.co%' THEN ? ELSE cover_url END
+        WHERE id = ?
+      `).run(finalFile, actualDurationMs, probe.bitrateKbps || 320, track.album || '', track.cover_url || '', trackId);
     }
 
     if (isTrackBlacklistedForUser(item.userId, details.title || track.title, details.artist || track.artist, track.id)) {
@@ -1339,6 +1355,10 @@ export async function downloadSingleSpotifyTrackDirect(
         return { ...result, liked: true };
       }
       if (playlistId) {
+        if (userId) {
+          const ownsPlaylist = db.prepare('SELECT 1 FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, userId);
+          if (!ownsPlaylist) return result;
+        }
         const inPl: any = db.prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').get(playlistId, result.track.id);
         if (!inPl) {
           const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
@@ -1411,6 +1431,10 @@ async function downloadSingleSpotifyTrackDirectInternal(
         return;
       }
       if (!playlistId) return;
+      if (userId) {
+        const ownsPlaylist = db.prepare('SELECT 1 FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, userId);
+        if (!ownsPlaylist) return;
+      }
       const inPl: any = db.prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').get(playlistId, trackRecord.id);
       if (!inPl) {
         const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
@@ -1426,7 +1450,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
       }
     };
 
-    // 2. Check if already exists in DB
+    // 2. Check if already exists in DB AND file exists on disk
     const existing: any = db.prepare(`
       SELECT * FROM tracks 
       WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
@@ -1434,7 +1458,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
       LIMIT 1
     `).get(track.id, track.title, track.artist);
 
-    if (existing) {
+    if (existing && existing.file_path && fs.existsSync(existing.file_path)) {
       attachToPlaylist(existing);
       // Opportunistically queue quality upgrade in background if legacy .m4a or low bitrate
       queueTrackQualityUpgrade(existing);
@@ -1525,9 +1549,15 @@ async function downloadSingleSpotifyTrackDirectInternal(
         probe.bitrateKbps || 320
       );
       newTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
-    } else if (probe.valid && probe.durationSec > 0) {
-      db.prepare('UPDATE tracks SET duration_ms = ?, bitrate = ? WHERE id = ?').run(actualDurationMs, probe.bitrateKbps || 320, newTrack.id);
-      newTrack.duration_ms = actualDurationMs;
+    } else {
+      db.prepare(`
+        UPDATE tracks 
+        SET file_path = ?, duration_ms = ?, bitrate = ?,
+            album = CASE WHEN album IS NULL OR album = '' OR album = '-' OR album = 'Любимые треки' THEN ? ELSE album END,
+            cover_url = CASE WHEN cover_url IS NULL OR cover_url = '' OR cover_url LIKE '%mosaic.scdn.co%' THEN ? ELSE cover_url END
+        WHERE id = ?
+      `).run(finalFile, actualDurationMs, probe.bitrateKbps || 320, track.album || '', track.cover_url || '', newTrack.id);
+      newTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(newTrack.id);
     }
 
     attachToPlaylist(newTrack);

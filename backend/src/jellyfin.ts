@@ -6,7 +6,8 @@ export async function refreshJellyfinLibrary() {
       method: 'POST',
       headers: {
         'Accept': 'application/json'
-      }
+      },
+      signal: AbortSignal.timeout(3500)
     });
     console.log(`[Jellyfin] Library refresh triggered. Status: ${res.status}`);
   } catch (err: any) {
@@ -17,7 +18,8 @@ export async function refreshJellyfinLibrary() {
 export async function getJellyfinStatus() {
   try {
     const res = await fetch(`${JELLYFIN_URL}/System/Info/Public`, {
-      headers: { 'Accept': 'application/json' }
+      headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(3500)
     });
     if (res.ok) {
       return await res.json();

@@ -307,16 +307,22 @@ try {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tracks_spotify_id ON tracks(spotify_id);
     CREATE INDEX IF NOT EXISTS idx_tracks_lower_title_artist ON tracks(LOWER(title), LOWER(artist));
+    CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
+    CREATE INDEX IF NOT EXISTS idx_tracks_lower_artist ON tracks(LOWER(artist));
     CREATE INDEX IF NOT EXISTS idx_tracks_file_path ON tracks(file_path);
     CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track_id ON playlist_tracks(track_id);
     CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_pos ON playlist_tracks(playlist_id, position);
     CREATE INDEX IF NOT EXISTS idx_liked_tracks_user_created ON liked_tracks(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_liked_tracks_track_id ON liked_tracks(track_id);
     CREATE INDEX IF NOT EXISTS idx_playlists_user_daily ON playlists(user_id, is_daily_mix);
+    CREATE INDEX IF NOT EXISTS idx_playlists_user_daily_date ON playlists(user_id, is_daily_mix, daily_mix_date);
     CREATE INDEX IF NOT EXISTS idx_blacklist_user_id ON blacklist(user_id);
     CREATE INDEX IF NOT EXISTS idx_blacklist_user_spotify ON blacklist(user_id, spotify_id);
     CREATE INDEX IF NOT EXISTS idx_download_jobs_user_status ON download_jobs(user_id, status);
     CREATE INDEX IF NOT EXISTS idx_download_jobs_playlist_id ON download_jobs(playlist_id);
+    CREATE INDEX IF NOT EXISTS idx_daily_mix_history_user_cat_date ON daily_mix_history(user_id, category, recommended_date);
+    CREATE INDEX IF NOT EXISTS idx_daily_mix_history_track_key ON daily_mix_history(track_key);
+    CREATE INDEX IF NOT EXISTS idx_daily_mix_history_created ON daily_mix_history(created_at);
   `);
 } catch (e: any) {
   console.warn('[DB Index Migration Warning]:', e.message);

@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { db } from './db';
 
 export interface SpotifyTrack {
@@ -32,7 +33,9 @@ export function getSpotifyCredentials() {
   };
 }
 
-async function getAccessToken(): Promise<string | null> {
+let inFlightTokenPromise: Promise<string | null> | null = null;
+
+export async function getAccessToken(): Promise<string | null> {
   const { clientId, clientSecret } = getSpotifyCredentials();
   if (!clientId || !clientSecret) return null;
 
@@ -40,30 +43,41 @@ async function getAccessToken(): Promise<string | null> {
     return spotifyAccessToken;
   }
 
-  try {
-    const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-    const res = await fetch('https://accounts.spotify.com/api/token', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${basicAuth}`,
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: 'grant_type=client_credentials'
-    });
-
-    if (!res.ok) {
-      console.warn('[Spotify] Failed to get client credentials token:', res.statusText);
-      return null;
-    }
-
-    const data: any = await res.json();
-    spotifyAccessToken = data.access_token;
-    tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
-    return spotifyAccessToken;
-  } catch (err: any) {
-    console.warn('[Spotify] Token fetch error:', err.message);
-    return null;
+  if (inFlightTokenPromise) {
+    return inFlightTokenPromise;
   }
+
+  inFlightTokenPromise = (async () => {
+    try {
+      const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+      const res = await fetch('https://accounts.spotify.com/api/token', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${basicAuth}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: 'grant_type=client_credentials',
+        signal: AbortSignal.timeout(8000)
+      });
+
+      if (!res.ok) {
+        console.warn('[Spotify] Failed to get client credentials token:', res.statusText);
+        return null;
+      }
+
+      const data: any = await res.json();
+      spotifyAccessToken = data.access_token;
+      tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
+      return spotifyAccessToken;
+    } catch (err: any) {
+      console.warn('[Spotify] Token fetch error:', err.message);
+      return null;
+    } finally {
+      inFlightTokenPromise = null;
+    }
+  })();
+
+  return inFlightTokenPromise;
 }
 
 export async function getUserSpotifyToken(userId: number): Promise<string | null> {
@@ -91,7 +105,8 @@ export async function getUserSpotifyToken(userId: number): Promise<string | null
         body: new URLSearchParams({
           grant_type: 'refresh_token',
           refresh_token: row.spotify_refresh_token
-        }).toString()
+        }).toString(),
+        signal: AbortSignal.timeout(8000)
       });
 
       if (!res.ok) {
@@ -120,6 +135,8 @@ export async function getUserSpotifyToken(userId: number): Promise<string | null
   return row.spotify_access_token;
 }
 
+const OAUTH_STATE_SECRET = process.env.JWT_SECRET || 'jellyfin-spotify-oauth-secret';
+
 export function getSpotifyAuthUrl(userId: number, redirectUri: string, origin: string): string {
   const { clientId } = getSpotifyCredentials();
   if (!clientId) throw new Error('Spotify Client ID не настроен в настройках приложения');
@@ -130,7 +147,9 @@ export function getSpotifyAuthUrl(userId: number, redirectUri: string, origin: s
     'user-library-read'
   ].join(' ');
 
-  const statePayload = Buffer.from(JSON.stringify({ userId, origin, redirectUri })).toString('base64url');
+  const payload = JSON.stringify({ userId, origin, redirectUri });
+  const sig = crypto.createHmac('sha256', OAUTH_STATE_SECRET).update(payload).digest('base64url');
+  const statePayload = Buffer.from(JSON.stringify({ p: payload, s: sig })).toString('base64url');
 
   const params = new URLSearchParams({
     response_type: 'code',
@@ -150,12 +169,30 @@ export async function handleSpotifyOAuthCallback(code: string, stateStr: string)
   let redirectUri = '';
 
   try {
-    const parsed = JSON.parse(Buffer.from(stateStr, 'base64url').toString('utf-8'));
-    userId = parsed.userId;
-    origin = parsed.origin || '';
-    redirectUri = parsed.redirectUri;
+    const rawParsed = JSON.parse(Buffer.from(stateStr, 'base64url').toString('utf-8'));
+    if (rawParsed && rawParsed.p && rawParsed.s) {
+      const expectedSig = crypto.createHmac('sha256', OAUTH_STATE_SECRET).update(rawParsed.p).digest('base64url');
+      if (expectedSig !== rawParsed.s) {
+        throw new Error('Подпись state не совпадает (возможна попытка CSRF-атаки)');
+      }
+      const data = JSON.parse(rawParsed.p);
+      userId = data.userId;
+      origin = data.origin || '';
+      redirectUri = data.redirectUri;
+    } else if (rawParsed && typeof rawParsed.userId === 'number') {
+      userId = rawParsed.userId;
+      origin = rawParsed.origin || '';
+      redirectUri = rawParsed.redirectUri;
+    } else {
+      throw new Error('Неверный формат state');
+    }
   } catch (e: any) {
-    throw new Error('Неверный параметр state в ответе Spotify');
+    throw new Error('Неверный параметр state в ответе Spotify: ' + e.message);
+  }
+
+  // Sanitize origin to prevent open-redirect vulnerabilities
+  if (origin && !origin.startsWith('/') && !/^https?:\/\/[a-zA-Z0-9.-]+(?::\d+)?$/i.test(origin)) {
+    origin = '';
   }
 
   const { clientId, clientSecret } = getSpotifyCredentials();
@@ -174,7 +211,8 @@ export async function handleSpotifyOAuthCallback(code: string, stateStr: string)
       grant_type: 'authorization_code',
       code,
       redirect_uri: redirectUri
-    }).toString()
+    }).toString(),
+    signal: AbortSignal.timeout(10000)
   });
 
   if (!tokenRes.ok) {
@@ -192,7 +230,8 @@ export async function handleSpotifyOAuthCallback(code: string, stateStr: string)
   let spotifyDisplayName = '';
   try {
     const meRes = await fetch('https://api.spotify.com/v1/me', {
-      headers: { 'Authorization': `Bearer ${accessToken}` }
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(5000)
     });
     if (meRes.ok) {
       const meData: any = await meRes.json();

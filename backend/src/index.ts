@@ -38,6 +38,7 @@ import {
   stopQualityUpgrade,
   queueTrackQualityUpgrade,
   cancelBlacklistedDownloads,
+  cancelPlaylistDownloads,
   isTrackBlacklistedForUser,
   filterBlacklistedTracksForUser,
   redownloadTrackStudioMaster,
@@ -65,6 +66,7 @@ setGlobalDispatcher(globalDispatcher);
 
 const server = Fastify({ 
   logger: false,
+  trustProxy: true,
   bodyLimit: 15 * 1024 * 1024 // 15 MB limit for high-res cover uploads and bulk sync payloads
 });
 
@@ -99,9 +101,9 @@ interface RateLimitEntry {
 }
 const authAttempts = new Map<string, RateLimitEntry>();
 
-function checkRateLimit(ip: string, maxAttempts = 5): { blocked: boolean; retryAfterSec?: number } {
+function checkRateLimit(key: string, maxAttempts = 5): { blocked: boolean; retryAfterSec?: number } {
   const now = Date.now();
-  const entry = authAttempts.get(ip);
+  const entry = authAttempts.get(key);
   if (entry) {
     if (entry.blockedUntil > now) {
       return { blocked: true, retryAfterSec: Math.ceil((entry.blockedUntil - now) / 1000) };
@@ -110,25 +112,25 @@ function checkRateLimit(ip: string, maxAttempts = 5): { blocked: boolean; retryA
   return { blocked: false };
 }
 
-function recordFailedAuth(ip: string, maxAttempts = 5, windowMs = 60000, blockDurationMs = 300000) {
+function recordFailedAuth(key: string, maxAttempts = 5, windowMs = 60000, blockDurationMs = 300000) {
   const now = Date.now();
-  const entry = authAttempts.get(ip) || { count: 0, blockedUntil: 0 };
+  const entry = authAttempts.get(key) || { count: 0, blockedUntil: 0 };
   entry.count++;
   if (entry.count >= maxAttempts) {
     entry.blockedUntil = now + blockDurationMs;
   }
-  authAttempts.set(ip, entry);
+  authAttempts.set(key, entry);
   setTimeout(() => {
-    const cur = authAttempts.get(ip);
+    const cur = authAttempts.get(key);
     if (cur && cur.count > 0 && cur.blockedUntil <= Date.now()) {
       cur.count--;
-      if (cur.count <= 0) authAttempts.delete(ip);
+      if (cur.count <= 0) authAttempts.delete(key);
     }
   }, windowMs);
 }
 
-function resetAuthLimit(ip: string) {
-  authAttempts.delete(ip);
+function resetAuthLimit(key: string) {
+  authAttempts.delete(key);
 }
 
 // Register Plugins
@@ -196,8 +198,8 @@ server.decorate('authenticate', async (request: any, reply: any) => {
 
 // ----------------- AUTH ROUTES -----------------
 server.post('/api/auth/register', async (req: any, reply: any) => {
-  const clientIp = req.ip || req.raw.socket.remoteAddress || 'unknown';
-  const limitCheck = checkRateLimit(clientIp, 10);
+  const clientIp = req.ip || req.raw?.socket?.remoteAddress || 'unknown';
+  const limitCheck = checkRateLimit(`reg:::${clientIp}`, 10);
   if (limitCheck.blocked) {
     return reply.status(429).send({ error: `Слишком много запросов. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
   }
@@ -248,26 +250,28 @@ server.post('/api/auth/register', async (req: any, reply: any) => {
 });
 
 server.post('/api/auth/login', async (req: any, reply: any) => {
-  const clientIp = req.ip || req.raw.socket.remoteAddress || 'unknown';
-  const limitCheck = checkRateLimit(clientIp, 5);
+  const clientIp = req.ip || req.raw?.socket?.remoteAddress || 'unknown';
+  const body = req.body || {};
+  const { username, password } = body;
+  const cleanIdentifier = String(username || '').trim();
+  const rateLimitKey = `${clientIp}:::${cleanIdentifier.toLowerCase()}`;
+
+  const limitCheck = checkRateLimit(rateLimitKey, 5);
   if (limitCheck.blocked) {
     return reply.status(429).send({
       error: `Слишком много неудачных попыток входа. Попробуйте снова через ${limitCheck.retryAfterSec || 60} сек.`
     });
   }
 
-  const body = req.body || {};
-  const { username, password } = body;
-  const cleanIdentifier = String(username || '').trim();
   const user: any = db.prepare('SELECT * FROM users WHERE username = ? OR email = ?').get(cleanIdentifier, cleanIdentifier);
 
   const isMatch = user && (await bcrypt.compare(password, user.password_hash));
   if (!isMatch) {
-    recordFailedAuth(clientIp, 5);
+    recordFailedAuth(rateLimitKey, 5);
     return reply.status(401).send({ error: 'Неверный логин или пароль' });
   }
 
-  resetAuthLimit(clientIp);
+  resetAuthLimit(rateLimitKey);
 
   const token = server.jwt.sign({ id: user.id, username: user.username });
   const settings = getUserSettings(user.id);
@@ -939,7 +943,7 @@ server.put('/api/playlists/:id/cover', { preHandler: [(server as any).authentica
     const base64Data = image_base64.replace(/^data:image\/\w+;base64,/, '');
     const buffer = Buffer.from(base64Data, 'base64');
     const filePath = path.join(coversDir, `playlist_${playlistId}.jpg`);
-    fs.writeFileSync(filePath, buffer);
+    await fs.promises.writeFile(filePath, buffer);
     finalUrl = `/api/playlists/${playlistId}/cover?t=${Date.now()}`;
   }
 
@@ -975,22 +979,42 @@ server.get('/api/playlists/:id/cover', { config: { compress: false } }, async (r
   }
 });
 
-server.delete('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any) => {
-  const playlistId = req.params.id;
-  db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ?').run(playlistId);
-  db.prepare('DELETE FROM download_jobs WHERE playlist_id = ?').run(playlistId);
-  db.prepare('DELETE FROM playlists WHERE id = ? AND user_id = ?').run(playlistId, req.user.id);
+server.delete('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const playlistId = Number(req.params.id);
+  const playlist: any = db.prepare('SELECT id, cover_url FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
+  if (!playlist) {
+    return reply.status(404).send({ error: 'Плейлист не найден или нет доступа' });
+  }
+
+  cancelPlaylistDownloads([playlistId]);
+
+  db.transaction(() => {
+    db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ?').run(playlistId);
+    db.prepare('DELETE FROM download_jobs WHERE playlist_id = ?').run(playlistId);
+    db.prepare('DELETE FROM playlists WHERE id = ? AND user_id = ?').run(playlistId, req.user.id);
+  })();
+
+  const coversDir = path.join(process.cwd(), 'data', 'covers');
+  const filePath = path.join(coversDir, `playlist_${playlistId}.jpg`);
+  if (fs.existsSync(filePath)) {
+    try { fs.unlinkSync(filePath); } catch (_) {}
+  }
   return { success: true };
 });
 
-server.delete('/api/playlists/:id/tracks/:trackId', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+server.delete('/api/playlists/:id/tracks/:trackId', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
   const trackId = Number(req.params.trackId);
+
+  const playlist: any = db.prepare('SELECT id, daily_mix_tracks_json FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
+  if (!playlist) {
+    return reply.status(404).send({ error: 'Плейлист не найден или нет доступа' });
+  }
+
   db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').run(playlistId, trackId);
 
   // If this playlist is a Daily Mix, also remove the track from daily_mix_tracks_json
-  const playlist: any = db.prepare('SELECT id, daily_mix_tracks_json FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
-  if (playlist?.daily_mix_tracks_json) {
+  if (playlist.daily_mix_tracks_json) {
     try {
       const trackRow: any = db.prepare('SELECT title, artist, spotify_id FROM tracks WHERE id = ?').get(trackId);
       if (trackRow) {
@@ -1221,8 +1245,12 @@ server.delete('/api/spotify/jobs', { preHandler: [(server as any).authenticate] 
   return { success: true };
 });
 
-server.post('/api/playlists/:id/resume', { preHandler: [(server as any).authenticate] }, async (req: any) => {
+server.post('/api/playlists/:id/resume', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const playlistId = Number(req.params.id);
+  const playlist = db.prepare('SELECT id FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, req.user.id);
+  if (!playlist) {
+    return reply.status(404).send({ error: 'Плейлист не найден или нет доступа' });
+  }
   const result = await resumePlaylistDownload(playlistId);
   return result;
 });
@@ -1760,7 +1788,7 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
     LIMIT 1
   `).get(track.id, track.title, track.artist);
 
-  if (existing && fs.existsSync(existing.file_path)) {
+  if (existing && existing.file_path && fs.existsSync(existing.file_path)) {
     // Opportunistically queue quality upgrade in background if legacy .m4a or low bitrate
     queueTrackQualityUpgrade(existing);
     return {
@@ -1967,6 +1995,7 @@ server.post('/api/blacklist', { preHandler: [(server as any).authenticate] }, as
       INSERT INTO blacklist (user_id, title, artist, spotify_id)
       VALUES (?, ?, ?, ?)
     `).run(req.user.id, title, artist, spotify_id || '');
+    invalidateUserBlacklistCache(req.user.id);
   }
 
   // 2. Immediately cancel in-flight / queued downloads for this track/artist in downloader
