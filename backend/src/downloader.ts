@@ -73,22 +73,100 @@ function killProcessGroup(proc: ReturnType<typeof spawn>, signal: NodeJS.Signals
   } catch (_) {}
 }
 
-const MAX_CONCURRENT_SINGLE_DOWNLOADS = 2;
-let activeSingleDownloads = 0;
-const singleDownloadWaitQueue: Array<() => void> = [];
+export enum DownloadPriority {
+  HIGH = 0,   // Instant Play / Direct user single track download / Studio master redownload
+  NORMAL = 1, // Playlist & Daily Mix queue worker
+  LOW = 2     // Opportunistic healer & bulk quality upgrader
+}
 
-async function runWithSingleDownloadSlot<T>(fn: () => Promise<T>): Promise<T> {
-  if (activeSingleDownloads >= MAX_CONCURRENT_SINGLE_DOWNLOADS) {
-    await new Promise<void>((resolve) => singleDownloadWaitQueue.push(resolve));
+const MAX_CONCURRENT_DOWNLOADS = 2;
+let activeDownloads = 0;
+
+interface QueuedDownloadRequest {
+  id: number;
+  priority: DownloadPriority;
+  taskName: string;
+  resolve: () => void;
+  queuedAt: number;
+}
+
+let nextRequestId = 1;
+const downloadWaitQueue: QueuedDownloadRequest[] = [];
+
+function enqueueRequest(priority: DownloadPriority, taskName: string, resolve: () => void) {
+  const req: QueuedDownloadRequest = {
+    id: nextRequestId++,
+    priority,
+    taskName,
+    resolve,
+    queuedAt: Date.now()
+  };
+
+  // Higher priority (smaller numeric value) comes first.
+  // Same priority: FIFO order (stable sort).
+  let insertIdx = downloadWaitQueue.length;
+  for (let i = 0; i < downloadWaitQueue.length; i++) {
+    if (priority < downloadWaitQueue[i].priority) {
+      insertIdx = i;
+      break;
+    }
   }
-  activeSingleDownloads++;
+  downloadWaitQueue.splice(insertIdx, 0, req);
+  console.log(`[DownloadScheduler] Enqueued #${req.id} [${DownloadPriority[priority]}] "${taskName}". Active: ${activeDownloads}/${MAX_CONCURRENT_DOWNLOADS}, Queued: ${downloadWaitQueue.length}`);
+}
+
+function processDownloadQueue() {
+  while (activeDownloads < MAX_CONCURRENT_DOWNLOADS && downloadWaitQueue.length > 0) {
+    const next = downloadWaitQueue.shift();
+    if (!next) break;
+    activeDownloads++;
+    const waitMs = Date.now() - next.queuedAt;
+    console.log(`[DownloadScheduler] Dispatched #${next.id} [${DownloadPriority[next.priority]}] "${next.taskName}" (waited ${waitMs}ms). Active: ${activeDownloads}/${MAX_CONCURRENT_DOWNLOADS}`);
+    next.resolve();
+  }
+}
+
+export async function runWithPrioritySlot<T>(
+  priority: DownloadPriority,
+  taskName: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  if (activeDownloads >= MAX_CONCURRENT_DOWNLOADS || downloadWaitQueue.length > 0) {
+    await new Promise<void>((resolve) => {
+      enqueueRequest(priority, taskName, resolve);
+      processDownloadQueue();
+    });
+  } else {
+    activeDownloads++;
+    console.log(`[DownloadScheduler] Direct dispatch [${DownloadPriority[priority]}] "${taskName}". Active: ${activeDownloads}/${MAX_CONCURRENT_DOWNLOADS}`);
+  }
+
   try {
     return await fn();
   } finally {
-    activeSingleDownloads--;
-    const next = singleDownloadWaitQueue.shift();
-    if (next) next();
+    activeDownloads--;
+    console.log(`[DownloadScheduler] Released [${DownloadPriority[priority]}] "${taskName}". Active: ${activeDownloads}/${MAX_CONCURRENT_DOWNLOADS}, Waiting: ${downloadWaitQueue.length}`);
+    processDownloadQueue();
   }
+}
+
+// Deprecated alias for backwards compatibility
+async function runWithSingleDownloadSlot<T>(fn: () => Promise<T>): Promise<T> {
+  return runWithPrioritySlot(DownloadPriority.HIGH, 'legacy-single-slot', fn);
+}
+
+export function getDownloadSchedulerStats() {
+  return {
+    activeDownloads,
+    maxConcurrent: MAX_CONCURRENT_DOWNLOADS,
+    waitingInQueue: downloadWaitQueue.length,
+    queue: downloadWaitQueue.map(q => ({
+      id: q.id,
+      priority: DownloadPriority[q.priority],
+      taskName: q.taskName,
+      waitingMs: Date.now() - q.queuedAt
+    }))
+  };
 }
 
 interface BlacklistCacheEntry {
@@ -1139,15 +1217,29 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
   const safeTitle = sanitizeFilename(track.title);
   const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
 
-  const downloadedOk = await downloadAudioWithFallback(
-    track.artist,
-    track.title,
-    track.duration_ms,
-    outputTemplate,
-    targetDir,
-    safeTitle,
-    120000,
-    true
+  const downloadedOk = await runWithPrioritySlot(
+    DownloadPriority.NORMAL,
+    `worker:${track.artist} - ${track.title}`,
+    async () => {
+      // Re-check if file appeared while waiting for download slot
+      const existingCandidate = resolveAudioFilePath(targetDir, safeTitle);
+      if (existingCandidate && fs.existsSync(existingCandidate)) {
+        const probe = await probeAudioFile(existingCandidate, track.duration_ms);
+        if (probe.valid && probe.durationSec > 15) {
+          return true;
+        }
+      }
+      return await downloadAudioWithFallback(
+        track.artist,
+        track.title,
+        track.duration_ms,
+        outputTemplate,
+        targetDir,
+        safeTitle,
+        120000,
+        true
+      );
+    }
   );
 
   if (!downloadedOk) {
@@ -1363,28 +1455,32 @@ async function downloadSingleSpotifyTrackDirectInternal(
     const safeTitle = sanitizeFilename(track.title);
     const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
 
-    // 4. Acquire concurrency slot (max 2 concurrent downloads on 2-core CPU) and download
-    const success = await runWithSingleDownloadSlot(async () => {
-      // Re-check if downloaded while waiting in queue
-      const mp3Candidate = path.join(targetDir, `${safeTitle}.mp3`);
-      if (fs.existsSync(mp3Candidate)) {
-        const preProbe = await probeAudioFile(mp3Candidate, track.duration_ms);
-        if (preProbe.valid && preProbe.durationSec > 15) {
-          return true;
+    // 4. Acquire concurrency slot with HIGH priority (max 2 concurrent downloads on 2-core CPU) and download
+    const success = await runWithPrioritySlot(
+      DownloadPriority.HIGH,
+      `direct:${track.artist} - ${track.title}`,
+      async () => {
+        // Re-check if downloaded while waiting in queue
+        const existingCandidate = resolveAudioFilePath(targetDir, safeTitle);
+        if (existingCandidate && fs.existsSync(existingCandidate)) {
+          const preProbe = await probeAudioFile(existingCandidate, track.duration_ms);
+          if (preProbe.valid && preProbe.durationSec > 15) {
+            return true;
+          }
         }
-      }
 
-      return await downloadAudioWithFallback(
-        track.artist,
-        track.title,
-        track.duration_ms,
-        outputTemplate,
-        targetDir,
-        safeTitle,
-        150000,
-        false
-      );
-    });
+        return await downloadAudioWithFallback(
+          track.artist,
+          track.title,
+          track.duration_ms,
+          outputTemplate,
+          targetDir,
+          safeTitle,
+          150000,
+          false
+        );
+      }
+    );
 
     if (!success) {
       return { success: false, error: 'Не удалось скачать аудиофайл с YouTube' };
@@ -1510,16 +1606,22 @@ export async function upgradeSingleTrackFile(tr: any): Promise<boolean> {
   const cleanUpgKey = `${(tr.artist || '').toLowerCase()}:::${(tr.title || '').toLowerCase()}`;
   studioCandidateCache.delete(cleanUpgKey);
 
-  const ok = await downloadAudioWithFallback(
-    tr.artist,
-    tr.title,
-    tr.duration_ms,
-    tempOutputTemplate,
-    targetDir,
-    tempPrefix,
-    120000,
-    true,
-    true
+  const ok = await runWithPrioritySlot(
+    DownloadPriority.LOW,
+    `upgrade:${tr.artist} - ${tr.title}`,
+    async () => {
+      return await downloadAudioWithFallback(
+        tr.artist,
+        tr.title,
+        tr.duration_ms,
+        tempOutputTemplate,
+        targetDir,
+        tempPrefix,
+        120000,
+        true,
+        true
+      );
+    }
   );
 
   if (!ok) {
@@ -1785,20 +1887,24 @@ export async function redownloadTrackStudioMaster(trackId: number): Promise<{ su
     const cleanRedownloadKey = `${(track.artist || '').toLowerCase()}:::${(track.title || '').toLowerCase()}`;
     studioCandidateCache.delete(cleanRedownloadKey);
 
-    // Force re-download to temporary output first with single download slot
-    const success = await runWithSingleDownloadSlot(async () => {
-      return await downloadAudioWithFallback(
-        track.artist,
-        track.title,
-        track.duration_ms,
-        tempOutputTemplate,
-        targetDir,
-        tempSafeTitle,
-        180000,
-        false,
-        true
-      );
-    });
+    // Force re-download to temporary output first with HIGH priority download slot
+    const success = await runWithPrioritySlot(
+      DownloadPriority.HIGH,
+      `studio-master:${track.artist} - ${track.title}`,
+      async () => {
+        return await downloadAudioWithFallback(
+          track.artist,
+          track.title,
+          track.duration_ms,
+          tempOutputTemplate,
+          targetDir,
+          tempSafeTitle,
+          180000,
+          false,
+          true
+        );
+      }
+    );
 
     if (!success) {
       cleanupPartialFiles(targetDir, tempSafeTitle);

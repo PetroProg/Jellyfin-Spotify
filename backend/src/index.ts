@@ -41,7 +41,8 @@ import {
   isTrackBlacklistedForUser,
   filterBlacklistedTracksForUser,
   redownloadTrackStudioMaster,
-  invalidateUserBlacklistCache
+  invalidateUserBlacklistCache,
+  getDownloadSchedulerStats
 } from './downloader';
 import { getRecommendations } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
@@ -1792,6 +1793,10 @@ server.get('/api/tracks/upgrade-quality/status', { preHandler: [(server as any).
 
 server.post('/api/tracks/upgrade-quality/stop', { preHandler: [(server as any).authenticate] }, async () => {
   return { stopped: stopQualityUpgrade() };
+});
+
+server.get('/api/downloads/scheduler/status', { preHandler: [(server as any).authenticate] }, async () => {
+  return getDownloadSchedulerStats();
 });
 
 // ----------------- LIKES -----------------
