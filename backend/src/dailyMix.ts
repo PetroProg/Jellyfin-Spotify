@@ -734,33 +734,59 @@ async function fetchGenreFallbackTracks(categoryKey: string): Promise<SpotifyTra
  */
 export function cleanupOrphanDailyMixTracks() {
   try {
-    const orphans: any[] = db.prepare(`
-      SELECT t.id, t.file_path
+    const unlinkedTracks: any[] = db.prepare(`
+      SELECT t.id, t.file_path, t.artist, t.title, t.spotify_id
       FROM tracks t
       LEFT JOIN playlist_tracks pt ON pt.track_id = t.id
       LEFT JOIN liked_tracks lt ON lt.track_id = t.id
-      LEFT JOIN daily_mix_history dmh ON (
-        dmh.track_key = (LOWER(REPLACE(t.artist, ' ', '')) || ':::' || LOWER(REPLACE(t.title, ' ', '')))
-        OR dmh.spotify_id = t.spotify_id
-      ) AND dmh.created_at >= datetime('now', '-7 days')
       WHERE pt.track_id IS NULL
         AND lt.track_id IS NULL
-        AND dmh.id IS NULL
         AND t.created_at < datetime('now', '-15 minutes')
     `).all();
 
-    for (const orphan of orphans) {
-      if (orphan.file_path && fs.existsSync(orphan.file_path)) {
-        try {
-          fs.unlinkSync(orphan.file_path);
-        } catch (_) {}
-      }
-      db.prepare('DELETE FROM tracks WHERE id = ?').run(orphan.id);
+    if (unlinkedTracks.length === 0) return;
+
+    // Get active history from past 7 days to preserve recently recommended tracks
+    const recentHistoryRows: any[] = db.prepare(`
+      SELECT track_key, spotify_id FROM daily_mix_history
+      WHERE created_at >= datetime('now', '-7 days')
+    `).all();
+
+    const recentKeys = new Set<string>();
+    const recentSpIds = new Set<string>();
+    for (const r of recentHistoryRows) {
+      if (r.track_key) recentKeys.add(r.track_key);
+      if (r.spotify_id) recentSpIds.add(r.spotify_id);
     }
 
-    if (orphans.length > 0) {
-      console.log(`[DailyMix Cleanup] Removed ${orphans.length} unliked orphan track(s) from old mixes.`);
+    const toDelete: any[] = [];
+    for (const tr of unlinkedTracks) {
+      if (tr.spotify_id && recentSpIds.has(tr.spotify_id)) {
+        continue;
+      }
+      const key = normalizeTrackKey(tr.artist, tr.title);
+      if (recentKeys.has(key)) {
+        continue;
+      }
+      toDelete.push(tr);
     }
+
+    if (toDelete.length === 0) return;
+
+    const deleteStmt = db.prepare('DELETE FROM tracks WHERE id = ?');
+    const deleteTx = db.transaction((items: any[]) => {
+      for (const item of items) {
+        if (item.file_path && fs.existsSync(item.file_path)) {
+          try {
+            fs.unlinkSync(item.file_path);
+          } catch (_) {}
+        }
+        deleteStmt.run(item.id);
+      }
+    });
+
+    deleteTx(toDelete);
+    console.log(`[DailyMix Cleanup] Removed ${toDelete.length} unliked orphan track(s) from old mixes.`);
   } catch (err: any) {
     console.warn('[DailyMix Cleanup Warning]:', err.message);
   }

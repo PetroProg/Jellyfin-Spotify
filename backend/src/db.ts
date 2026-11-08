@@ -130,6 +130,10 @@ db.exec(`
     track_key TEXT NOT NULL,
     title TEXT NOT NULL,
     artist TEXT NOT NULL,
+    album TEXT,
+    duration_ms INTEGER DEFAULT 0,
+    cover_url TEXT,
+    spotify_id TEXT,
     category TEXT,
     recommended_date TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -146,13 +150,35 @@ try {
       track_key TEXT NOT NULL,
       title TEXT NOT NULL,
       artist TEXT NOT NULL,
+      album TEXT,
+      duration_ms INTEGER DEFAULT 0,
+      cover_url TEXT,
+      spotify_id TEXT,
       category TEXT,
       recommended_date TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
+  `);
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE daily_mix_history ADD COLUMN album TEXT;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE daily_mix_history ADD COLUMN duration_ms INTEGER DEFAULT 0;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE daily_mix_history ADD COLUMN cover_url TEXT;');
+} catch (_) {}
+try {
+  db.exec('ALTER TABLE daily_mix_history ADD COLUMN spotify_id TEXT;');
+} catch (_) {}
+try {
+  db.exec(`
     CREATE INDEX IF NOT EXISTS idx_dm_history_user_key ON daily_mix_history(user_id, track_key);
     CREATE INDEX IF NOT EXISTS idx_dm_history_user_date ON daily_mix_history(user_id, recommended_date);
+    CREATE INDEX IF NOT EXISTS idx_dm_history_spotify ON daily_mix_history(spotify_id);
+    CREATE INDEX IF NOT EXISTS idx_dm_history_user_cat ON daily_mix_history(user_id, category, recommended_date);
   `);
 } catch (_) {}
 try {
