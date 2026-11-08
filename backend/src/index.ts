@@ -9,6 +9,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
+import { Agent, setGlobalDispatcher } from 'undici';
 import { db } from './db';
 import { checkAndNotifyUserLimit } from './notify';
 import { 
@@ -49,6 +50,17 @@ import { getOrGenerateDailyMixes, saveDailyMixAsPlaylist } from './dailyMix';
 import { startNightlyScheduler, getNightlySchedulerStatus, updateNightlySchedule } from './nightlyScheduler';
 
 dotenv.config();
+
+// Configure high-performance HTTP(S) Keep-Alive connection pooling across all outbound fetch calls
+const globalDispatcher = new Agent({
+  keepAliveTimeout: 60000,
+  keepAliveMaxTimeout: 300000,
+  connections: 64,
+  connect: {
+    timeout: 10000
+  }
+});
+setGlobalDispatcher(globalDispatcher);
 
 const server = Fastify({ logger: false });
 

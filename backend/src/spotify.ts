@@ -746,9 +746,33 @@ export interface SpotifyTrackDetails {
   duration_ms?: number;
 }
 
+interface TrackDetailsCacheEntry {
+  data: SpotifyTrackDetails;
+  expires: number;
+}
+const spotifyTrackDetailsCache = new Map<string, TrackDetailsCacheEntry>();
+const TRACK_DETAILS_CACHE_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+const MAX_TRACK_DETAILS_CACHE_SIZE = 2000;
+
+function pruneTrackDetailsCache() {
+  if (spotifyTrackDetailsCache.size > MAX_TRACK_DETAILS_CACHE_SIZE) {
+    const now = Date.now();
+    for (const [k, v] of spotifyTrackDetailsCache.entries()) {
+      if (now > v.expires) {
+        spotifyTrackDetailsCache.delete(k);
+      }
+    }
+  }
+}
+
 export async function resolveSpotifyTrackDetails(trackId: string): Promise<SpotifyTrackDetails> {
   const result: SpotifyTrackDetails = {};
   if (!trackId) return result;
+
+  const cached = spotifyTrackDetailsCache.get(trackId);
+  if (cached && Date.now() < cached.expires) {
+    return { ...cached.data };
+  }
 
   try {
     const token = await getAccessToken();
@@ -806,6 +830,14 @@ export async function resolveSpotifyTrackDetails(trackId: string): Promise<Spoti
     }
   } catch (e) {}
 
+  if (result.title || result.cover_url) {
+    pruneTrackDetailsCache();
+    spotifyTrackDetailsCache.set(trackId, {
+      data: { ...result },
+      expires: Date.now() + TRACK_DETAILS_CACHE_TTL_MS
+    });
+  }
+
   return result;
 }
 
@@ -818,6 +850,18 @@ export interface DeezerInfoResult {
 }
 
 const deezerInfoCache = new Map<string, { data: DeezerInfoResult; expires: number }>();
+const MAX_DEEZER_CACHE_SIZE = 2000;
+
+function pruneDeezerCache() {
+  if (deezerInfoCache.size > MAX_DEEZER_CACHE_SIZE) {
+    const now = Date.now();
+    for (const [k, v] of deezerInfoCache.entries()) {
+      if (now > v.expires) {
+        deezerInfoCache.delete(k);
+      }
+    }
+  }
+}
 
 function generateDeezerCandidateQueries(artist: string, title: string): string[] {
   const queries: string[] = [];
@@ -909,6 +953,7 @@ export async function resolveDeezerTrackInfo(artist: string, title: string): Pro
   const results1 = await Promise.allSettled(batch1.map(q => tryQuery(q)));
   for (const r of results1) {
     if (r.status === 'fulfilled' && r.value?.preview) {
+      pruneDeezerCache();
       deezerInfoCache.set(cacheKey, { data: r.value, expires: Date.now() + 3600000 });
       return r.value;
     }
@@ -920,6 +965,7 @@ export async function resolveDeezerTrackInfo(artist: string, title: string): Pro
     const results2 = await Promise.allSettled(batch2.map(q => tryQuery(q)));
     for (const r of results2) {
       if (r.status === 'fulfilled' && r.value?.preview) {
+        pruneDeezerCache();
         deezerInfoCache.set(cacheKey, { data: r.value, expires: Date.now() + 3600000 });
         return r.value;
       }
@@ -929,6 +975,7 @@ export async function resolveDeezerTrackInfo(artist: string, title: string): Pro
   // 3. Fallback: if no preview found anywhere, return best metadata found
   for (const r of results1) {
     if (r.status === 'fulfilled' && r.value) {
+      pruneDeezerCache();
       deezerInfoCache.set(cacheKey, { data: r.value, expires: Date.now() + 1800000 });
       return r.value;
     }
@@ -1000,9 +1047,34 @@ export async function searchItunesTracks(query: string, limit: number = 8): Prom
   }
 }
 
+interface SearchCacheEntry {
+  results: SpotifyTrack[];
+  expires: number;
+}
+const searchCache = new Map<string, SearchCacheEntry>();
+const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_SEARCH_CACHE_SIZE = 1000;
+
+function pruneSearchCache() {
+  if (searchCache.size > MAX_SEARCH_CACHE_SIZE) {
+    const now = Date.now();
+    for (const [k, v] of searchCache.entries()) {
+      if (now > v.expires) {
+        searchCache.delete(k);
+      }
+    }
+  }
+}
+
 export async function searchExternalTracks(query: string, limit: number = 8, userId?: number): Promise<SpotifyTrack[]> {
   const cleanQ = (query || '').trim();
   if (!cleanQ) return [];
+
+  const cacheKey = `${userId || 0}:::${limit}:::${cleanQ.toLowerCase()}`;
+  const cached = searchCache.get(cacheKey);
+  if (cached && Date.now() < cached.expires) {
+    return cached.results.map(t => ({ ...t }));
+  }
 
   const results: SpotifyTrack[] = [];
   const seenKeys = new Set<string>();
@@ -1061,7 +1133,16 @@ export async function searchExternalTracks(query: string, limit: number = 8, use
     addUnique(itunesList);
   }
 
-  return results.slice(0, limit);
+  const finalResults = results.slice(0, limit);
+  if (finalResults.length > 0) {
+    pruneSearchCache();
+    searchCache.set(cacheKey, {
+      results: finalResults,
+      expires: Date.now() + SEARCH_CACHE_TTL_MS
+    });
+  }
+
+  return finalResults;
 }
 
 export async function searchSpotifyTracks(query: string, limit: number = 8, userId?: number): Promise<SpotifyTrack[]> {
