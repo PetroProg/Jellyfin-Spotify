@@ -175,12 +175,29 @@ export function setupWebSocketSync(server: FastifyInstance) {
       lastSeen: Date.now(),
     };
 
+    let messageCount = 0;
+    let messageWindowStart = Date.now();
+
     ws.on('pong', () => {
       session.isAlive = true;
       session.lastSeen = Date.now();
     });
 
     ws.on('message', (raw: any) => {
+      // Message flood limiter: max 60 messages per second per WebSocket
+      const now = Date.now();
+      if (now - messageWindowStart > 1000) {
+        messageWindowStart = now;
+        messageCount = 0;
+      }
+      messageCount++;
+      if (messageCount > 60) {
+        if (messageCount === 61) {
+          console.warn(`[WS Throttling] User ${userId} device ${session.deviceId || 'unknown'} exceeded 60 msgs/sec`);
+        }
+        return;
+      }
+
       try {
         const data = JSON.parse(raw.toString());
         session.lastSeen = Date.now();
@@ -203,6 +220,14 @@ export function setupWebSocketSync(server: FastifyInstance) {
             if (!clients) {
               clients = new Map<string, ClientSession>();
               userClients.set(userId, clients);
+            }
+
+            // If an older connection exists for this deviceId, cleanly terminate it
+            const existingSession = clients.get(cleanDeviceId);
+            if (existingSession && existingSession.ws !== ws) {
+              try {
+                existingSession.ws.close(1000, 'Replaced by new connection');
+              } catch (_) {}
             }
 
             // Limit concurrent devices per user to 15 to prevent memory exhaustion
@@ -457,9 +482,12 @@ export function setupWebSocketSync(server: FastifyInstance) {
     ws.on('close', () => {
       const clients = userClients.get(userId);
       if (clients && session.deviceId) {
-        clients.delete(session.deviceId);
-        if (clients.size === 0) {
-          userClients.delete(userId);
+        // Only delete from active client map if this session is still the active one registered
+        if (clients.get(session.deviceId) === session) {
+          clients.delete(session.deviceId);
+          if (clients.size === 0) {
+            userClients.delete(userId);
+          }
         }
       }
 

@@ -540,7 +540,7 @@ server.get('/api/user/library/backup', { preHandler: [(server as any).authentica
 server.post('/api/user/library/restore', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const userId = req.user.id;
   const payload = req.body;
-  if (!payload || (!Array.isArray(payload.playlists) && !Array.isArray(payload.likedTracks))) {
+  if (!payload || typeof payload !== 'object' || (!Array.isArray(payload.playlists) && !Array.isArray(payload.likedTracks) && !Array.isArray(payload.blacklist))) {
     return reply.status(400).send({ error: 'Неверный формат файла резервной копии' });
   }
 
@@ -566,11 +566,14 @@ server.post('/api/user/library/restore', { preHandler: [(server as any).authenti
 
   // Execute all restores inside an atomic transaction
   const restoreTx = db.transaction(() => {
-    // 1. Restore Liked Tracks
+    // 1. Restore Liked Tracks (cap at 2000)
     if (Array.isArray(payload.likedTracks)) {
-      for (const t of payload.likedTracks) {
-        if (!t.title || !t.artist) continue;
-        const trackRow: any = findTrackStmt.get(t.spotify_id || '', t.title, t.artist);
+      for (const t of payload.likedTracks.slice(0, 2000)) {
+        if (!t || !t.title || !t.artist) continue;
+        const spId = t.spotify_id ? String(t.spotify_id).slice(0, 64) : '';
+        const title = String(t.title).slice(0, 200);
+        const artist = String(t.artist).slice(0, 200);
+        const trackRow: any = findTrackStmt.get(spId, title, artist);
         if (trackRow) {
           insertLikeStmt.run(userId, trackRow.id);
           restoredLikes++;
@@ -578,27 +581,43 @@ server.post('/api/user/library/restore', { preHandler: [(server as any).authenti
       }
     }
 
-    // 2. Restore Playlists
+    // 2. Restore Playlists (cap at 50 playlists, 1000 tracks per playlist)
     if (Array.isArray(payload.playlists)) {
-      for (const pl of payload.playlists) {
-        if (!pl.name) continue;
+      for (const pl of payload.playlists.slice(0, 50)) {
+        if (!pl || !pl.name) continue;
+        const name = String(pl.name).trim().slice(0, 100);
+        if (!name) continue;
+        const description = pl.description ? String(pl.description).trim().slice(0, 500) : '';
+
+        let safeCoverUrl: string | null = null;
+        if (typeof pl.cover_url === 'string') {
+          const c = pl.cover_url.trim();
+          if (c.startsWith('https://') || c.startsWith('http://') || c.startsWith('/api/')) {
+            safeCoverUrl = c.slice(0, 2048);
+          }
+        }
+
+        const spotifyId = pl.spotify_id ? String(pl.spotify_id).slice(0, 64) : null;
         const info = insertPlStmt.run(
           userId,
-          pl.name,
-          pl.description || '',
-          pl.cover_url || null,
-          pl.spotify_id || null,
+          name,
+          description,
+          safeCoverUrl,
+          spotifyId,
           pl.is_daily_mix ? 1 : 0,
-          pl.daily_mix_date || null
+          pl.daily_mix_date ? String(pl.daily_mix_date).slice(0, 32) : null
         );
         const newPlaylistId = Number(info.lastInsertRowid);
         restoredPlaylists++;
 
         if (Array.isArray(pl.tracks)) {
           let pos = 0;
-          for (const t of pl.tracks) {
-            if (!t.title || !t.artist) continue;
-            const trackRow: any = findTrackStmt.get(t.spotify_id || '', t.title, t.artist);
+          for (const t of pl.tracks.slice(0, 1000)) {
+            if (!t || !t.title || !t.artist) continue;
+            const spId = t.spotify_id ? String(t.spotify_id).slice(0, 64) : '';
+            const title = String(t.title).slice(0, 200);
+            const artist = String(t.artist).slice(0, 200);
+            const trackRow: any = findTrackStmt.get(spId, title, artist);
             if (trackRow) {
               insertPlTrackStmt.run(newPlaylistId, trackRow.id, pos++);
               restoredTracks++;
@@ -608,11 +627,14 @@ server.post('/api/user/library/restore', { preHandler: [(server as any).authenti
       }
     }
 
-    // 3. Restore Blacklist
+    // 3. Restore Blacklist (cap at 500)
     if (Array.isArray(payload.blacklist)) {
-      for (const b of payload.blacklist) {
-        if (b.title && b.artist) {
-          insertBlStmt.run(userId, b.title, b.artist, b.spotify_id || null);
+      for (const b of payload.blacklist.slice(0, 500)) {
+        if (b && b.title && b.artist) {
+          const title = String(b.title).trim().slice(0, 200);
+          const artist = String(b.artist).trim().slice(0, 200);
+          const spId = b.spotify_id ? String(b.spotify_id).trim().slice(0, 64) : null;
+          insertBlStmt.run(userId, title, artist, spId);
           restoredBlacklist++;
         }
       }
@@ -793,9 +815,21 @@ server.get('/api/stream/:trackId', { config: { compress: false } }, async (req: 
 });
 
 // ----------------- DAILY MIXES -----------------
+function validateClientTimezone(rawTz: any): string | undefined {
+  if (typeof rawTz !== 'string') return undefined;
+  const trimmed = rawTz.trim();
+  if (!trimmed || trimmed.length > 50) return undefined;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: trimmed });
+    return trimmed;
+  } catch (_) {
+    return undefined;
+  }
+}
+
 server.get('/api/daily-mixes', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   try {
-    const clientTz = typeof req.headers['x-timezone'] === 'string' ? req.headers['x-timezone'] : undefined;
+    const clientTz = validateClientTimezone(req.headers['x-timezone']);
     if (clientTz) {
       try {
         db.prepare('UPDATE users SET timezone = ? WHERE id = ? AND (timezone IS NULL OR timezone != ?)').run(clientTz, req.user.id, clientTz);
@@ -819,8 +853,11 @@ server.put('/api/daily-mixes/schedule', { preHandler: [(server as any).authentic
 });
 
 server.post('/api/daily-mixes/refresh', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  if (!checkRateLimit('dm_refresh:' + req.user.id, 3)) {
+    return reply.status(429).send({ error: 'Слишком много запросов на обновление миксов. Попробуйте позже.' });
+  }
   try {
-    const clientTz = typeof req.headers['x-timezone'] === 'string' ? req.headers['x-timezone'] : undefined;
+    const clientTz = validateClientTimezone(req.headers['x-timezone']);
     const mixes = await getOrGenerateDailyMixes(req.user.id, true, clientTz);
     return { mixes };
   } catch (err: any) {
@@ -874,9 +911,10 @@ server.get('/api/playlists', { preHandler: [(server as any).authenticate] }, asy
 server.post('/api/playlists', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const body = req.body || {};
   const { name, description } = body;
-  if (!name || !name.trim()) return reply.status(400).send({ error: 'Название обязательно' });
+  if (!name || typeof name !== 'string' || !name.trim()) return reply.status(400).send({ error: 'Название обязательно' });
 
-  const cleanName = name.trim();
+  const cleanName = name.trim().slice(0, 100);
+  const cleanDesc = description ? String(description).trim().slice(0, 500) : '';
   const existing = db.prepare('SELECT id FROM playlists WHERE user_id = ? AND COALESCE(is_daily_mix, 0) = 0 AND LOWER(name) = LOWER(?)').get(req.user.id, cleanName);
   if (existing) {
     return reply.status(400).send({ error: 'Плейлист с таким названием уже существует' });
@@ -885,9 +923,9 @@ server.post('/api/playlists', { preHandler: [(server as any).authenticate] }, as
   const info = db.prepare(`
     INSERT INTO playlists (user_id, name, description)
     VALUES (?, ?, ?)
-  `).run(req.user.id, cleanName, description || '');
+  `).run(req.user.id, cleanName, cleanDesc);
 
-  return { id: info.lastInsertRowid, name: cleanName, description };
+  return { id: info.lastInsertRowid, name: cleanName, description: cleanDesc };
 });
 
 server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
@@ -973,8 +1011,8 @@ server.put('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
   if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
 
   const body = req.body || {};
-  const name = body.name ? String(body.name).trim() : null;
-  const description = body.description !== undefined ? String(body.description).trim() : undefined;
+  const name = body.name ? String(body.name).trim().slice(0, 100) : null;
+  const description = body.description !== undefined ? String(body.description).trim().slice(0, 500) : undefined;
 
   if (!name) {
     return reply.status(400).send({ error: 'Название плейлиста не может быть пустым' });
@@ -1184,6 +1222,9 @@ server.post('/api/tracks/:id/redownload', { preHandler: [(server as any).authent
   const trackId = Number(req.params.id);
   if (!trackId || isNaN(trackId)) {
     return reply.status(400).send({ error: 'Invalid track ID' });
+  }
+  if (!checkRateLimit('redownload:' + req.user.id, 5)) {
+    return reply.status(429).send({ error: 'Слишком много запросов на повторное скачивание. Попробуйте через минуту.' });
   }
   const result = await redownloadTrackStudioMaster(trackId);
   if (!result.success) {
@@ -1804,7 +1845,7 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
       const matchedLocal: any = localMatchMap.get(key) || null;
 
       if (matchedLocal && !localTracks.some((lt) => lt.id === matchedLocal.id)) {
-        localTracks.push(matchedLocal);
+        localTracks.push(sanitizeTrackForClient(matchedLocal));
       }
 
       return {
@@ -1878,7 +1919,10 @@ server.post('/api/tracks/download-single', { preHandler: [(server as any).authen
   if (!result.success) {
     return reply.status(500).send({ error: result.error || 'Ошибка скачивания трека' });
   }
-  return result;
+  return {
+    ...result,
+    track: result.track ? sanitizeTrackForClient(result.track) : undefined
+  };
 });
 
 server.post('/api/tracks/play-instant', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
@@ -1977,7 +2021,7 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
     return {
       isExisting: true,
       isPreview: false,
-      track: quickResult.track,
+      track: sanitizeTrackForClient(quickResult.track),
       streamUrl: `/api/stream/${quickResult.track.id}`
     };
   }
@@ -2058,7 +2102,6 @@ server.get('/api/likes', { preHandler: [(server as any).authenticate] }, async (
 server.post('/api/likes/:trackId', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const trackId = Number(req.params.trackId);
   if (!trackId || isNaN(trackId) || trackId <= 0) {
-    db.prepare('DELETE FROM liked_tracks WHERE track_id <= 0').run();
     return { liked: false };
   }
   const body = req.body || {};
@@ -2102,8 +2145,11 @@ server.get('/api/blacklist', { preHandler: [(server as any).authenticate] }, asy
 
 server.post('/api/blacklist', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const body = req.body || {};
-  const { title, artist, spotify_id, track_id } = body;
+  let { title, artist, spotify_id, track_id } = body;
   if (!title || !artist) return reply.status(400).send({ error: 'Название и артист обязательны' });
+  title = String(title).trim().slice(0, 200);
+  artist = String(artist).trim().slice(0, 200);
+  spotify_id = spotify_id ? String(spotify_id).trim().slice(0, 64) : '';
 
   // 1. Add to blacklist if not already added
   const existing = db.prepare(

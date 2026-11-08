@@ -319,6 +319,7 @@ export async function resolveSpotifyEntityInput(input: string): Promise<ParsedSp
       const res = await fetch(shortLinkMatch[0], {
         method: 'GET',
         redirect: 'follow',
+        signal: AbortSignal.timeout(8000),
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
@@ -368,7 +369,8 @@ export async function fetchSpotifyAlbum(albumId: string, userId?: number): Promi
   if (token) {
     try {
       const albumRes = await fetch(`https://api.spotify.com/v1/albums/${albumId}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal: AbortSignal.timeout(10000)
       });
       if (albumRes.ok) {
         const aData: any = await albumRes.json();
@@ -393,7 +395,8 @@ export async function fetchSpotifyAlbum(albumId: string, userId?: number): Promi
         while (nextUrl) {
           try {
             const nextRes = await fetch(nextUrl, {
-              headers: { 'Authorization': `Bearer ${token}` }
+              headers: { 'Authorization': `Bearer ${token}` },
+              signal: AbortSignal.timeout(10000)
             });
             if (!nextRes.ok) break;
             const nextData: any = await nextRes.json();
@@ -432,6 +435,7 @@ export async function fetchSpotifyAlbum(albumId: string, userId?: number): Promi
   // Fallback: Embed scraper (Zero API keys required!)
   const embedUrl = `https://open.spotify.com/embed/album/${albumId}`;
   const res = await fetch(embedUrl, {
+    signal: AbortSignal.timeout(10000),
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
@@ -490,10 +494,12 @@ export async function fetchSpotifyArtistTopTracks(artistId: string, userId?: num
     try {
       const [artistRes, topRes] = await Promise.all([
         fetch(`https://api.spotify.com/v1/artists/${artistId}`, {
-          headers: { 'Authorization': `Bearer ${token}` }
+          headers: { 'Authorization': `Bearer ${token}` },
+          signal: AbortSignal.timeout(10000)
         }),
         fetch(`https://api.spotify.com/v1/artists/${artistId}/top-tracks?market=US`, {
-          headers: { 'Authorization': `Bearer ${token}` }
+          headers: { 'Authorization': `Bearer ${token}` },
+          signal: AbortSignal.timeout(10000)
         })
       ]);
 
@@ -528,6 +534,7 @@ export async function fetchSpotifyArtistTopTracks(artistId: string, userId?: num
 
   const embedUrl = `https://open.spotify.com/embed/artist/${artistId}`;
   const res = await fetch(embedUrl, {
+    signal: AbortSignal.timeout(10000),
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
@@ -583,7 +590,8 @@ export async function fetchSpotifySingleTrackAsPlaylist(trackId: string, userId?
   if (token) {
     try {
       const sRes = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal: AbortSignal.timeout(10000)
       });
       if (sRes.ok) {
         const sData: any = await sRes.json();
@@ -658,7 +666,8 @@ export async function fetchSpotifyPlaylist(urlOrId: string, userId?: number): Pr
     // Official Spotify Web API (With user OAuth token, full pagination up to 10k tracks works!)
     try {
       const playlistRes = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal: AbortSignal.timeout(10000)
       });
       if (playlistRes.ok) {
         const pData: any = await playlistRes.json();
@@ -682,7 +691,8 @@ export async function fetchSpotifyPlaylist(urlOrId: string, userId?: number): Pr
         while (nextUrl) {
           try {
             const nextRes = await fetch(nextUrl, {
-              headers: { 'Authorization': `Bearer ${token}` }
+              headers: { 'Authorization': `Bearer ${token}` },
+              signal: AbortSignal.timeout(10000)
             });
             if (!nextRes.ok) break;
             const nextData: any = await nextRes.json();
@@ -722,6 +732,7 @@ export async function fetchSpotifyPlaylist(urlOrId: string, userId?: number): Pr
   // Fallback: Embed scraper (Zero API keys required!)
   const embedUrl = `https://open.spotify.com/embed/playlist/${playlistId}`;
   const res = await fetch(embedUrl, {
+    signal: AbortSignal.timeout(10000),
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
@@ -766,7 +777,9 @@ export async function fetchSpotifyPlaylist(urlOrId: string, userId?: number): Pr
   }
 
   // Fallback 2: Regex extraction of Spotify oEmbed
-  const oembedRes = await fetch(`https://open.spotify.com/oembed?url=https://open.spotify.com/playlist/${playlistId}`);
+  const oembedRes = await fetch(`https://open.spotify.com/oembed?url=https://open.spotify.com/playlist/${playlistId}`, {
+    signal: AbortSignal.timeout(8000)
+  });
   let name = 'Spotify Playlist';
   let cover_url = '';
   if (oembedRes.ok) {
@@ -823,7 +836,8 @@ export async function resolveSpotifyTrackDetails(trackId: string): Promise<Spoti
     const token = await getAccessToken();
     if (token) {
       const res = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(8000)
       });
       if (res.ok) {
         const data: any = await res.json();
@@ -840,6 +854,7 @@ export async function resolveSpotifyTrackDetails(trackId: string): Promise<Spoti
   // Fallback 1: Spotify Embed Track page (__NEXT_DATA__) - provides artist, duration, cover_url without API keys
   try {
     const embedRes = await fetch(`https://open.spotify.com/embed/track/${trackId}`, {
+      signal: AbortSignal.timeout(8000),
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       }
@@ -865,7 +880,9 @@ export async function resolveSpotifyTrackDetails(trackId: string): Promise<Spoti
   } catch (e) {}
 
   try {
-    const oembedRes = await fetch(`https://open.spotify.com/oembed?url=https://open.spotify.com/track/${trackId}`);
+    const oembedRes = await fetch(`https://open.spotify.com/oembed?url=https://open.spotify.com/track/${trackId}`, {
+      signal: AbortSignal.timeout(8000)
+    });
     if (oembedRes.ok) {
       const data: any = await oembedRes.json();
       if (!result.title) result.title = data.title;
@@ -1205,7 +1222,8 @@ export async function fetchSpotifyLikedSongs(userId: number): Promise<SpotifyPla
 
   while (nextUrl) {
     const res = await fetch(nextUrl, {
-      headers: { 'Authorization': `Bearer ${token}` }
+      headers: { 'Authorization': `Bearer ${token}` },
+      signal: AbortSignal.timeout(10000)
     });
     if (!res.ok) {
       const err = await res.text();
@@ -1254,7 +1272,8 @@ export async function fetchSpotifyUserPlaylists(userId: number): Promise<Spotify
 
   while (nextUrl) {
     const res = await fetch(nextUrl, {
-      headers: { 'Authorization': `Bearer ${token}` }
+      headers: { 'Authorization': `Bearer ${token}` },
+      signal: AbortSignal.timeout(10000)
     });
     if (!res.ok) {
       const err = await res.text();
@@ -1296,7 +1315,8 @@ export async function parseTrackListText(text: string, userId?: number): Promise
           const trackId = entity.id;
           if (token) {
             const sRes = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
-              headers: { 'Authorization': `Bearer ${token}` }
+              headers: { 'Authorization': `Bearer ${token}` },
+              signal: AbortSignal.timeout(8000)
             });
             if (sRes.ok) {
               const sData: any = await sRes.json();

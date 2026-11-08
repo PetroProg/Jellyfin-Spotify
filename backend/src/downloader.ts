@@ -22,7 +22,24 @@ let isWorkerRunning = false;
 
 function sanitizeFilename(name: string): string {
   if (!name) return 'track';
-  return String(name).replace(/[\\/:*?"<>|]/g, '_').trim() || 'track';
+  let safe = String(name)
+    .replace(/[\x00-\x1f\x7f\\/:*?"<>|]/g, '_')
+    .replace(/^\.+|\.+$/g, '')
+    .trim();
+  if (!safe || safe === '.' || safe === '..') {
+    safe = 'track';
+  }
+  return safe.slice(0, 100);
+}
+
+export function getSafeArtistDir(artist: string): string {
+  const artistFolder = sanitizeFilename(artist || 'Unknown Artist');
+  const resolvedMusicDir = path.resolve(MUSIC_DIR);
+  const targetDir = path.resolve(MUSIC_DIR, artistFolder);
+  if (!targetDir.startsWith(resolvedMusicDir + path.sep) && targetDir !== resolvedMusicDir) {
+    return path.join(resolvedMusicDir, 'Unknown Artist');
+  }
+  return targetDir;
 }
 
 export function resolveAudioFilePath(targetDir: string, safeTitle: string): string | null {
@@ -91,8 +108,17 @@ interface QueuedDownloadRequest {
 
 let nextRequestId = 1;
 const downloadWaitQueue: QueuedDownloadRequest[] = [];
+const MAX_WAIT_QUEUE = 200;
 
 function enqueueRequest(priority: DownloadPriority, taskName: string, resolve: () => void) {
+  if (downloadWaitQueue.length >= MAX_WAIT_QUEUE) {
+    // Drop the lowest priority item from the tail to prevent unbounded memory growth
+    const dropped = downloadWaitQueue.pop();
+    if (dropped) {
+      console.warn(`[DownloadScheduler] Wait queue saturated (${MAX_WAIT_QUEUE}). Dropped lowest priority task "${dropped.taskName}"`);
+    }
+  }
+
   const req: QueuedDownloadRequest = {
     id: nextRequestId++,
     priority,
@@ -1219,8 +1245,7 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
   `).run(`${track.artist} - ${track.title}`, jobId);
 
   // Prepare destination dir
-  const artistFolder = sanitizeFilename(track.artist || 'Unknown Artist');
-  const targetDir = path.join(MUSIC_DIR, artistFolder);
+  const targetDir = getSafeArtistDir(track.artist || 'Unknown Artist');
   if (!fs.existsSync(targetDir)) {
     fs.mkdirSync(targetDir, { recursive: true });
   }
@@ -1471,8 +1496,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
     }
 
     // 3. Prepare target path
-    const artistFolder = sanitizeFilename(track.artist || 'Unknown Artist');
-    const targetDir = path.join(MUSIC_DIR, artistFolder);
+    const targetDir = getSafeArtistDir(track.artist || 'Unknown Artist');
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });
     }
@@ -1624,8 +1648,7 @@ export function stopQualityUpgrade(): boolean {
  * Safely downloads studio 320k 48kHz audio and atomically replaces the existing track file.
  */
 export async function upgradeSingleTrackFile(tr: any): Promise<boolean> {
-  const artistFolder = sanitizeFilename(tr.artist || 'Unknown Artist');
-  const targetDir = path.join(MUSIC_DIR, artistFolder);
+  const targetDir = getSafeArtistDir(tr.artist || 'Unknown Artist');
   if (!fs.existsSync(targetDir)) {
     fs.mkdirSync(targetDir, { recursive: true });
   }
@@ -1700,8 +1723,7 @@ export async function upgradeSingleTrackFile(tr: any): Promise<boolean> {
   broadcastToAll({
     type: 'TRACK_QUALITY_UPGRADED',
     trackId: tr.id,
-    bitrate: newBitrate,
-    filePath: destinationFile
+    bitrate: newBitrate
   });
 
   return true;
@@ -1892,7 +1914,28 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
   return { started: true, message: `Запущена выборочная проверка и перезагрузка треков низкого качества (320 kbps)` };
 }
 
+function sanitizeTrackRecord(tr: any) {
+  if (!tr) return tr;
+  const { file_path, ...safe } = tr;
+  return safe;
+}
+
+const inFlightRedownloads = new Map<number, Promise<{ success: boolean; track?: any; error?: string }>>();
+
 export async function redownloadTrackStudioMaster(trackId: number): Promise<{ success: boolean; track?: any; error?: string }> {
+  if (inFlightRedownloads.has(trackId)) {
+    return inFlightRedownloads.get(trackId)!;
+  }
+  const promise = redownloadTrackStudioMasterInternal(trackId);
+  inFlightRedownloads.set(trackId, promise);
+  try {
+    return await promise;
+  } finally {
+    inFlightRedownloads.delete(trackId);
+  }
+}
+
+async function redownloadTrackStudioMasterInternal(trackId: number): Promise<{ success: boolean; track?: any; error?: string }> {
   try {
     const track: any = db.prepare('SELECT * FROM tracks WHERE id = ?').get(trackId);
     if (!track) {
@@ -1901,8 +1944,7 @@ export async function redownloadTrackStudioMaster(trackId: number): Promise<{ su
 
     console.log(`[Redownload Studio Master] Starting replacement for #${track.id}: "${track.artist} - ${track.title}"`);
 
-    const artistFolder = sanitizeFilename(track.artist || 'Unknown Artist');
-    const targetDir = path.join(MUSIC_DIR, artistFolder);
+    const targetDir = getSafeArtistDir(track.artist || 'Unknown Artist');
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });
     }
@@ -1973,16 +2015,17 @@ export async function redownloadTrackStudioMaster(trackId: number): Promise<{ su
       .run(finalFile, actualDurationMs, probe.bitrateKbps || 320, track.id);
 
     const updatedTrack: any = db.prepare('SELECT * FROM tracks WHERE id = ?').get(track.id);
+    const safeTrack = sanitizeTrackRecord(updatedTrack);
 
     broadcastToAll({
       type: 'TRACK_UPDATED',
-      track: updatedTrack
+      track: safeTrack
     });
 
     await refreshJellyfinLibrary();
     console.log(`[Redownload Studio Master] Successfully replaced #${track.id}: "${track.artist} - ${track.title}" (${probe.bitrateKbps || 320}kbps, ${Math.round(actualDurationMs / 1000)}s)`);
 
-    return { success: true, track: updatedTrack };
+    return { success: true, track: safeTrack };
   } catch (err: any) {
     console.error(`[Redownload Studio Master Error] Track #${trackId}:`, err);
     return { success: false, error: err.message };
