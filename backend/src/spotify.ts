@@ -308,6 +308,42 @@ export function parseSpotifyEntityUrl(input: string): ParsedSpotifyEntity | null
   return null;
 }
 
+function isAllowedSpotifyHost(host: string): boolean {
+  const h = host.toLowerCase();
+  return h === 'open.spotify.com' ||
+         h === 'spotify.link' ||
+         h === 'spoti.fi' ||
+         h === 'spotify.app.link' ||
+         h.endsWith('.spotify.com') ||
+         h.endsWith('.spotify.link') ||
+         h.endsWith('.spotify.app.link');
+}
+
+async function readLimitedText(res: Response, maxBytes = 65536): Promise<string> {
+  try {
+    if (!res.body) return '';
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        const take = Math.min(value.length, maxBytes - totalBytes);
+        chunks.push(value.subarray(0, take));
+        totalBytes += take;
+        if (totalBytes >= maxBytes) {
+          try { await reader.cancel(); } catch (_) {}
+          break;
+        }
+      }
+    }
+    return Buffer.concat(chunks).toString('utf-8');
+  } catch (_) {
+    return '';
+  }
+}
+
 export async function resolveSpotifyEntityInput(input: string): Promise<ParsedSpotifyEntity | null> {
   const direct = parseSpotifyEntityUrl(input);
   if (direct) return direct;
@@ -316,21 +352,45 @@ export async function resolveSpotifyEntityInput(input: string): Promise<ParsedSp
   const shortLinkMatch = input.match(/https?:\/\/(?:spotify\.link|spoti\.fi|spotify\.app\.link)\/[^\s"'<>]+/i);
   if (shortLinkMatch) {
     try {
-      const res = await fetch(shortLinkMatch[0], {
-        method: 'GET',
-        redirect: 'follow',
-        signal: AbortSignal.timeout(8000),
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      let currentUrl = shortLinkMatch[0];
+      // Manual redirect follow loop with domain whitelist (SSRF & loop prevention)
+      for (let hop = 0; hop < 3; hop++) {
+        const urlObj = new URL(currentUrl);
+        if (!isAllowedSpotifyHost(urlObj.hostname)) {
+          return null;
         }
-      });
-      if (res.url) {
-        const resolved = parseSpotifyEntityUrl(res.url);
-        if (resolved) return resolved;
+
+        const res = await fetch(currentUrl, {
+          method: 'GET',
+          redirect: 'manual',
+          signal: AbortSignal.timeout(8000),
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          }
+        });
+
+        // Check redirect Location
+        if (res.status >= 300 && res.status < 400) {
+          const loc = res.headers.get('location');
+          if (!loc) break;
+          const nextUrl = new URL(loc, currentUrl).toString();
+          const nextHost = new URL(nextUrl).hostname;
+          if (!isAllowedSpotifyHost(nextHost)) {
+            return null;
+          }
+          const resolved = parseSpotifyEntityUrl(nextUrl);
+          if (resolved) return resolved;
+          currentUrl = nextUrl;
+          continue;
+        }
+
+        if (res.ok) {
+          const html = await readLimitedText(res, 65536);
+          const inHtml = parseSpotifyEntityUrl(html);
+          if (inHtml) return inHtml;
+        }
+        break;
       }
-      const html = await res.text();
-      const inHtml = parseSpotifyEntityUrl(html);
-      if (inHtml) return inHtml;
     } catch (_) {}
   }
 
@@ -392,7 +452,9 @@ export async function fetchSpotifyAlbum(albumId: string, userId?: number): Promi
         }
 
         let nextUrl: string | null = aData.tracks?.next || null;
-        while (nextUrl) {
+        let albumPages = 0;
+        while (nextUrl && albumPages < 20 && nextUrl.startsWith('https://api.spotify.com/')) {
+          albumPages++;
           try {
             const nextRes = await fetch(nextUrl, {
               headers: { 'Authorization': `Bearer ${token}` },
@@ -410,7 +472,9 @@ export async function fetchSpotifyAlbum(albumId: string, userId?: number): Promi
                 duration_ms: t.duration_ms || 180000,
                 cover_url: albumCover
               });
+              if (tracks.length >= 1000) break;
             }
+            if (tracks.length >= 1000) break;
             nextUrl = nextData.next || null;
           } catch (pageErr: any) {
             console.warn('[Spotify album pagination error]:', pageErr.message);
@@ -688,7 +752,9 @@ export async function fetchSpotifyPlaylist(urlOrId: string, userId?: number): Pr
 
         // Fetch remaining pages if playlist has > 100 tracks (e.g. 200, 500, 1000+ songs!)
         let nextUrl: string | null = pData.tracks?.next || null;
-        while (nextUrl) {
+        let playlistPages = 0;
+        while (nextUrl && playlistPages < 20 && nextUrl.startsWith('https://api.spotify.com/')) {
+          playlistPages++;
           try {
             const nextRes = await fetch(nextUrl, {
               headers: { 'Authorization': `Bearer ${token}` },
@@ -707,7 +773,9 @@ export async function fetchSpotifyPlaylist(urlOrId: string, userId?: number): Pr
                 duration_ms: t.duration_ms || 180000,
                 cover_url: t.album?.images?.[0]?.url || pData.images?.[0]?.url
               });
+              if (tracks.length >= 2000) break;
             }
+            if (tracks.length >= 2000) break;
             nextUrl = nextData.next || null;
           } catch (pageErr: any) {
             console.warn('[Spotify pagination error]:', pageErr.message);
@@ -1220,7 +1288,9 @@ export async function fetchSpotifyLikedSongs(userId: number): Promise<SpotifyPla
   const tracks: SpotifyTrack[] = [];
   let nextUrl: string | null = 'https://api.spotify.com/v1/me/tracks?limit=50';
 
-  while (nextUrl) {
+  let likedPages = 0;
+  while (nextUrl && likedPages < 40 && nextUrl.startsWith('https://api.spotify.com/')) {
+    likedPages++;
     const res = await fetch(nextUrl, {
       headers: { 'Authorization': `Bearer ${token}` },
       signal: AbortSignal.timeout(10000)
@@ -1270,7 +1340,9 @@ export async function fetchSpotifyUserPlaylists(userId: number): Promise<Spotify
   const playlists: SpotifyUserPlaylistInfo[] = [];
   let nextUrl: string | null = 'https://api.spotify.com/v1/me/playlists?limit=50';
 
-  while (nextUrl) {
+  let likedPages = 0;
+  while (nextUrl && likedPages < 40 && nextUrl.startsWith('https://api.spotify.com/')) {
+    likedPages++;
     const res = await fetch(nextUrl, {
       headers: { 'Authorization': `Bearer ${token}` },
       signal: AbortSignal.timeout(10000)
@@ -1305,8 +1377,11 @@ export async function parseTrackListText(text: string, userId?: number): Promise
 
   const rawTracks: SpotifyTrack[] = [];
   const token = (userId ? await getUserSpotifyToken(userId) : null) || await getAccessToken();
+  let complexEntitiesCount = 0;
 
   for (const line of lines) {
+    if (rawTracks.length >= 500) break;
+
     // 1. Check if line contains any Spotify URL/URI (track, album, playlist, artist, or short link)
     const entity = await resolveSpotifyEntityInput(line);
     if (entity) {
@@ -1344,16 +1419,31 @@ export async function parseTrackListText(text: string, userId?: number): Promise
           }
           continue;
         } else if (entity.type === 'album') {
+          if (complexEntitiesCount >= 5 || rawTracks.length >= 500) {
+            console.warn(`[parseTrackListText] Skipping complex entity ${entity.type} (${entity.id}): limit reached`);
+            continue;
+          }
+          complexEntitiesCount++;
           const albumData = await fetchSpotifyAlbum(entity.id, userId);
-          rawTracks.push(...(albumData.tracks || []));
+          rawTracks.push(...(albumData.tracks || []).slice(0, 500 - rawTracks.length));
           continue;
         } else if (entity.type === 'playlist') {
+          if (complexEntitiesCount >= 5 || rawTracks.length >= 500) {
+            console.warn(`[parseTrackListText] Skipping complex entity ${entity.type} (${entity.id}): limit reached`);
+            continue;
+          }
+          complexEntitiesCount++;
           const plData = await fetchSpotifyPlaylist(entity.id, userId);
-          rawTracks.push(...(plData.tracks || []));
+          rawTracks.push(...(plData.tracks || []).slice(0, 500 - rawTracks.length));
           continue;
         } else if (entity.type === 'artist') {
+          if (complexEntitiesCount >= 5 || rawTracks.length >= 500) {
+            console.warn(`[parseTrackListText] Skipping complex entity ${entity.type} (${entity.id}): limit reached`);
+            continue;
+          }
+          complexEntitiesCount++;
           const artistData = await fetchSpotifyArtistTopTracks(entity.id, userId);
-          rawTracks.push(...(artistData.tracks || []));
+          rawTracks.push(...(artistData.tracks || []).slice(0, 500 - rawTracks.length));
           continue;
         }
       } catch (err: any) {

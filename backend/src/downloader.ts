@@ -525,6 +525,8 @@ export function cancelPlaylistDownloads(playlistIds: number[]) {
   }
 }
 
+const MAX_PLAYLIST_QUEUE_SIZE = 2000;
+
 export function enqueuePlaylistDownload(
   jobId: string,
   userId: number,
@@ -542,6 +544,10 @@ export function enqueuePlaylistDownload(
   }
 
   for (let i = 0; i < tracks.length; i++) {
+    if (queue.length >= MAX_PLAYLIST_QUEUE_SIZE) {
+      console.warn(`[Downloader] Queue reached maximum capacity (${MAX_PLAYLIST_QUEUE_SIZE}). Dropping excess tracks.`);
+      break;
+    }
     if (/https?:\/\//i.test(tracks[i].title) || /https?:\/\//i.test(tracks[i].artist)) {
       console.warn(`[Downloader] Skipping invalid URL-as-title track "${tracks[i].artist} - ${tracks[i].title}"`);
       continue;
@@ -1005,7 +1011,7 @@ export async function findBestStudioAudioSource(
       }
 
       const selected = bestItem || items[0];
-      if (selected?.id) {
+      if (selected?.id && /^[a-zA-Z0-9_-]{6,20}$/.test(String(selected.id))) {
         console.log(`[Studio Audio Match] "${cleanArtist} - ${cleanTitle}": selected ${selected.id} ("${selected.title}", channel="${selected.channel || selected.uploader}", diff=${targetSec > 0 && selected.duration ? Math.abs(selected.duration - targetSec) : 0}s, score=${bestScore})`);
         const resultUrl = `https://www.youtube.com/watch?v=${selected.id}`;
         if (studioCandidateCache.size > 2000) {

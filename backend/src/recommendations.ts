@@ -49,10 +49,12 @@ export async function getRecommendations(
   seedTrackTitle?: string
 ): Promise<RecommendationTrack[]> {
   const cleanArtists = (seedArtists || [])
-    .map(a => (a || '').trim())
+    .slice(0, 15)
+    .map(a => String(a || '').trim().slice(0, 100))
     .filter(Boolean);
 
-  const cacheKey = `${userId}:::${cleanArtists.join(',').toLowerCase()}:::${(seedTrackTitle || '').toLowerCase()}`;
+  const cleanTrackTitle = seedTrackTitle ? String(seedTrackTitle).trim().slice(0, 100) : '';
+  const cacheKey = `${userId}:::${cleanArtists.join(',').toLowerCase()}:::${cleanTrackTitle.toLowerCase()}`;
   const now = Date.now();
   const cached = recCache.get(cacheKey);
   if (cached && (now - cached.cachedAt) < REC_CACHE_TTL_MS) {
@@ -62,10 +64,12 @@ export async function getRecommendations(
   // Extract individual/primary artists: e.g. "Drake feat. 21 Savage" -> ["Drake", "21 Savage"]
   const searchArtists: string[] = [];
   for (const art of cleanArtists) {
-    const parts = art.split(/[,&/]| feat\.? | ft\.? /i).map(p => p.trim()).filter(Boolean);
+    const parts = art.split(/[,&/]| feat\.? | ft\.? /i).map(p => p.trim().slice(0, 100)).filter(Boolean);
     for (const p of parts) {
       if (!searchArtists.includes(p)) searchArtists.push(p);
+      if (searchArtists.length >= 20) break;
     }
+    if (searchArtists.length >= 20) break;
   }
 
   let localCandidates: any[] = [];

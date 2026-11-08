@@ -78,44 +78,109 @@ export { getOrGenerateJwtSecret };
 const JWT_SECRET = getOrGenerateJwtSecret();
 const MUSIC_DIR = process.env.MUSIC_DIR || path.join(process.cwd(), 'music');
 
-// Security: In-memory sliding-window IP rate limiter to block password brute-force
+// Security: In-memory bounded rate limiter with sliding window to block brute-force and abuse
 interface RateLimitEntry {
   count: number;
+  firstRequestMs: number;
   blockedUntil: number;
 }
-const authAttempts = new Map<string, RateLimitEntry>();
+const rateLimitStore = new Map<string, RateLimitEntry>();
 
-function checkRateLimit(key: string, maxAttempts = 5): { blocked: boolean; retryAfterSec?: number } {
+function sweepRateLimitStore() {
   const now = Date.now();
-  const entry = authAttempts.get(key);
-  if (entry) {
-    if (entry.blockedUntil > now) {
-      return { blocked: true, retryAfterSec: Math.ceil((entry.blockedUntil - now) / 1000) };
+  for (const [key, entry] of rateLimitStore.entries()) {
+    if (entry.blockedUntil <= now && (now - entry.firstRequestMs > 3600000)) {
+      rateLimitStore.delete(key);
     }
+  }
+  // Hard cap to prevent memory exhaustion under DDoS
+  if (rateLimitStore.size > 10000) {
+    let toRemove = rateLimitStore.size - 5000;
+    for (const key of rateLimitStore.keys()) {
+      rateLimitStore.delete(key);
+      if (--toRemove <= 0) break;
+    }
+  }
+}
+
+// Periodic cleanup every 5 minutes
+const cleanupTimer = setInterval(sweepRateLimitStore, 5 * 60 * 1000);
+if (cleanupTimer.unref) cleanupTimer.unref();
+
+function isRateLimited(key: string): { blocked: boolean; retryAfterSec?: number } {
+  const now = Date.now();
+  const entry = rateLimitStore.get(key);
+  if (entry && entry.blockedUntil > now) {
+    return { blocked: true, retryAfterSec: Math.ceil((entry.blockedUntil - now) / 1000) };
   }
   return { blocked: false };
 }
 
-function recordFailedAuth(key: string, maxAttempts = 5, windowMs = 60000, blockDurationMs = 300000) {
+function consumeRateLimit(
+  key: string,
+  maxRequests: number,
+  windowMs: number = 60000,
+  blockDurationMs?: number
+): { blocked: boolean; retryAfterSec?: number } {
+  if (rateLimitStore.size > 5000) sweepRateLimitStore();
   const now = Date.now();
-  const entry = authAttempts.get(key) || { count: 0, blockedUntil: 0 };
+  let entry = rateLimitStore.get(key);
+
+  if (!entry) {
+    rateLimitStore.set(key, { count: 1, firstRequestMs: now, blockedUntil: 0 });
+    return { blocked: false };
+  }
+
+  if (entry.blockedUntil > now) {
+    return { blocked: true, retryAfterSec: Math.ceil((entry.blockedUntil - now) / 1000) };
+  }
+
+  if (now - entry.firstRequestMs > windowMs) {
+    entry.count = 1;
+    entry.firstRequestMs = now;
+    entry.blockedUntil = 0;
+    return { blocked: false };
+  }
+
   entry.count++;
+  if (entry.count > maxRequests) {
+    const blockTime = blockDurationMs || windowMs;
+    entry.blockedUntil = now + blockTime;
+    return { blocked: true, retryAfterSec: Math.ceil(blockTime / 1000) };
+  }
+
+  return { blocked: false };
+}
+
+function recordFailedAttempt(
+  key: string,
+  maxAttempts: number = 5,
+  windowMs: number = 60000,
+  blockDurationMs: number = 300000
+) {
+  if (rateLimitStore.size > 5000) sweepRateLimitStore();
+  const now = Date.now();
+  let entry = rateLimitStore.get(key);
+  if (!entry || (now - entry.firstRequestMs > windowMs && entry.blockedUntil <= now)) {
+    entry = { count: 1, firstRequestMs: now, blockedUntil: 0 };
+  } else {
+    entry.count++;
+  }
+
   if (entry.count >= maxAttempts) {
     entry.blockedUntil = now + blockDurationMs;
   }
-  authAttempts.set(key, entry);
-  setTimeout(() => {
-    const cur = authAttempts.get(key);
-    if (cur && cur.count > 0 && cur.blockedUntil <= Date.now()) {
-      cur.count--;
-      if (cur.count <= 0) authAttempts.delete(key);
-    }
-  }, windowMs);
+  rateLimitStore.set(key, entry);
 }
 
-function resetAuthLimit(key: string) {
-  authAttempts.delete(key);
+function resetRateLimit(key: string) {
+  rateLimitStore.delete(key);
 }
+
+// Backward-compatibility aliases
+const checkRateLimit = isRateLimited;
+const recordFailedAuth = recordFailedAttempt;
+const resetAuthLimit = resetRateLimit;
 
 // Register Plugins & Security Headers
 server.addHook('onSend', async (_request, reply) => {
@@ -241,7 +306,7 @@ function sanitizeTrackForClient(track: any) {
 // ----------------- AUTH ROUTES -----------------
 server.post('/api/auth/register', async (req: any, reply: any) => {
   const clientIp = req.ip || req.raw?.socket?.remoteAddress || 'unknown';
-  const limitCheck = checkRateLimit(`reg:::${clientIp}`, 10);
+  const limitCheck = consumeRateLimit(`reg:::${clientIp}`, 10, 60000);
   if (limitCheck.blocked) {
     return reply.status(429).send({ error: `Слишком много запросов. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
   }
@@ -257,7 +322,20 @@ server.post('/api/auth/register', async (req: any, reply: any) => {
   }
 
   const cleanUser = String(username).trim();
-  const resolvedEmail = email ? String(email).trim() : (cleanUser.includes('@') ? cleanUser : null);
+  if (cleanUser.length < 2 || cleanUser.length > 64) {
+    return reply.status(400).send({ error: 'Логин должен содержать от 2 до 64 символов' });
+  }
+  if (!/^[a-zA-Z0-9_.@-]+$/.test(cleanUser)) {
+    return reply.status(400).send({ error: 'Логин содержит недопустимые символы (разрешены буквы, цифры, _, ., @, -)' });
+  }
+
+  const cleanPass = String(password);
+  if (cleanPass.length < 4 || cleanPass.length > 128) {
+    return reply.status(400).send({ error: 'Пароль должен содержать от 4 до 128 символов' });
+  }
+
+  const resolvedEmail = email ? String(email).trim().slice(0, 120) : (cleanUser.includes('@') ? cleanUser.slice(0, 120) : null);
+  const cleanDisplayName = display_name ? String(display_name).trim().slice(0, 100) : cleanUser;
 
   const existing = db.prepare(`
     SELECT id FROM users 
@@ -271,11 +349,11 @@ server.post('/api/auth/register', async (req: any, reply: any) => {
   }
 
   // Non-blocking async bcrypt hash (protects Node.js Event Loop from audio stutter)
-  const passwordHash = await bcrypt.hash(password, 10);
+  const passwordHash = await bcrypt.hash(cleanPass, 10);
   const info = db.prepare(`
     INSERT INTO users (username, password_hash, display_name, email)
     VALUES (?, ?, ?, ?)
-  `).run(cleanUser, passwordHash, display_name || cleanUser, resolvedEmail);
+  `).run(cleanUser, passwordHash, cleanDisplayName, resolvedEmail);
 
   const userId = Number(info.lastInsertRowid);
   const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM users').get();
@@ -287,21 +365,31 @@ server.post('/api/auth/register', async (req: any, reply: any) => {
   const token = server.jwt.sign({ id: userId, username: cleanUser }, { expiresIn: '30d' });
   return {
     token,
-    user: { id: userId, username: cleanUser, display_name: display_name || cleanUser, email: resolvedEmail }
+    user: { id: userId, username: cleanUser, display_name: cleanDisplayName, email: resolvedEmail }
   };
 });
 
 server.post('/api/auth/login', async (req: any, reply: any) => {
   const clientIp = req.ip || req.raw?.socket?.remoteAddress || 'unknown';
+  const ipCheck = consumeRateLimit(`login_ip:::${clientIp}`, 20, 60000);
+  if (ipCheck.blocked) {
+    return reply.status(429).send({
+      error: `Слишком много попыток входа с вашего IP. Попробуйте снова через ${ipCheck.retryAfterSec || 60} сек.`
+    });
+  }
+
   const body = req.body || {};
   const { username, password } = body;
-  const cleanIdentifier = String(username || '').trim();
-  const rateLimitKey = `${clientIp}:::${cleanIdentifier.toLowerCase()}`;
+  const cleanIdentifier = String(username || '').trim().slice(0, 120);
+  if (!cleanIdentifier || typeof password !== 'string' || password.length > 128) {
+    return reply.status(400).send({ error: 'Неверный логин или пароль' });
+  }
 
-  const limitCheck = checkRateLimit(rateLimitKey, 5);
-  if (limitCheck.blocked) {
+  const userRateKey = `login_user:::${cleanIdentifier.toLowerCase()}`;
+  const userCheck = isRateLimited(userRateKey);
+  if (userCheck.blocked) {
     return reply.status(429).send({
-      error: `Слишком много неудачных попыток входа. Попробуйте снова через ${limitCheck.retryAfterSec || 60} сек.`
+      error: `Слишком много неудачных попыток входа для этого аккаунта. Попробуйте снова через ${userCheck.retryAfterSec || 300} сек.`
     });
   }
 
@@ -309,11 +397,11 @@ server.post('/api/auth/login', async (req: any, reply: any) => {
 
   const isMatch = user && (await bcrypt.compare(password, user.password_hash));
   if (!isMatch) {
-    recordFailedAuth(rateLimitKey, 5);
+    recordFailedAttempt(userRateKey, 5, 60000, 300000);
     return reply.status(401).send({ error: 'Неверный логин или пароль' });
   }
 
-  resetAuthLimit(rateLimitKey);
+  resetRateLimit(userRateKey);
 
   const token = server.jwt.sign({ id: user.id, username: user.username }, { expiresIn: '30d' });
   const settings = getUserSettings(user.id);
@@ -404,7 +492,7 @@ server.put('/api/user/profile', { preHandler: [(server as any).authenticate] }, 
 
 const handlePasswordUpdate = async (req: any, reply: any) => {
   const rateKey = `pwd_action:${req.user.id}`;
-  const limitCheck = checkRateLimit(rateKey, 5);
+  const limitCheck = isRateLimited(rateKey);
   if (limitCheck.blocked) {
     return reply.status(429).send({
       error: `Слишком много неудачных попыток. Попробуйте снова через ${limitCheck.retryAfterSec || 60} сек.`
@@ -414,17 +502,21 @@ const handlePasswordUpdate = async (req: any, reply: any) => {
   const body = req.body || {};
   const currentPassword = body.current_password || body.currentPassword;
   const newPassword = body.new_password || body.newPassword;
-  const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
 
-  if (!user || !(await bcrypt.compare(currentPassword, user.password_hash))) {
-    recordFailedAuth(rateKey, 5);
+  if (typeof currentPassword !== 'string' || currentPassword.length > 128) {
     return reply.status(400).send({ error: 'Текущий пароль указан неверно' });
   }
-  if (!newPassword || newPassword.length < 4) {
-    return reply.status(400).send({ error: 'Новый пароль слишком короткий' });
+  if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 4 || newPassword.length > 128) {
+    return reply.status(400).send({ error: 'Новый пароль должен содержать от 4 до 128 символов' });
   }
 
-  resetAuthLimit(rateKey);
+  const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (!user || !(await bcrypt.compare(currentPassword, user.password_hash))) {
+    recordFailedAttempt(rateKey, 5);
+    return reply.status(400).send({ error: 'Текущий пароль указан неверно' });
+  }
+
+  resetRateLimit(rateKey);
   const newHash = await bcrypt.hash(newPassword, 10);
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(newHash, req.user.id);
   return { success: true, message: 'Пароль успешно обновлен' };
@@ -435,7 +527,7 @@ server.put('/api/user/password', { preHandler: [(server as any).authenticate] },
 
 const handleAccountDelete = async (req: any, reply: any) => {
   const rateKey = `pwd_action:${req.user.id}`;
-  const limitCheck = checkRateLimit(rateKey, 5);
+  const limitCheck = isRateLimited(rateKey);
   if (limitCheck.blocked) {
     return reply.status(429).send({
       error: `Слишком много неудачных попыток. Попробуйте снова через ${limitCheck.retryAfterSec || 60} сек.`
@@ -444,13 +536,17 @@ const handleAccountDelete = async (req: any, reply: any) => {
 
   const body = req.body || {};
   const password = body.password;
-  const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-    recordFailedAuth(rateKey, 5);
+  if (typeof password !== 'string' || password.length > 128) {
     return reply.status(400).send({ error: 'Неверный пароль. Удаление отменено.' });
   }
 
-  resetAuthLimit(rateKey);
+  const user: any = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+    recordFailedAttempt(rateKey, 5);
+    return reply.status(400).send({ error: 'Неверный пароль. Удаление отменено.' });
+  }
+
+  resetRateLimit(rateKey);
   invalidateUserCache(req.user.id);
   terminateUserSessions(req.user.id);
   db.prepare('DELETE FROM download_jobs WHERE user_id = ?').run(req.user.id);
@@ -653,7 +749,10 @@ server.post('/api/user/library/restore', { preHandler: [(server as any).authenti
 // ----------------- AUDIO STREAMING (High-Performance WAN Stream & Caching) -----------------
 // Dedicated lightweight HEAD route: instant 0ms validation for PWA ETag / Content-Length
 server.head('/api/stream/:trackId', { config: { compress: false } }, async (req: any, reply: any) => {
-  const trackId = parseInt(req.params.trackId, 10) || req.params.trackId;
+  const trackId = Number(req.params.trackId);
+  if (!trackId || !Number.isInteger(trackId) || trackId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID трека' });
+  }
   const track: any = db.prepare('SELECT file_path FROM tracks WHERE id = ?').get(trackId);
   if (!track || !track.file_path) {
     return reply.status(404).send();
@@ -713,7 +812,10 @@ server.get('/api/stream/:trackId', { config: { compress: false } }, async (req: 
     } catch (_) {}
   }
 
-  const trackId = parseInt(req.params.trackId, 10) || req.params.trackId;
+  const trackId = Number(req.params.trackId);
+  if (!trackId || !Number.isInteger(trackId) || trackId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID трека' });
+  }
   const track: any = db.prepare('SELECT file_path FROM tracks WHERE id = ?').get(trackId);
   if (!track || !track.file_path) {
     return reply.status(404).send({ error: 'Аудиофайл не найден' });
@@ -853,8 +955,9 @@ server.put('/api/daily-mixes/schedule', { preHandler: [(server as any).authentic
 });
 
 server.post('/api/daily-mixes/refresh', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
-  if (!checkRateLimit('dm_refresh:' + req.user.id, 3)) {
-    return reply.status(429).send({ error: 'Слишком много запросов на обновление миксов. Попробуйте позже.' });
+  const limitCheck = consumeRateLimit('dm_refresh:' + req.user.id, 3, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на обновление миксов. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
   }
   try {
     const clientTz = validateClientTimezone(req.headers['x-timezone']);
@@ -1220,11 +1323,12 @@ server.get('/api/tracks/:id/playlists', { preHandler: [(server as any).authentic
 
 server.post('/api/tracks/:id/redownload', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const trackId = Number(req.params.id);
-  if (!trackId || isNaN(trackId)) {
-    return reply.status(400).send({ error: 'Invalid track ID' });
+  if (!trackId || !Number.isInteger(trackId) || trackId <= 0) {
+    return reply.status(400).send({ error: 'Некорректный ID трека' });
   }
-  if (!checkRateLimit('redownload:' + req.user.id, 5)) {
-    return reply.status(429).send({ error: 'Слишком много запросов на повторное скачивание. Попробуйте через минуту.' });
+  const limitCheck = consumeRateLimit('redownload:' + req.user.id, 5, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на повторное скачивание. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
   }
   const result = await redownloadTrackStudioMaster(trackId);
   if (!result.success) {
@@ -1235,9 +1339,14 @@ server.post('/api/tracks/:id/redownload', { preHandler: [(server as any).authent
 
 // ----------------- SPOTIFY IMPORT -----------------
 server.post('/api/spotify/import', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('sp_import:' + req.user.id, 6, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на импорт. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const body = req.body || {};
   const { url } = body;
-  if (!url) return reply.status(400).send({ error: 'Укажите ссылку на плейлист, альбом или трек Spotify' });
+  if (!url || typeof url !== 'string') return reply.status(400).send({ error: 'Укажите ссылку на плейлист, альбом или трек Spotify' });
 
   try {
     const playlistData = await fetchSpotifyPlaylist(url, req.user.id);
@@ -1505,6 +1614,11 @@ server.post('/api/spotify/disconnect', { preHandler: [(server as any).authentica
 });
 
 server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('sp_import_liked:' + req.user.id, 3, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на импорт любимых треков. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   try {
     const playlistData = await fetchSpotifyLikedSongs(req.user.id);
     if (!playlistData.tracks || playlistData.tracks.length === 0) {
@@ -1630,6 +1744,11 @@ server.post('/api/spotify/import-liked', { preHandler: [(server as any).authenti
 });
 
 server.post('/api/spotify/import-user-playlists', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('sp_import_user_pl:' + req.user.id, 3, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на импорт плейлистов. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   try {
     const spotifyPlaylists = await fetchSpotifyUserPlaylists(req.user.id);
     if (!spotifyPlaylists || spotifyPlaylists.length === 0) {
@@ -1681,6 +1800,11 @@ server.post('/api/spotify/import-user-playlists', { preHandler: [(server as any)
 });
 
 server.post('/api/spotify/import-list', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('sp_import_list:' + req.user.id, 5, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов на импорт списка. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
   const body = req.body || {};
   const { text, playlistName, playlistId: requestedPlaylistId } = body;
   if (!text || typeof text !== 'string' || !text.trim()) {
@@ -1820,7 +1944,7 @@ function batchMatchLocalTracks(tracks: any[]): Map<string, any> {
 }
 
 server.get('/api/search', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
-  const query = (req.query.q || '').trim();
+  const query = (req.query.q || '').trim().slice(0, 200);
   if (!query) {
     return { localTracks: [], spotifyTracks: [] };
   }
@@ -2240,7 +2364,13 @@ server.delete('/api/blacklist/:id', { preHandler: [(server as any).authenticate]
 
 // ----------------- RECOMMENDATIONS & SMART SHUFFLE -----------------
 server.get('/api/recommendations', { preHandler: [(server as any).authenticate] }, async (req: any) => {
-  const artistsQuery = req.query.artists ? String(req.query.artists).split(',') : [];
+  const artistsQuery = req.query.artists
+    ? String(req.query.artists)
+        .split(',')
+        .slice(0, 15)
+        .map((a) => a.trim().slice(0, 100))
+        .filter(Boolean)
+    : [];
   const recs = await getRecommendations(req.user.id, artistsQuery);
   return { recommendations: recs };
 });

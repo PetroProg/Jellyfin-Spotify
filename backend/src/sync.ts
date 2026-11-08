@@ -90,6 +90,25 @@ function getDeviceList(userId: number): DeviceInfo[] {
   return list;
 }
 
+function sanitizePlaybackTrack(track: any): any {
+  if (!track || typeof track !== 'object') return null;
+  return {
+    id: track.id,
+    title: typeof track.title === 'string' ? track.title.slice(0, 200) : '',
+    artist: typeof track.artist === 'string' ? track.artist.slice(0, 200) : '',
+    album: typeof track.album === 'string' ? track.album.slice(0, 200) : '',
+    duration_ms: typeof track.duration_ms === 'number' ? track.duration_ms : 0,
+    cover_url: typeof track.cover_url === 'string' ? track.cover_url.slice(0, 2048) : '',
+    spotify_id: typeof track.spotify_id === 'string' ? track.spotify_id.slice(0, 64) : undefined,
+    isPreview: Boolean(track.isPreview)
+  };
+}
+
+function sanitizePlaybackQueue(queue: any[]): any[] {
+  if (!Array.isArray(queue)) return [];
+  return queue.slice(0, 500).map(sanitizePlaybackTrack).filter(Boolean);
+}
+
 function safeSend(ws: WebSocket, message: any) {
   if (ws.readyState === WebSocket.OPEN) {
     try {
@@ -175,6 +194,12 @@ export function setupWebSocketSync(server: FastifyInstance) {
       lastSeen: Date.now(),
     };
 
+    const regTimeout = setTimeout(() => {
+      if (!session.deviceId) {
+        try { ws.close(4001, 'Registration timeout'); } catch (_) {}
+      }
+    }, 15000);
+
     let messageCount = 0;
     let messageWindowStart = Date.now();
 
@@ -201,10 +226,16 @@ export function setupWebSocketSync(server: FastifyInstance) {
       try {
         const data = JSON.parse(raw.toString());
         session.lastSeen = Date.now();
+
+        if (!session.deviceId && data.type !== 'REGISTER' && data.type !== 'PING') {
+          return;
+        }
+
         const playback = getOrCreatePlayback(userId);
 
         switch (data.type) {
           case 'REGISTER': {
+            clearTimeout(regTimeout);
             const { deviceId, deviceName, deviceType, hasActivePlayback } = data;
             if (!deviceId || typeof deviceId !== 'string') return;
 
@@ -301,19 +332,15 @@ export function setupWebSocketSync(server: FastifyInstance) {
             playback.activeDeviceId = session.deviceId;
             playback.activeDeviceName = session.deviceName;
 
-            if (state.track !== undefined) playback.track = state.track;
-            if (state.isPlaying !== undefined) playback.isPlaying = state.isPlaying;
-            if (state.currentTime !== undefined) playback.currentTime = state.currentTime;
-            if (state.duration !== undefined) playback.duration = state.duration;
+            if (state.track !== undefined) playback.track = sanitizePlaybackTrack(state.track);
+            if (state.isPlaying !== undefined) playback.isPlaying = Boolean(state.isPlaying);
+            if (state.currentTime !== undefined) playback.currentTime = typeof state.currentTime === 'number' ? state.currentTime : 0;
+            if (state.duration !== undefined) playback.duration = typeof state.duration === 'number' ? state.duration : 0;
             if (state.queue !== undefined) {
-              playback.queue = Array.isArray(state.queue) && state.queue.length > 500
-                ? state.queue.slice(0, 500)
-                : state.queue;
+              playback.queue = sanitizePlaybackQueue(state.queue);
             }
             if (state.originalQueue !== undefined) {
-              playback.originalQueue = Array.isArray(state.originalQueue) && state.originalQueue.length > 500
-                ? state.originalQueue.slice(0, 500)
-                : state.originalQueue;
+              playback.originalQueue = sanitizePlaybackQueue(state.originalQueue);
             }
             if (state.currentIndex !== undefined) playback.currentIndex = state.currentIndex;
             if (state.shuffle !== undefined) playback.shuffle = state.shuffle;
@@ -409,19 +436,15 @@ export function setupWebSocketSync(server: FastifyInstance) {
 
             // Merge incoming state from client if provided
             if (clientState) {
-              if (clientState.track) playback.track = clientState.track;
-              if (clientState.isPlaying !== undefined) playback.isPlaying = clientState.isPlaying;
-              if (clientState.currentTime !== undefined) playback.currentTime = clientState.currentTime;
-              if (clientState.duration !== undefined) playback.duration = clientState.duration;
-              if (clientState.queue) {
-                playback.queue = Array.isArray(clientState.queue) && clientState.queue.length > 500
-                  ? clientState.queue.slice(0, 500)
-                  : clientState.queue;
+              if (clientState.track !== undefined) playback.track = sanitizePlaybackTrack(clientState.track);
+              if (clientState.isPlaying !== undefined) playback.isPlaying = Boolean(clientState.isPlaying);
+              if (clientState.currentTime !== undefined) playback.currentTime = typeof clientState.currentTime === 'number' ? clientState.currentTime : 0;
+              if (clientState.duration !== undefined) playback.duration = typeof clientState.duration === 'number' ? clientState.duration : 0;
+              if (clientState.queue !== undefined) {
+                playback.queue = sanitizePlaybackQueue(clientState.queue);
               }
-              if (clientState.originalQueue) {
-                playback.originalQueue = Array.isArray(clientState.originalQueue) && clientState.originalQueue.length > 500
-                  ? clientState.originalQueue.slice(0, 500)
-                  : clientState.originalQueue;
+              if (clientState.originalQueue !== undefined) {
+                playback.originalQueue = sanitizePlaybackQueue(clientState.originalQueue);
               }
               if (clientState.currentIndex !== undefined) playback.currentIndex = clientState.currentIndex;
               if (clientState.shuffle !== undefined) playback.shuffle = clientState.shuffle;
@@ -480,6 +503,7 @@ export function setupWebSocketSync(server: FastifyInstance) {
     });
 
     ws.on('close', () => {
+      clearTimeout(regTimeout);
       const clients = userClients.get(userId);
       if (clients && session.deviceId) {
         // Only delete from active client map if this session is still the active one registered
