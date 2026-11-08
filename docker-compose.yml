@@ -30,6 +30,7 @@ services:
       - ./music:/app/music
     environment:
       - NODE_ENV=production
+      - NODE_OPTIONS=--max-old-space-size=350
       - PORT=5050
       - DB_PATH=/app/data/app.db
       - MUSIC_DIR=/app/music
