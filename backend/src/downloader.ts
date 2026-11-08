@@ -645,7 +645,19 @@ async function runWorkerLoop() {
   console.log('[Downloader] Background worker loop completed and idle.');
 }
 
-export async function findBestStudioAudioSource(artist: string, title: string, durationMs?: number): Promise<string> {
+interface StudioCandidateCacheEntry {
+  url: string;
+  cachedAt: number;
+}
+const studioCandidateCache = new Map<string, StudioCandidateCacheEntry>();
+const CANDIDATE_CACHE_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+export async function findBestStudioAudioSource(
+  artist: string,
+  title: string,
+  durationMs?: number,
+  bypassCache: boolean = false
+): Promise<string> {
   const targetSec = durationMs ? Math.round(durationMs / 1000) : 0;
   // Security: strip leading dashes/flags to prevent argument injection, normalize unicode
   const cleanArtist = (artist || '')
@@ -661,6 +673,15 @@ export async function findBestStudioAudioSource(artist: string, title: string, d
     .replace(/\s+/g, ' ')
     .trim();
   const cleanTitleNoFeat = cleanTitle.replace(/\s*\((feat|ft)\.?\s+[^)]+\)/gi, '').trim();
+
+  const cacheKey = `${cleanArtist.toLowerCase()}:::${cleanTitle.toLowerCase()}`;
+  if (!bypassCache) {
+    const cached = studioCandidateCache.get(cacheKey);
+    if (cached && (Date.now() - cached.cachedAt) < CANDIDATE_CACHE_TTL_MS) {
+      console.log(`[Studio Audio Match Cache HIT] "${cleanArtist} - ${cleanTitle}": ${cached.url}`);
+      return cached.url;
+    }
+  }
 
   // Helper to query yt-dlp flat playlist / dump json
   const fetchCandidates = async (queryOrUrl: string, defaultSearch?: string, timeoutMs: number = 22000): Promise<any[]> => {
@@ -871,7 +892,17 @@ export async function findBestStudioAudioSource(artist: string, title: string, d
       const selected = bestItem || items[0];
       if (selected?.id) {
         console.log(`[Studio Audio Match] "${cleanArtist} - ${cleanTitle}": selected ${selected.id} ("${selected.title}", channel="${selected.channel || selected.uploader}", diff=${targetSec > 0 && selected.duration ? Math.abs(selected.duration - targetSec) : 0}s, score=${bestScore})`);
-        return `https://www.youtube.com/watch?v=${selected.id}`;
+        const resultUrl = `https://www.youtube.com/watch?v=${selected.id}`;
+        if (studioCandidateCache.size > 2000) {
+          const now = Date.now();
+          for (const [k, v] of studioCandidateCache.entries()) {
+            if (now - v.cachedAt > CANDIDATE_CACHE_TTL_MS) {
+              studioCandidateCache.delete(k);
+            }
+          }
+        }
+        studioCandidateCache.set(cacheKey, { url: resultUrl, cachedAt: Date.now() });
+        return resultUrl;
       }
     }
   } catch (err: any) {
@@ -902,13 +933,18 @@ async function executeYtDlpMp3Download(
     const nodePath = process.execPath || '/usr/local/bin/node';
     const ytDlpArgs = [
       '--js-runtimes', `node:${nodePath}`,
+      '--concurrent-fragments', '4',
+      '--buffer-size', '16M',
+      '--no-mtime',
+      '--socket-timeout', '15',
+      '--extractor-retries', '3',
       '--force-overwrites',
       '--no-continue',
       '-f', 'bestaudio[acodec=opus]/bestaudio/best',
       '--extract-audio',
       '--audio-format', 'mp3',
       '--audio-quality', '320k',
-      '--postprocessor-args', 'ExtractAudio:-af volume=-0.5dB -ar 48000 -compression_level 7',
+      '--postprocessor-args', 'ExtractAudio:-af volume=-0.5dB -ar 48000 -compression_level 2',
       '--embed-thumbnail',
       '--add-metadata',
       '-o', outputTemplate
@@ -970,9 +1006,10 @@ async function downloadAudioWithFallback(
   targetDir: string,
   safeTitle: string,
   timeoutMs: number,
-  lowCpuPriority: boolean
+  lowCpuPriority: boolean,
+  bypassCache: boolean = false
 ): Promise<boolean> {
-  const primaryUrl = await findBestStudioAudioSource(artist, title, durationMs);
+  const primaryUrl = await findBestStudioAudioSource(artist, title, durationMs, bypassCache);
   const firstAttempt = await executeYtDlpMp3Download(
     primaryUrl,
     outputTemplate,
@@ -1469,6 +1506,10 @@ export async function upgradeSingleTrackFile(tr: any): Promise<boolean> {
   const tempPrefix = `${safeTitle}.upg.${Date.now()}`;
   const tempOutputTemplate = path.join(targetDir, `${tempPrefix}.%(ext)s`);
 
+  // Invalidate any stale cached candidate to ensure fresh search for studio upgrade
+  const cleanUpgKey = `${(tr.artist || '').toLowerCase()}:::${(tr.title || '').toLowerCase()}`;
+  studioCandidateCache.delete(cleanUpgKey);
+
   const ok = await downloadAudioWithFallback(
     tr.artist,
     tr.title,
@@ -1477,6 +1518,7 @@ export async function upgradeSingleTrackFile(tr: any): Promise<boolean> {
     targetDir,
     tempPrefix,
     120000,
+    true,
     true
   );
 
@@ -1739,6 +1781,10 @@ export async function redownloadTrackStudioMaster(trackId: number): Promise<{ su
     // Clean up any lingering temporary files from prior attempts
     cleanupPartialFiles(targetDir, tempSafeTitle);
 
+    // Invalidate any stale cached candidate to ensure fresh search for studio master replacement
+    const cleanRedownloadKey = `${(track.artist || '').toLowerCase()}:::${(track.title || '').toLowerCase()}`;
+    studioCandidateCache.delete(cleanRedownloadKey);
+
     // Force re-download to temporary output first with single download slot
     const success = await runWithSingleDownloadSlot(async () => {
       return await downloadAudioWithFallback(
@@ -1749,7 +1795,8 @@ export async function redownloadTrackStudioMaster(trackId: number): Promise<{ su
         targetDir,
         tempSafeTitle,
         180000,
-        false
+        false,
+        true
       );
     });
 
