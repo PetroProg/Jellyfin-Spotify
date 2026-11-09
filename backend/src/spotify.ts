@@ -21,12 +21,24 @@ export interface SpotifyPlaylistData {
 let spotifyAccessToken: string | null = null;
 let tokenExpiresAt = 0;
 
+export function resetSpotifyClientTokenCache(): void {
+  spotifyAccessToken = null;
+  tokenExpiresAt = 0;
+  inFlightTokenPromise = null;
+}
+
+const MAX_CONSUMED_STATES = 500;
 const consumedOAuthStates = new Map<string, number>();
 function isOAuthStateConsumedOrExpired(sig: string, exp: number): boolean {
   const now = Date.now();
-  if (consumedOAuthStates.size > 200) {
-    for (const [k, expiry] of consumedOAuthStates.entries()) {
-      if (now > expiry) consumedOAuthStates.delete(k);
+  for (const [k, expiry] of consumedOAuthStates.entries()) {
+    if (now > expiry) consumedOAuthStates.delete(k);
+  }
+  if (consumedOAuthStates.size >= MAX_CONSUMED_STATES) {
+    let toDelete = Math.floor(MAX_CONSUMED_STATES * 0.2);
+    for (const k of consumedOAuthStates.keys()) {
+      consumedOAuthStates.delete(k);
+      if (--toDelete <= 0) break;
     }
   }
   if (consumedOAuthStates.has(sig)) {
@@ -96,59 +108,73 @@ export async function getAccessToken(): Promise<string | null> {
   return inFlightTokenPromise;
 }
 
+const inFlightUserTokenPromises = new Map<number, Promise<string | null>>();
+
 export async function getUserSpotifyToken(userId: number): Promise<string | null> {
-  const row: any = db.prepare('SELECT spotify_access_token, spotify_refresh_token, spotify_token_expires FROM users WHERE id = ?').get(userId);
-  if (!row || !row.spotify_access_token) return null;
+  const existing = inFlightUserTokenPromises.get(userId);
+  if (existing) return existing;
 
-  // If token is still valid (with 60-second grace window)
-  if (row.spotify_token_expires && Date.now() < row.spotify_token_expires - 60000) {
-    return row.spotify_access_token;
-  }
+  const promise = (async (): Promise<string | null> => {
+    const row: any = db.prepare('SELECT spotify_access_token, spotify_refresh_token, spotify_token_expires FROM users WHERE id = ?').get(userId);
+    if (!row || !row.spotify_access_token) return null;
 
-  // Refresh token if available
-  if (row.spotify_refresh_token) {
-    const { clientId, clientSecret } = getSpotifyCredentials();
-    if (!clientId || !clientSecret) return null;
+    // If token is still valid (with 60-second grace window)
+    if (row.spotify_token_expires && Date.now() < row.spotify_token_expires - 60000) {
+      return row.spotify_access_token;
+    }
 
-    try {
-      const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-      const res = await fetch('https://accounts.spotify.com/api/token', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Basic ${basicAuth}`,
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        body: new URLSearchParams({
-          grant_type: 'refresh_token',
-          refresh_token: row.spotify_refresh_token
-        }).toString(),
-        signal: AbortSignal.timeout(8000)
-      });
+    // Refresh token if available
+    if (row.spotify_refresh_token) {
+      const { clientId, clientSecret } = getSpotifyCredentials();
+      if (!clientId || !clientSecret) return null;
 
-      if (!res.ok) {
-        console.warn('[Spotify] Failed to refresh user token:', res.statusText);
+      try {
+        const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+        const res = await fetch('https://accounts.spotify.com/api/token', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Basic ${basicAuth}`,
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: new URLSearchParams({
+            grant_type: 'refresh_token',
+            refresh_token: row.spotify_refresh_token
+          }).toString(),
+          signal: AbortSignal.timeout(8000)
+        });
+
+        if (!res.ok) {
+          console.warn('[Spotify] Failed to refresh user token:', res.statusText);
+          return null;
+        }
+
+        const data: any = await res.json();
+        const newAccessToken = data.access_token;
+        const newExpiresAt = Date.now() + (data.expires_in || 3600) * 1000;
+        const newRefreshToken = data.refresh_token || row.spotify_refresh_token;
+
+        db.prepare(`
+          UPDATE users
+          SET spotify_access_token = ?, spotify_refresh_token = ?, spotify_token_expires = ?
+          WHERE id = ?
+        `).run(newAccessToken, newRefreshToken, newExpiresAt, userId);
+
+        return newAccessToken;
+      } catch (e: any) {
+        console.warn('[Spotify] Error refreshing user token:', e.message);
         return null;
       }
-
-      const data: any = await res.json();
-      const newAccessToken = data.access_token;
-      const newExpiresAt = Date.now() + (data.expires_in || 3600) * 1000;
-      const newRefreshToken = data.refresh_token || row.spotify_refresh_token;
-
-      db.prepare(`
-        UPDATE users
-        SET spotify_access_token = ?, spotify_refresh_token = ?, spotify_token_expires = ?
-        WHERE id = ?
-      `).run(newAccessToken, newRefreshToken, newExpiresAt, userId);
-
-      return newAccessToken;
-    } catch (e: any) {
-      console.warn('[Spotify] Error refreshing user token:', e.message);
-      return null;
     }
-  }
 
-  return row.spotify_access_token;
+    return row.spotify_access_token;
+  })();
+
+  inFlightUserTokenPromises.set(userId, promise);
+  try {
+    return await promise;
+  } finally {
+    inFlightUserTokenPromises.delete(userId);
+  }
 }
 
 export function getSpotifyAuthUrl(userId: number, redirectUri: string, origin: string): string {
@@ -162,7 +188,8 @@ export function getSpotifyAuthUrl(userId: number, redirectUri: string, origin: s
   ].join(' ');
 
   const exp = Date.now() + 10 * 60 * 1000; // 10 minutes TTL
-  const payload = JSON.stringify({ userId, origin, redirectUri, exp });
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const payload = JSON.stringify({ userId, origin, redirectUri, exp, nonce });
   const secret = getOrGenerateJwtSecret();
   const sig = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
   const statePayload = Buffer.from(JSON.stringify({ p: payload, s: sig })).toString('base64url');
@@ -1443,9 +1470,10 @@ export async function fetchSpotifyUserPlaylists(userId: number): Promise<Spotify
 }
 
 export async function parseTrackListText(text: string, userId?: number): Promise<SpotifyTrack[]> {
-  const lines = text
+  const cleanText = (typeof text === 'string' ? text : '').slice(0, 200 * 1024);
+  const lines = cleanText
     .split(/\r?\n/)
-    .map(l => l.trim())
+    .map(l => l.trim().slice(0, 1000))
     .filter(l => l.length > 0 && !l.startsWith('#'))
     .slice(0, 500);
 
@@ -1570,11 +1598,14 @@ export async function parseTrackListText(text: string, userId?: number): Promise
       title = parts.slice(1).join(': ').trim();
     }
 
-    if (title && !/https?:\/\//i.test(title) && !/https?:\/\//i.test(artist)) {
+    const safeArtist = artist.slice(0, 200).trim();
+    const safeTitle = title.slice(0, 200).trim();
+
+    if (safeTitle && safeArtist && !/https?:\/\//i.test(safeTitle) && !/https?:\/\//i.test(safeArtist)) {
       rawTracks.push({
         id: Math.random().toString(36).substring(2, 12),
-        title,
-        artist,
+        title: safeTitle,
+        artist: safeArtist,
         album: '',
         duration_ms: 180000,
         cover_url: ''

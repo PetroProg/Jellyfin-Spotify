@@ -1,5 +1,6 @@
+import fs from 'fs';
 import { db } from './db';
-import { isTrackBlacklistedForUser } from './downloader';
+import { isTrackBlacklistedForUser, isPathInsideMusicDir } from './downloader';
 import { searchExternalTracks } from './spotify';
 
 export interface RecommendationTrack {
@@ -21,6 +22,19 @@ interface RecCacheEntry {
 const recCache = new Map<string, RecCacheEntry>();
 const REC_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes TTL
 const MAX_REC_CACHE_SIZE = 300;
+
+export function invalidateUserRecCache(userId?: number) {
+  if (!userId) {
+    recCache.clear();
+    return;
+  }
+  const prefix = `${userId}:::`;
+  for (const k of recCache.keys()) {
+    if (k.startsWith(prefix)) {
+      recCache.delete(k);
+    }
+  }
+}
 
 function pruneRecCache() {
   if (recCache.size > MAX_REC_CACHE_SIZE) {
@@ -89,7 +103,7 @@ export async function getRecommendations(
   if (searchArtists.length > 0) {
     const placeholders = searchArtists.map(() => '?').join(',');
     const matched = db.prepare(`
-      SELECT id, title, artist, album, duration_ms, cover_url, spotify_id
+      SELECT id, title, artist, album, duration_ms, cover_url, spotify_id, file_path
       FROM tracks
       WHERE artist IN (${placeholders})
       LIMIT 60
@@ -101,7 +115,7 @@ export async function getRecommendations(
       const primary = searchArtists[0];
       const escapedPrimary = escapeSqlLike(primary);
       const likeMatched = db.prepare(`
-        SELECT id, title, artist, album, duration_ms, cover_url, spotify_id
+        SELECT id, title, artist, album, duration_ms, cover_url, spotify_id, file_path
         FROM tracks
         WHERE artist LIKE ? ESCAPE '\\' AND artist NOT IN (${placeholders})
         LIMIT 30
@@ -113,7 +127,7 @@ export async function getRecommendations(
   // 2. Fast Fallback to local tracks if fewer than 6 candidates found (fast index scan instead of full table ORDER BY RANDOM())
   if (localCandidates.length < 6) {
     const moreLocal = db.prepare(`
-      SELECT id, title, artist, album, duration_ms, cover_url, spotify_id
+      SELECT id, title, artist, album, duration_ms, cover_url, spotify_id, file_path
       FROM tracks
       ORDER BY id DESC
       LIMIT 80
@@ -128,6 +142,11 @@ export async function getRecommendations(
   for (const tr of shuffleArray(localCandidates)) {
     if (seenIds.has(tr.id)) continue;
     seenIds.add(tr.id);
+
+    // Verify audio file is inside MUSIC_DIR and exists on disk
+    if (!tr.file_path || !isPathInsideMusicDir(tr.file_path) || !fs.existsSync(tr.file_path)) {
+      continue;
+    }
 
     if (isTrackBlacklistedForUser(userId, tr.title, tr.artist, tr.spotify_id)) {
       continue;

@@ -143,7 +143,9 @@ export function setupWebSocketSync(server: FastifyInstance) {
       const url = new URL(request.url || '', `http://${host}`);
 
       if (url.pathname !== '/api/ws') {
-        return; // Let other handlers (or not found) deal with it
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+        socket.destroy();
+        return;
       }
 
       const token = url.searchParams.get('token');
@@ -359,8 +361,8 @@ export function setupWebSocketSync(server: FastifyInstance) {
 
             if (state.track !== undefined) playback.track = sanitizePlaybackTrack(state.track);
             if (state.isPlaying !== undefined) playback.isPlaying = Boolean(state.isPlaying);
-            if (state.currentTime !== undefined) playback.currentTime = typeof state.currentTime === 'number' ? state.currentTime : 0;
-            if (state.duration !== undefined) playback.duration = typeof state.duration === 'number' ? state.duration : 0;
+            if (state.currentTime !== undefined) playback.currentTime = (typeof state.currentTime === 'number' && Number.isFinite(state.currentTime) && state.currentTime >= 0) ? state.currentTime : 0;
+            if (state.duration !== undefined) playback.duration = (typeof state.duration === 'number' && Number.isFinite(state.duration) && state.duration >= 0) ? state.duration : 0;
             if (state.queue !== undefined) {
               playback.queue = sanitizePlaybackQueue(state.queue);
             }
@@ -488,8 +490,8 @@ export function setupWebSocketSync(server: FastifyInstance) {
             if (clientState) {
               if (clientState.track !== undefined) playback.track = sanitizePlaybackTrack(clientState.track);
               if (clientState.isPlaying !== undefined) playback.isPlaying = Boolean(clientState.isPlaying);
-              if (clientState.currentTime !== undefined) playback.currentTime = typeof clientState.currentTime === 'number' ? clientState.currentTime : 0;
-              if (clientState.duration !== undefined) playback.duration = typeof clientState.duration === 'number' ? clientState.duration : 0;
+              if (clientState.currentTime !== undefined) playback.currentTime = (typeof clientState.currentTime === 'number' && Number.isFinite(clientState.currentTime) && clientState.currentTime >= 0) ? clientState.currentTime : 0;
+              if (clientState.duration !== undefined) playback.duration = (typeof clientState.duration === 'number' && Number.isFinite(clientState.duration) && clientState.duration >= 0) ? clientState.duration : 0;
               if (clientState.queue !== undefined) {
                 playback.queue = sanitizePlaybackQueue(clientState.queue);
               }
@@ -578,7 +580,11 @@ export function setupWebSocketSync(server: FastifyInstance) {
         }
       }
 
-      const playback = getOrCreatePlayback(userId);
+      const playback = userPlayback.get(userId);
+      if (!playback) {
+        return;
+      }
+
       if (playback.activeDeviceId === session.deviceId) {
         const existingTimer = disconnectTimers.get(userId);
         if (existingTimer) {
@@ -594,10 +600,11 @@ export function setupWebSocketSync(server: FastifyInstance) {
             playback.activeDeviceId = null;
             playback.activeDeviceName = null;
 
-            // If user has zero active connections, free heavy queue memory to prevent RAM retention
+            // If user has zero active connections, free heavy queue memory and delete playback to prevent RAM retention
             if (!currentClients || currentClients.size === 0) {
               playback.queue = [];
               playback.originalQueue = [];
+              userPlayback.delete(userId);
             }
 
             broadcastToUser(userId, {

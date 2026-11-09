@@ -1765,7 +1765,12 @@ export function saveDailyMixAsPlaylist(userId: number, mixPlaylistId: number): {
   }
 
   const dateLabel = new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
-  const newName = `${mix.name} (${dateLabel})`;
+  const baseName = (mix.name || 'Микс')
+    .replace(/^микс дня\s*/i, 'Сохранённый микс ')
+    .replace(/^ежедневный микс\s*/i, 'Сохранённый микс ')
+    .replace(/^daily mix\s*/i, 'Saved Mix ')
+    .trim();
+  const newName = `${baseName} (${dateLabel})`;
 
   // If user already saved this daily mix today, return existing without creating duplicates
   const existing: any = db.prepare('SELECT id, name FROM playlists WHERE user_id = ? AND name = ?').get(userId, newName);

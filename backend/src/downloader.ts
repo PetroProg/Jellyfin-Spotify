@@ -253,6 +253,33 @@ function getUserBlacklistRows(userId: number): any[] {
   return rows;
 }
 
+export function matchesArtistPattern(fullArtist: string, ruleArtist: string): boolean {
+  if (!ruleArtist || ruleArtist === '*') return true;
+  if (!fullArtist) return false;
+  const lFull = fullArtist.toLowerCase().trim();
+  const lRule = ruleArtist.toLowerCase().trim();
+  if (lFull === lRule) return true;
+
+  // Split on common collaboration delimiters: comma, &, slash, semicolon, feat, ft, with
+  const splitRegex = /[,&/;\\]|\s+(?:feat\.?|ft\.?|with)\s+/i;
+  const fullParts = lFull.split(splitRegex).map(s => s.trim()).filter(Boolean);
+  const ruleParts = lRule.split(splitRegex).map(s => s.trim()).filter(Boolean);
+
+  if (fullParts.some(p => p === lRule || ruleParts.includes(p))) {
+    return true;
+  }
+
+  // If starts with ruleArtist, require word/collaboration boundary (not arbitrary substring like "The" -> "The Weeknd")
+  if (lFull.startsWith(lRule)) {
+    const remainder = lFull.slice(lRule.length).trim();
+    if (!remainder || /^([,&/;\\]|\b(feat|ft|with)\b)/i.test(remainder)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function isTrackBlacklistedForUser(
   userId: number,
   title: string,
@@ -263,7 +290,6 @@ export function isTrackBlacklistedForUser(
   try {
     const lTitle = title.toLowerCase().trim();
     const lArtist = (artist || '').toLowerCase().trim();
-    const primaryArtist = lArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
 
     const cleanTitle = (s: string) =>
       s
@@ -273,30 +299,18 @@ export function isTrackBlacklistedForUser(
         .trim();
 
     const cTitle = cleanTitle(lTitle);
-
     const rows = getUserBlacklistRows(userId);
 
     return rows.some((b) => {
       if (spotifyId && b.spotify_id && b.spotify_id === spotifyId) return true;
       const bTitle = (b.title || '').toLowerCase().trim();
       const bArtist = (b.artist || '').toLowerCase().trim();
-      const bPrimary = bArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
+
+      const artistMatches = matchesArtistPattern(lArtist, bArtist);
+      if (!artistMatches) return false;
 
       // Artist-wide ban
-      if (bTitle === '*' && (bArtist === lArtist || bArtist === primaryArtist || lArtist.startsWith(bArtist))) {
-        return true;
-      }
-
-      // Check artist match
-      const artistMatches =
-        !bArtist ||
-        bArtist === '*' ||
-        bArtist === lArtist ||
-        bArtist === primaryArtist ||
-        bPrimary === primaryArtist ||
-        lArtist.startsWith(bArtist);
-
-      if (!artistMatches) return false;
+      if (bTitle === '*') return true;
 
       // Exact title match or normalized title match
       if (bTitle === lTitle) return true;
@@ -329,13 +343,11 @@ export function filterBlacklistedTracksForUser<T extends { title: string; artist
     const preparedRules = rows.map((b) => {
       const bTitle = (b.title || '').toLowerCase().trim();
       const bArtist = (b.artist || '').toLowerCase().trim();
-      const bPrimary = bArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
       return {
         spotifyId: b.spotify_id || null,
         title: bTitle,
         cleanTitle: cleanTitle(bTitle),
         artist: bArtist,
-        primaryArtist: bPrimary,
         isArtistOnly: bTitle === '*'
       };
     });
@@ -344,26 +356,16 @@ export function filterBlacklistedTracksForUser<T extends { title: string; artist
       if (!t || !t.title) return true;
       const lTitle = t.title.toLowerCase().trim();
       const lArtist = (t.artist || '').toLowerCase().trim();
-      const primaryArtist = lArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
       const cTitle = cleanTitle(lTitle);
       const spotifyId = t.spotify_id || (t as any).spotifyId;
 
       return !preparedRules.some((b) => {
         if (spotifyId && b.spotifyId && b.spotifyId === spotifyId) return true;
-        if (b.isArtistOnly && (b.artist === lArtist || b.artist === primaryArtist || lArtist.startsWith(b.artist))) {
-          return true;
-        }
 
-        const artistMatches =
-          !b.artist ||
-          b.artist === '*' ||
-          b.artist === lArtist ||
-          b.artist === primaryArtist ||
-          b.primaryArtist === primaryArtist ||
-          lArtist.startsWith(b.artist);
-
+        const artistMatches = matchesArtistPattern(lArtist, b.artist);
         if (!artistMatches) return false;
 
+        if (b.isArtistOnly) return true;
         if (b.title === lTitle) return true;
         if (cTitle && b.cleanTitle === cTitle) return true;
 
@@ -384,7 +386,6 @@ export function cancelBlacklistedDownloads(
 ): void {
   const lTitle = title.toLowerCase().trim();
   const lArtist = (artist || '').toLowerCase().trim();
-  const primaryArtist = lArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
 
   const cleanTitle = (s: string) =>
     s
@@ -405,15 +406,7 @@ export function cancelBlacklistedDownloads(
     }
 
     const itemArtist = (item.track.artist || '').toLowerCase().trim();
-    const itemPrimary = itemArtist.split(/[,&/]| feat\.? | ft\.? /i)[0].trim();
-    const artistMatches =
-      !lArtist ||
-      lArtist === '*' ||
-      lArtist === itemArtist ||
-      lArtist === itemPrimary ||
-      primaryArtist === itemPrimary ||
-      itemArtist.startsWith(lArtist);
-
+    const artistMatches = matchesArtistPattern(itemArtist, lArtist);
     if (!artistMatches) continue;
 
     if (lTitle === '*') {
@@ -546,20 +539,32 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
   });
 }
 
-export function cancelPlaylistDownloads(playlistIds: number[]) {
-  if (!playlistIds || playlistIds.length === 0) return;
-  const idSet = new Set(playlistIds);
+export function cancelPlaylistDownloads(playlistIds: number[] | number) {
+  if (playlistIds === undefined || playlistIds === null) return;
+  const ids = Array.isArray(playlistIds) ? playlistIds : [playlistIds];
+  if (ids.length === 0) return;
+  const idSet = new Set(ids);
   for (let i = queue.length - 1; i >= 0; i--) {
     if (queue[i].playlistId !== null && idSet.has(queue[i].playlistId!)) {
       queue.splice(i, 1);
     }
   }
-  if (playlistIds.length > 0) {
-    try {
-      const placeholders = playlistIds.map(() => '?').join(',');
-      db.prepare(`DELETE FROM download_jobs WHERE playlist_id IN (${placeholders})`).run(...playlistIds);
-    } catch (_) {}
+  try {
+    const placeholders = ids.map(() => '?').join(',');
+    db.prepare(`DELETE FROM download_jobs WHERE playlist_id IN (${placeholders})`).run(...ids);
+  } catch (_) {}
+}
+
+export function cancelUserDownloads(userId: number) {
+  if (!userId) return;
+  for (let i = queue.length - 1; i >= 0; i--) {
+    if (queue[i].userId === userId) {
+      queue.splice(i, 1);
+    }
   }
+  try {
+    db.prepare('DELETE FROM download_jobs WHERE user_id = ?').run(userId);
+  } catch (_) {}
 }
 
 const MAX_PLAYLIST_QUEUE_SIZE = 2000;
@@ -1252,7 +1257,7 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
     SELECT * FROM tracks WHERE spotify_id = ? OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
   `).get(track.id, track.title, track.artist) as any;
 
-  if (existing && existing.file_path && fs.existsSync(existing.file_path)) {
+  if (existing && existing.file_path && isPathInsideMusicDir(existing.file_path) && fs.existsSync(existing.file_path)) {
     // If existing track had missing or playlist fallback album/cover, update it
     if (details.album && (!existing.album || existing.album === 'Любимые треки' || existing.album === '-')) {
       db.prepare('UPDATE tracks SET album = ? WHERE id = ?').run(String(details.album).slice(0, 200), existing.id);
@@ -1270,15 +1275,21 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       return;
     }
 
-    // Already downloaded: link to playlist or liked_tracks
+    // Already downloaded: link to playlist or liked_tracks (verify user/playlist still exists)
     if (item.isLikedOnly || !playlistId) {
-      db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, existing.id);
-      broadcastToUser(item.userId, { type: 'LIKES_UPDATED', trackId: existing.id, liked: true });
+      const userExists = db.prepare('SELECT 1 FROM users WHERE id = ?').get(item.userId);
+      if (userExists) {
+        db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, existing.id);
+        broadcastToUser(item.userId, { type: 'LIKES_UPDATED', trackId: existing.id, liked: true });
+      }
     } else {
-      db.prepare(`
-        INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
-        VALUES (?, ?, ?)
-      `).run(playlistId, existing.id, position);
+      const plExists = db.prepare('SELECT 1 FROM playlists WHERE id = ?').get(playlistId);
+      if (plExists) {
+        db.prepare(`
+          INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
+          VALUES (?, ?, ?)
+        `).run(playlistId, existing.id, position);
+      }
     }
 
     const doneCount = playlistId
@@ -1391,13 +1402,19 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
     if (isTrackBlacklistedForUser(item.userId, details.title || track.title, details.artist || track.artist, track.id)) {
       console.log(`[Downloader] Track "${track.artist} - ${track.title}" was blacklisted during download. Skipping playlist link.`);
     } else if (item.isLikedOnly || !playlistId) {
-      db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, trackId);
-      broadcastToUser(item.userId, { type: 'LIKES_UPDATED', trackId, liked: true });
+      const userExists = db.prepare('SELECT 1 FROM users WHERE id = ?').get(item.userId);
+      if (userExists) {
+        db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, trackId);
+        broadcastToUser(item.userId, { type: 'LIKES_UPDATED', trackId, liked: true });
+      }
     } else {
-      db.prepare(`
-        INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
-        VALUES (?, ?, ?)
-      `).run(playlistId, trackId, position);
+      const plExists = db.prepare('SELECT 1 FROM playlists WHERE id = ?').get(playlistId);
+      if (plExists) {
+        db.prepare(`
+          INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
+          VALUES (?, ?, ?)
+        `).run(playlistId, trackId, position);
+      }
     }
 
     const doneCount = playlistId
@@ -1427,18 +1444,24 @@ export async function downloadSingleSpotifyTrackDirect(
     const result = await inFlightSingleDownloads.get(downloadKey)!;
     if (result.success && result.track) {
       if (userId && isTrackBlacklistedForUser(userId, result.track.title, result.track.artist, result.track.spotify_id || track.id)) {
-        return { ...result, addedToPlaylist: false, liked: false };
+        return { ...result, track: sanitizeTrackRecord(result.track), addedToPlaylist: false, liked: false };
       }
       if (isLikedOnly || playlistId === -1) {
         if (userId) {
-          db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, result.track.id);
+          const userExists = db.prepare('SELECT 1 FROM users WHERE id = ?').get(userId);
+          if (userExists) {
+            db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, result.track.id);
+          }
         }
-        return { ...result, liked: true };
+        return { ...result, track: sanitizeTrackRecord(result.track), liked: true };
       }
       if (playlistId) {
         if (userId) {
           const ownsPlaylist = db.prepare('SELECT 1 FROM playlists WHERE id = ? AND user_id = ? AND COALESCE(is_daily_mix, 0) = 0').get(playlistId, userId);
-          if (!ownsPlaylist) return result;
+          if (!ownsPlaylist) return { ...result, track: sanitizeTrackRecord(result.track) };
+        } else {
+          const plExists = db.prepare('SELECT 1 FROM playlists WHERE id = ?').get(playlistId);
+          if (!plExists) return { ...result, track: sanitizeTrackRecord(result.track) };
         }
         const inPl: any = db.prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').get(playlistId, result.track.id);
         if (!inPl) {
@@ -1446,8 +1469,9 @@ export async function downloadSingleSpotifyTrackDirect(
           const nextPos = (maxPosRow?.maxPos !== null && maxPosRow?.maxPos !== undefined) ? maxPosRow.maxPos + 1 : 0;
           db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)').run(playlistId, result.track.id, nextPos);
         }
-        return { ...result, addedToPlaylist: true };
+        return { ...result, track: sanitizeTrackRecord(result.track), addedToPlaylist: true };
       }
+      return { ...result, track: sanitizeTrackRecord(result.track) };
     }
     return result;
   }
@@ -1506,8 +1530,11 @@ async function downloadSingleSpotifyTrackDirectInternal(
       }
       if (isLikedOnly || playlistId === -1) {
         if (userId) {
-          db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, trackRecord.id);
-          broadcastToUser(userId, { type: 'LIKES_UPDATED', trackId: trackRecord.id, liked: true });
+          const userExists = db.prepare('SELECT 1 FROM users WHERE id = ?').get(userId);
+          if (userExists) {
+            db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, trackRecord.id);
+            broadcastToUser(userId, { type: 'LIKES_UPDATED', trackId: trackRecord.id, liked: true });
+          }
         }
         return;
       }
@@ -1515,6 +1542,9 @@ async function downloadSingleSpotifyTrackDirectInternal(
       if (userId) {
         const ownsPlaylist = db.prepare('SELECT 1 FROM playlists WHERE id = ? AND user_id = ? AND COALESCE(is_daily_mix, 0) = 0').get(playlistId, userId);
         if (!ownsPlaylist) return;
+      } else {
+        const plExists = db.prepare('SELECT 1 FROM playlists WHERE id = ?').get(playlistId);
+        if (!plExists) return;
       }
       const inPl: any = db.prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').get(playlistId, trackRecord.id);
       if (!inPl) {
@@ -1525,8 +1555,11 @@ async function downloadSingleSpotifyTrackDirectInternal(
       const playlistRow: any = db.prepare('SELECT name FROM playlists WHERE id = ?').get(playlistId);
       if (playlistRow && (playlistRow.name === 'Любимые треки' || playlistRow.name.toLowerCase() === 'liked songs')) {
         if (userId) {
-          db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, trackRecord.id);
-          broadcastToUser(userId, { type: 'LIKES_UPDATED', trackId: trackRecord.id, liked: true });
+          const userExists = db.prepare('SELECT 1 FROM users WHERE id = ?').get(userId);
+          if (userExists) {
+            db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, trackRecord.id);
+            broadcastToUser(userId, { type: 'LIKES_UPDATED', trackId: trackRecord.id, liked: true });
+          }
         }
       }
     };
@@ -1539,13 +1572,13 @@ async function downloadSingleSpotifyTrackDirectInternal(
       LIMIT 1
     `).get(track.id, track.title, track.artist);
 
-    if (existing && existing.file_path && fs.existsSync(existing.file_path)) {
+    if (existing && existing.file_path && isPathInsideMusicDir(existing.file_path) && fs.existsSync(existing.file_path)) {
       attachToPlaylist(existing);
       // Opportunistically queue quality upgrade in background if legacy .m4a or low bitrate
       queueTrackQualityUpgrade(existing);
       return {
         success: true,
-        track: existing,
+        track: sanitizeTrackRecord(existing),
         addedToPlaylist: !!playlistId && playlistId !== -1,
         liked: Boolean(isLikedOnly || playlistId === -1)
       };
@@ -1644,7 +1677,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
     await refreshJellyfinLibrary();
     return {
       success: true,
-      track: newTrack,
+      track: sanitizeTrackRecord(newTrack),
       addedToPlaylist: !!playlistId && playlistId !== -1,
       liked: Boolean(isLikedOnly || playlistId === -1)
     };
@@ -1970,7 +2003,7 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
   return { started: true, message: `Запущена выборочная проверка и перезагрузка треков низкого качества (320 kbps)` };
 }
 
-function sanitizeTrackRecord(tr: any) {
+export function sanitizeTrackRecord(tr: any) {
   if (!tr) return tr;
   const { file_path, ...safe } = tr;
   return safe;
