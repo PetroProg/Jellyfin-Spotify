@@ -242,7 +242,7 @@ try {
 // Automatic deduplication of tracks: merge any duplicate (title + artist) tracks in playlist_tracks and liked_tracks
 try {
   const duplicates = db.prepare(`
-    SELECT LOWER(title) as l_title, LOWER(artist) as l_artist, MIN(id) as keep_id, GROUP_CONCAT(id) as all_ids
+    SELECT LOWER(title) as l_title, LOWER(artist) as l_artist, GROUP_CONCAT(id) as all_ids
     FROM tracks
     GROUP BY LOWER(title), LOWER(artist)
     HAVING COUNT(*) > 1
@@ -251,8 +251,29 @@ try {
   if (duplicates && duplicates.length > 0) {
     const deduplicateTx = db.transaction(() => {
       for (const dup of duplicates) {
-        const keepId = dup.keep_id;
-        const allIds = String(dup.all_ids).split(',').map(Number);
+        const allIds = String(dup.all_ids).split(',').map(Number).filter(Boolean);
+        if (allIds.length <= 1) continue;
+
+        const placeholders = allIds.map(() => '?').join(',');
+        const rows = db.prepare(`SELECT id, file_path, bitrate FROM tracks WHERE id IN (${placeholders})`).all(...allIds) as any[];
+
+        // Prefer the track that actually exists on disk; if multiple, prefer higher bitrate, then lowest id
+        const existingOnDisk = rows.filter((r: any) => r.file_path && fs.existsSync(r.file_path));
+        let bestTrack: any;
+
+        if (existingOnDisk.length > 0) {
+          existingOnDisk.sort((a: any, b: any) => {
+            const bRate = (b.bitrate || 0) - (a.bitrate || 0);
+            if (bRate !== 0) return bRate;
+            return a.id - b.id;
+          });
+          bestTrack = existingOnDisk[0];
+        } else {
+          rows.sort((a: any, b: any) => a.id - b.id);
+          bestTrack = rows[0];
+        }
+
+        const keepId = bestTrack.id;
         const removeIds = allIds.filter((id: number) => id !== keepId);
 
         for (const removeId of removeIds) {

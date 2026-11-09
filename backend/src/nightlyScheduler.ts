@@ -61,7 +61,7 @@ export async function checkAndRunNightlyMixes(): Promise<void> {
 
       try {
         localDateStr = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
-        const hourStr = new Intl.DateTimeFormat('en-US', { hour: 'numeric', hour12: false, timeZone: tz }).format(new Date());
+        const hourStr = new Intl.DateTimeFormat('en-US', { hour: 'numeric', hourCycle: 'h23', timeZone: tz }).format(new Date());
         const minStr = new Intl.DateTimeFormat('en-US', { minute: 'numeric', timeZone: tz }).format(new Date());
         localHour = parseInt(hourStr, 10);
         localMinute = parseInt(minStr, 10);
@@ -213,7 +213,7 @@ export function getNightlySchedulerStatus(userId: number) {
 
   try {
     localDate = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
-    localHourStr = new Intl.DateTimeFormat('en-US', { hour: 'numeric', hour12: false, timeZone: tz }).format(new Date());
+    localHourStr = new Intl.DateTimeFormat('en-US', { hour: 'numeric', hourCycle: 'h23', timeZone: tz }).format(new Date());
     localMinuteStr = new Intl.DateTimeFormat('en-US', { minute: 'numeric', timeZone: tz }).format(new Date());
   } catch (_) {}
 

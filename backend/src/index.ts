@@ -1203,7 +1203,7 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
 
     if (minPosRow && minPosRow.appendedCount === (currentCount - knownCount)) {
       const rawAdded: any[] = db.prepare(`
-        SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, pt.added_at, pt.position
+        SELECT t.id, t.spotify_id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, pt.added_at, pt.position
         FROM playlist_tracks pt
         JOIN tracks t ON pt.track_id = t.id
         WHERE pt.playlist_id = ? AND pt.position > ?
@@ -1223,7 +1223,7 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
 
   // Full fetch: single batch query for tracks + 1 query for blacklist filtering
   const rawTracks: any[] = db.prepare(`
-    SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, pt.added_at, pt.position
+    SELECT t.id, t.spotify_id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, pt.added_at, pt.position
     FROM playlist_tracks pt
     JOIN tracks t ON pt.track_id = t.id
     WHERE pt.playlist_id = ?
@@ -1467,12 +1467,12 @@ server.post('/api/playlists/:id/tracks', { preHandler: [(server as any).authenti
     return reply.status(400).send({ error: 'Нельзя добавлять треки в ежедневный микс' });
   }
 
-  const track: any = db.prepare('SELECT id, title, artist FROM tracks WHERE id = ?').get(trackId);
+  const track: any = db.prepare('SELECT id, spotify_id, title, artist FROM tracks WHERE id = ?').get(trackId);
   if (!track) {
     return reply.status(404).send({ error: 'Трек не найден' });
   }
 
-  if (isTrackBlacklistedForUser(req.user.id, track.title, track.artist)) {
+  if (isTrackBlacklistedForUser(req.user.id, track.title, track.artist, track.spotify_id)) {
     return reply.status(400).send({ error: 'Трек находится в черном списке' });
   }
 
@@ -2380,15 +2380,19 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
   track.artist = String(track.artist).slice(0, 250);
   if (track.album) track.album = String(track.album).slice(0, 250);
 
+  if (isTrackBlacklistedForUser(req.user.id, track.title, track.artist, track.id)) {
+    return reply.status(400).send({ error: 'Трек находится в черном списке' });
+  }
+
   // 1. Check if track already exists locally in DB
   const existing: any = db.prepare(`
     SELECT * FROM tracks 
     WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
        OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
     LIMIT 1
-  `).get(track.id, track.title, track.artist);
+  `).get(track.id || null, track.title, track.artist);
 
-  if (existing && existing.file_path && fs.existsSync(existing.file_path)) {
+  if (existing && existing.file_path && isPathInsideMusicDir(existing.file_path) && fs.existsSync(existing.file_path)) {
     // Opportunistically queue quality upgrade in background if legacy .m4a or low bitrate
     queueTrackQualityUpgrade(existing);
     return {
@@ -2531,7 +2535,7 @@ server.get('/api/likes', { preHandler: [(server as any).authenticate] }, async (
   }
 
   const rawTracks: any[] = db.prepare(`
-    SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, lt.created_at as added_at
+    SELECT t.id, t.spotify_id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, lt.created_at as added_at
     FROM liked_tracks lt
     JOIN tracks t ON lt.track_id = t.id
     WHERE lt.user_id = ?
@@ -2560,9 +2564,12 @@ server.post('/api/likes/:trackId', { preHandler: [(server as any).authenticate] 
 
   let trackRow: any = null;
   if (newLikedState) {
-    trackRow = db.prepare('SELECT id, title, artist, album, duration_ms, cover_url FROM tracks WHERE id = ?').get(trackId);
+    trackRow = db.prepare('SELECT id, spotify_id, title, artist, album, duration_ms, cover_url FROM tracks WHERE id = ?').get(trackId);
     if (!trackRow) {
       return reply.status(404).send({ error: 'Трек не найден' });
+    }
+    if (isTrackBlacklistedForUser(req.user.id, trackRow.title, trackRow.artist, trackRow.spotify_id)) {
+      return reply.status(400).send({ error: 'Трек находится в черном списке' });
     }
     db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(req.user.id, trackId);
   } else {

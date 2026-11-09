@@ -673,17 +673,19 @@ export async function resumePlaylistDownload(playlistId: number, existingJobId?:
       `).get(playlistId);
 
       jobId = activeJob?.id || Math.random().toString(36).substring(2, 10);
+      const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
+      const initialDownloaded = countRow?.cnt || 0;
       if (!activeJob) {
         db.prepare(`
           INSERT INTO download_jobs (id, user_id, playlist_id, playlist_name, total_tracks, downloaded_tracks, status)
-          VALUES (?, ?, ?, ?, ?, 0, 'downloading')
-        `).run(jobId, playlist.user_id, playlistId, playlist.name, playlistData.tracks.length);
+          VALUES (?, ?, ?, ?, ?, ?, 'downloading')
+        `).run(jobId, playlist.user_id, playlistId, playlist.name, playlistData.tracks.length, initialDownloaded);
       } else {
         db.prepare(`
           UPDATE download_jobs
-          SET status = 'downloading', total_tracks = ?
+          SET status = 'downloading', total_tracks = ?, downloaded_tracks = MAX(COALESCE(downloaded_tracks, 0), ?)
           WHERE id = ?
-        `).run(playlistData.tracks.length, jobId);
+        `).run(playlistData.tracks.length, initialDownloaded, jobId);
       }
     }
 
@@ -793,11 +795,16 @@ async function runWorkerLoop() {
         const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(item.userId);
         count = countRow?.cnt || 0;
       }
+
+      const jobRow: any = db.prepare('SELECT total_tracks FROM download_jobs WHERE id = ?').get(item.jobId);
+      const totalTracks = jobRow?.total_tracks || 0;
+      const finalStatus = (count === 0 && totalTracks > 0) ? 'failed' : 'completed';
+
       db.prepare(`
         UPDATE download_jobs
-        SET status = 'completed', downloaded_tracks = ?, current_track = NULL
+        SET status = ?, downloaded_tracks = ?, current_track = NULL
         WHERE id = ?
-      `).run(count, item.jobId);
+      `).run(finalStatus, count, item.jobId);
 
       // Trigger Jellyfin library refresh
       await refreshJellyfinLibrary();
@@ -1217,6 +1224,16 @@ async function downloadAudioWithFallback(
   return false;
 }
 
+interface SingleDownloadResult {
+  success: boolean;
+  track?: any;
+  error?: string;
+  addedToPlaylist?: boolean;
+  liked?: boolean;
+}
+
+const inFlightSingleDownloads = new Map<string, Promise<SingleDownloadResult>>();
+
 async function downloadSingleTrack(item: QueueItem): Promise<void> {
   const { jobId, playlistId, track, position } = item;
 
@@ -1254,8 +1271,11 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
 
   // Check if track already exists locally in DB AND file actually exists on disk
   const existing = db.prepare(`
-    SELECT * FROM tracks WHERE spotify_id = ? OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
-  `).get(track.id, track.title, track.artist) as any;
+    SELECT * FROM tracks 
+    WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+       OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+    LIMIT 1
+  `).get(track.id || null, track.title, track.artist) as any;
 
   if (existing && existing.file_path && isPathInsideMusicDir(existing.file_path) && fs.existsSync(existing.file_path)) {
     // If existing track had missing or playlist fallback album/cover, update it
@@ -1304,134 +1324,199 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
     return;
   }
 
-  // Update status in DB
-  db.prepare(`
-    UPDATE download_jobs
-    SET current_track = ?, status = 'downloading'
-    WHERE id = ?
-  `).run(`${track.artist} - ${track.title}`, jobId);
+  const downloadKey = (track.id || `${track.artist}:::${track.title}`).toLowerCase();
 
-  // Prepare destination dir
-  const targetDir = getSafeArtistDir(track.artist || 'Unknown Artist');
-  if (!fs.existsSync(targetDir)) {
-    fs.mkdirSync(targetDir, { recursive: true });
-  }
+  // If another process (direct download or worker) is already downloading this track, wait for it!
+  if (inFlightSingleDownloads.has(downloadKey)) {
+    console.log(`[Downloader Worker] In-flight download detected for "${track.artist} - ${track.title}", waiting...`);
+    try {
+      await inFlightSingleDownloads.get(downloadKey);
+    } catch (_) {}
 
-  const safeTitle = sanitizeFilename(track.title);
-  const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
-
-  const downloadedOk = await runWithPrioritySlot(
-    DownloadPriority.NORMAL,
-    `worker:${track.artist} - ${track.title}`,
-    async () => {
-      // Re-check if file appeared while waiting for download slot
-      const existingCandidate = resolveAudioFilePath(targetDir, safeTitle);
-      if (existingCandidate && fs.existsSync(existingCandidate)) {
-        const probe = await probeAudioFile(existingCandidate, track.duration_ms);
-        if (probe.valid && probe.durationSec > 15) {
-          return true;
-        }
-      }
-      return await downloadAudioWithFallback(
-        track.artist,
-        track.title,
-        track.duration_ms,
-        outputTemplate,
-        targetDir,
-        safeTitle,
-        120000,
-        true
-      );
-    }
-  );
-
-  if (!downloadedOk) {
-    console.warn(`[yt-dlp] Failed to download "${track.artist} - ${track.title}"`);
-    return;
-  }
-
-  // Find saved file (.mp3 preferred studio 320k, or format fallback)
-  const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.mp3`);
-
-  // Verify audio file validity & duration
-  const probe = await probeAudioFile(finalFile, track.duration_ms);
-  if (track.duration_ms > 30000 && probe.valid && !probe.isHighQuality && probe.reason?.includes('Обрезан')) {
-    console.warn(`[yt-dlp truncated audio detected] "${track.artist} - ${track.title}": probed ${probe.durationSec}s vs expected ${track.duration_ms / 1000}s. Discarding.`);
-    try { fs.unlinkSync(finalFile); } catch (_) {}
-    return;
-  }
-
-  try {
-    const doubleCheck: any = db.prepare(`
+    const reExisting: any = db.prepare(`
       SELECT * FROM tracks 
       WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
          OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
       LIMIT 1
-    `).get(track.id, track.title, track.artist);
+    `).get(track.id || null, track.title, track.artist);
 
-    let trackId = doubleCheck?.id;
-    const actualDurationMs = (probe.valid && probe.durationSec > 0)
-      ? Math.round(probe.durationSec * 1000)
-      : (track.duration_ms || 180000);
+    if (reExisting && reExisting.file_path && isPathInsideMusicDir(reExisting.file_path) && fs.existsSync(reExisting.file_path)) {
+      if (isTrackBlacklistedForUser(item.userId, details.title || track.title, details.artist || track.artist, track.id)) {
+        return;
+      }
+      if (item.isLikedOnly || !playlistId) {
+        const userExists = db.prepare('SELECT 1 FROM users WHERE id = ?').get(item.userId);
+        if (userExists) {
+          db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, reExisting.id);
+          broadcastToUser(item.userId, { type: 'LIKES_UPDATED', trackId: reExisting.id, liked: true });
+        }
+      } else {
+        const plExists = db.prepare('SELECT 1 FROM playlists WHERE id = ?').get(playlistId);
+        if (plExists) {
+          db.prepare(`
+            INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
+            VALUES (?, ?, ?)
+          `).run(playlistId, reExisting.id, position);
+        }
+      }
 
-    if (!trackId) {
-      const info = db.prepare(`
-        INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id, bitrate)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        track.title,
-        track.artist,
-        track.album,
-        actualDurationMs,
-        finalFile,
-        track.cover_url || '',
-        track.id,
-        probe.bitrateKbps || 320
-      );
-      trackId = info.lastInsertRowid;
-    } else {
+      const doneCount = playlistId
+        ? (db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId) as any)?.cnt || 0
+        : (db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(item.userId) as any)?.cnt || 0;
+
       db.prepare(`
-        UPDATE tracks 
-        SET file_path = ?, duration_ms = ?, bitrate = ?,
-            album = CASE WHEN album IS NULL OR album = '' OR album = '-' OR album = 'Любимые треки' THEN ? ELSE album END,
-            cover_url = CASE WHEN cover_url IS NULL OR cover_url = '' OR cover_url LIKE '%mosaic.scdn.co%' THEN ? ELSE cover_url END
+        UPDATE download_jobs
+        SET downloaded_tracks = ?, current_track = ?
         WHERE id = ?
-      `).run(finalFile, actualDurationMs, probe.bitrateKbps || 320, track.album || '', track.cover_url || '', trackId);
+      `).run(doneCount, `${track.artist} - ${track.title}`, jobId);
+      return;
     }
+  }
 
-    if (isTrackBlacklistedForUser(item.userId, details.title || track.title, details.artist || track.artist, track.id)) {
-      console.log(`[Downloader] Track "${track.artist} - ${track.title}" was blacklisted during download. Skipping playlist link.`);
-    } else if (item.isLikedOnly || !playlistId) {
-      const userExists = db.prepare('SELECT 1 FROM users WHERE id = ?').get(item.userId);
-      if (userExists) {
-        db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, trackId);
-        broadcastToUser(item.userId, { type: 'LIKES_UPDATED', trackId, liked: true });
-      }
-    } else {
-      const plExists = db.prepare('SELECT 1 FROM playlists WHERE id = ?').get(playlistId);
-      if (plExists) {
-        db.prepare(`
-          INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
-          VALUES (?, ?, ?)
-        `).run(playlistId, trackId, position);
-      }
-    }
+  let workerResolve!: (res: SingleDownloadResult) => void;
+  const workerDownloadPromise = new Promise<SingleDownloadResult>((resolve) => {
+    workerResolve = resolve;
+  });
+  inFlightSingleDownloads.set(downloadKey, workerDownloadPromise);
 
-    const doneCount = playlistId
-      ? (db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId) as any)?.cnt || 0
-      : (db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(item.userId) as any)?.cnt || 0;
-
+  try {
+    // Update status in DB
     db.prepare(`
       UPDATE download_jobs
-      SET downloaded_tracks = ?
+      SET current_track = ?, status = 'downloading'
       WHERE id = ?
-    `).run(doneCount, jobId);
-  } catch (dbErr: any) {
-    console.error('[DB Insert Error after download]', dbErr.message);
+    `).run(`${track.artist} - ${track.title}`, jobId);
+
+    // Prepare destination dir
+    const targetDir = getSafeArtistDir(track.artist || 'Unknown Artist');
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+
+    const safeTitle = sanitizeFilename(track.title);
+    const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
+
+    const downloadedOk = await runWithPrioritySlot(
+      DownloadPriority.NORMAL,
+      `worker:${track.artist} - ${track.title}`,
+      async () => {
+        // Re-check if file appeared while waiting for download slot
+        const existingCandidate = resolveAudioFilePath(targetDir, safeTitle);
+        if (existingCandidate && fs.existsSync(existingCandidate)) {
+          const probe = await probeAudioFile(existingCandidate, track.duration_ms);
+          if (probe.valid && probe.durationSec > 15) {
+            return true;
+          }
+        }
+        return await downloadAudioWithFallback(
+          track.artist,
+          track.title,
+          track.duration_ms,
+          outputTemplate,
+          targetDir,
+          safeTitle,
+          120000,
+          true
+        );
+      }
+    );
+
+    if (!downloadedOk) {
+      console.warn(`[yt-dlp] Failed to download "${track.artist} - ${track.title}"`);
+      workerResolve({ success: false, error: 'Download failed' });
+      return;
+    }
+
+    // Find saved file (.mp3 preferred studio 320k, or format fallback)
+    const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.mp3`);
+
+    // Verify audio file validity & duration
+    const probe = await probeAudioFile(finalFile, track.duration_ms);
+    if (track.duration_ms > 30000 && probe.valid && !probe.isHighQuality && probe.reason?.includes('Обрезан')) {
+      console.warn(`[yt-dlp truncated audio detected] "${track.artist} - ${track.title}": probed ${probe.durationSec}s vs expected ${track.duration_ms / 1000}s. Discarding.`);
+      try { fs.unlinkSync(finalFile); } catch (_) {}
+      workerResolve({ success: false, error: 'Audio truncated' });
+      return;
+    }
+
+    try {
+      const doubleCheck: any = db.prepare(`
+        SELECT * FROM tracks 
+        WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+           OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+        LIMIT 1
+      `).get(track.id || null, track.title, track.artist);
+
+      let trackId = doubleCheck?.id;
+      const actualDurationMs = (probe.valid && probe.durationSec > 0)
+        ? Math.round(probe.durationSec * 1000)
+        : (track.duration_ms || 180000);
+
+      if (!trackId) {
+        const info = db.prepare(`
+          INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id, bitrate)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          track.title,
+          track.artist,
+          track.album || '',
+          actualDurationMs,
+          finalFile,
+          track.cover_url || '',
+          track.id || null,
+          probe.bitrateKbps || 320
+        );
+        trackId = info.lastInsertRowid;
+      } else {
+        db.prepare(`
+          UPDATE tracks 
+          SET file_path = ?, duration_ms = ?, bitrate = ?,
+              album = CASE WHEN album IS NULL OR album = '' OR album = '-' OR album = 'Любимые треки' THEN ? ELSE album END,
+              cover_url = CASE WHEN cover_url IS NULL OR cover_url = '' OR cover_url LIKE '%mosaic.scdn.co%' THEN ? ELSE cover_url END
+          WHERE id = ?
+        `).run(finalFile, actualDurationMs, probe.bitrateKbps || 320, track.album || '', track.cover_url || '', trackId);
+      }
+
+      const freshTrack: any = db.prepare('SELECT * FROM tracks WHERE id = ?').get(trackId);
+      workerResolve({ success: true, track: freshTrack });
+
+      if (isTrackBlacklistedForUser(item.userId, details.title || track.title, details.artist || track.artist, track.id)) {
+        console.log(`[Downloader] Track "${track.artist} - ${track.title}" was blacklisted during download. Skipping playlist link.`);
+      } else if (item.isLikedOnly || !playlistId) {
+        const userExists = db.prepare('SELECT 1 FROM users WHERE id = ?').get(item.userId);
+        if (userExists) {
+          db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(item.userId, trackId);
+          broadcastToUser(item.userId, { type: 'LIKES_UPDATED', trackId, liked: true });
+        }
+      } else {
+        const plExists = db.prepare('SELECT 1 FROM playlists WHERE id = ?').get(playlistId);
+        if (plExists) {
+          db.prepare(`
+            INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
+            VALUES (?, ?, ?)
+          `).run(playlistId, trackId, position);
+        }
+      }
+
+      const doneCount = playlistId
+        ? (db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId) as any)?.cnt || 0
+        : (db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(item.userId) as any)?.cnt || 0;
+
+      db.prepare(`
+        UPDATE download_jobs
+        SET downloaded_tracks = ?
+        WHERE id = ?
+      `).run(doneCount, jobId);
+    } catch (dbErr: any) {
+      console.error('[DB Insert Error after download]', dbErr.message);
+      workerResolve({ success: false, error: dbErr.message });
+    }
+  } catch (err: any) {
+    workerResolve({ success: false, error: err.message });
+  } finally {
+    inFlightSingleDownloads.delete(downloadKey);
   }
 }
-
-const inFlightSingleDownloads = new Map<string, Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean; liked?: boolean }>>();
 
 export async function downloadSingleSpotifyTrackDirect(
   track: SpotifyTrack,
@@ -1570,7 +1655,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
       WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
          OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
       LIMIT 1
-    `).get(track.id, track.title, track.artist);
+    `).get(track.id || null, track.title, track.artist);
 
     if (existing && existing.file_path && isPathInsideMusicDir(existing.file_path) && fs.existsSync(existing.file_path)) {
       attachToPlaylist(existing);
@@ -1640,7 +1725,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
       WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
          OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
       LIMIT 1
-    `).get(track.id, track.title, track.artist);
+    `).get(track.id || null, track.title, track.artist);
 
     let newTrack: any = doubleCheck;
     const actualDurationMs = (probe.valid && probe.durationSec > 0)
@@ -1658,7 +1743,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
         actualDurationMs,
         finalFile,
         track.cover_url || '',
-        track.id,
+        track.id || null,
         probe.bitrateKbps || 320
       );
       newTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
