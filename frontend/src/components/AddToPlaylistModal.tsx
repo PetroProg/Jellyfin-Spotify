@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Search, Plus, CheckCircle2, Circle, Loader2, Music2, X, Heart } from 'lucide-react';
 import { Track, SpotifySearchResult } from '../types';
 import { apiRequest } from '../api/client';
@@ -12,6 +12,7 @@ import {
   removeTrackFromOfflinePlaylist,
   getAllPlaylistsCache,
   getOfflinePlaylistData,
+  updateCachedPlaylistCount,
 } from '../utils/offline';
 
 interface PlaylistWithStatus {
@@ -44,13 +45,14 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   const [playlists, setPlaylists] = useState<PlaylistWithStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [togglingId, setTogglingId] = useState<number | null>(null);
-  const [togglingLiked, setTogglingLiked] = useState(false);
+  const pendingToggles = useRef<Map<number, number>>(new Map());
+  const [optimisticSpotifyLiked, setOptimisticSpotifyLiked] = useState<boolean | null>(null);
 
   const { likedTrackIds, toggleLikeTrack } = usePlayerStore();
-  const isLiked = activeTrack
+  const rawLiked = activeTrack
     ? likedTrackIds.includes(activeTrack.id)
     : (spotifyTrack?.local_track ? likedTrackIds.includes(spotifyTrack.local_track.id) : false);
+  const isLiked = optimisticSpotifyLiked !== null ? optimisticSpotifyLiked : rawLiked;
 
   // New playlist inline creation
   const [creatingNew, setCreatingNew] = useState(false);
@@ -64,6 +66,8 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
       setSearch('');
       setCreatingNew(false);
       setNewPlaylistName('');
+      pendingToggles.current.clear();
+      setOptimisticSpotifyLiked(null);
       loadPlaylists(current?.id || 0);
     }
   }, [isOpen, track?.id, spotifyTrack?.id]);
@@ -74,11 +78,15 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
     if (cached && cached.length > 0) {
       const offlineList: PlaylistWithStatus[] = cached
         .filter((p) => !p.name.toLowerCase().includes('daily mix') && !(p as any).is_daily_mix)
-        .map((p) => ({
-          ...p,
-          track_count: p.track_count ?? 0,
-          has_track: tId > 0 && getOfflinePlaylistData(p.id)?.tracks?.some((t) => t.id === tId) ? 1 : 0,
-        }));
+        .map((p) => {
+          const hasFromCache = tId > 0 && getOfflinePlaylistData(p.id)?.tracks?.some((t) => t.id === tId) ? 1 : 0;
+          const hasFinal = pendingToggles.current.has(p.id) ? pendingToggles.current.get(p.id)! : hasFromCache;
+          return {
+            ...p,
+            track_count: p.track_count ?? 0,
+            has_track: hasFinal,
+          };
+        });
       setPlaylists(offlineList);
       setLoading(false);
     } else {
@@ -97,7 +105,20 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
           !(p as any).is_daily_mix
       );
       if (filtered.length > 0) {
-        setPlaylists(filtered);
+        // Merge with any user actions taken during this modal session
+        const merged = filtered.map((p) => {
+          if (pendingToggles.current.has(p.id)) {
+            const desiredHasTrack = pendingToggles.current.get(p.id)!;
+            const diff = desiredHasTrack - p.has_track;
+            return {
+              ...p,
+              has_track: desiredHasTrack,
+              track_count: Math.max(0, p.track_count + diff),
+            };
+          }
+          return p;
+        });
+        setPlaylists(merged);
       }
     } catch (e) {
       console.warn('[Load playlists error]:', e);
@@ -107,17 +128,21 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   };
 
   const handleToggleLikedSongs = async () => {
-    if (togglingLiked) return;
-    setTogglingLiked(true);
-
     try {
       if (activeTrack) {
         const isCurrentLiked = likedTrackIds.includes(activeTrack.id);
-        const isNowLiked = await toggleLikeTrack(activeTrack.id, activeTrack, !isCurrentLiked);
-        if (isNowLiked) {
+        const targetState = !isCurrentLiked;
+
+        // 1. Instant store update (optimistic 0ms update in Zustand and localStorage)
+        toggleLikeTrack(activeTrack.id, activeTrack, targetState).catch((err) => {
+          console.warn('[Toggle like error]:', err);
+        });
+
+        // 2. Instant offline cache update
+        if (targetState) {
           const shouldCache = shouldTrackBeCachedOffline(activeTrack.id, -1, [...likedTrackIds, activeTrack.id]);
           if (shouldCache) {
-            await useOfflineStore.getState().cacheTrack(activeTrack);
+            useOfflineStore.getState().cacheTrack(activeTrack).catch(() => {});
             addTrackToOfflinePlaylist(-1, activeTrack);
             toast.success(t('Track added to Liked Songs and saved offline', 'Трек добавлен в любимые и сохранен оффлайн'));
           } else {
@@ -129,160 +154,208 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         }
         onUpdated?.();
       } else if (spotifyTrack) {
-        const res = await apiRequest<{ success: boolean; track: Track; liked?: boolean }>('/tracks/download-single', {
-          method: 'POST',
-          body: JSON.stringify({
-            track: spotifyTrack,
-            isLikedOnly: true,
-          }),
-          timeoutMs: 300000,
-        });
+        const targetState = !isLiked;
+        setOptimisticSpotifyLiked(targetState);
 
-        if (res.success && res.track) {
-          setActiveTrack(res.track);
-          const currentLiked = usePlayerStore.getState().likedTrackIds;
-          if (!currentLiked.includes(res.track.id)) {
-            const nextLiked = [...currentLiked, res.track.id];
-            usePlayerStore.setState({ likedTrackIds: nextLiked });
-            try {
-              localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(nextLiked));
-            } catch (_) {}
-          }
-          onSpotifyTrackDownloaded?.(spotifyTrack, res.track);
-          onUpdated?.();
+        if (targetState) {
+          toast.success(t('Added to Liked Songs (downloading in background)', 'Добавлено в любимые треки (скачивание в фоне)'));
+          apiRequest<{ success: boolean; track: Track; liked?: boolean }>('/tracks/download-single', {
+            method: 'POST',
+            body: JSON.stringify({
+              track: spotifyTrack,
+              isLikedOnly: true,
+            }),
+            timeoutMs: 300000,
+          }).then(async (res) => {
+            if (res.success && res.track) {
+              setActiveTrack(res.track);
+              const currentLiked = usePlayerStore.getState().likedTrackIds;
+              if (!currentLiked.includes(res.track.id)) {
+                const nextLiked = [...currentLiked, res.track.id];
+                usePlayerStore.setState({ likedTrackIds: nextLiked });
+                try {
+                  localStorage.setItem('jellyfy_cached_liked_ids', JSON.stringify(nextLiked));
+                } catch (_) {}
+              }
+              onSpotifyTrackDownloaded?.(spotifyTrack, res.track);
+              onUpdated?.();
 
-          const shouldCache = shouldTrackBeCachedOffline(res.track.id, -1, [...currentLiked, res.track.id]);
-          if (shouldCache) {
-            await useOfflineStore.getState().cacheTrack(res.track);
-            addTrackToOfflinePlaylist(-1, res.track);
-            toast.success(t('Track added to Liked Songs and saved offline', 'Трек добавлен в любимые и сохранен оффлайн'));
-          } else {
-            toast.success(t('Added to Liked Songs', 'Добавлено в любимые треки'));
-          }
+              const shouldCache = shouldTrackBeCachedOffline(res.track.id, -1, [...currentLiked, res.track.id]);
+              if (shouldCache) {
+                await useOfflineStore.getState().cacheTrack(res.track);
+                addTrackToOfflinePlaylist(-1, res.track);
+              }
+            }
+          }).catch((err) => {
+            setOptimisticSpotifyLiked(false);
+            toast.error(err.message || t('Error updating Liked Songs', 'Ошибка обновления любимых треков'));
+          });
         }
       }
     } catch (err: any) {
       toast.error(err.message || t('Error updating Liked Songs', 'Ошибка обновления любимых треков'));
-    } finally {
-      setTogglingLiked(false);
     }
   };
 
-  const handleToggle = async (playlist: PlaylistWithStatus) => {
-    if (togglingId !== null) return;
-    setTogglingId(playlist.id);
+  const handleToggle = (playlist: PlaylistWithStatus) => {
     const displayPlaylistName = td(playlist.name);
 
-    // 1. If already downloaded (either as local track or just finished downloading)
+    // 1. If active local track is available
     if (activeTrack) {
       const isCurrentlyAdded = playlist.has_track === 1;
+      const nextHasTrack = isCurrentlyAdded ? 0 : 1;
+      const nextCount = Math.max(0, playlist.track_count + (isCurrentlyAdded ? -1 : 1));
 
-      // Optimistic UI update
+      // Record optimistic intent
+      pendingToggles.current.set(playlist.id, nextHasTrack);
+
+      // Instant optimistic UI update (0ms!)
       setPlaylists((prev) =>
         prev.map((p) =>
           p.id === playlist.id
             ? {
                 ...p,
-                has_track: isCurrentlyAdded ? 0 : 1,
-                track_count: Math.max(0, p.track_count + (isCurrentlyAdded ? -1 : 1)),
+                has_track: nextHasTrack,
+                track_count: nextCount,
               }
             : p
         )
       );
 
-      try {
-        if (isCurrentlyAdded) {
-          // Remove from playlist
-          removeTrackFromOfflinePlaylist(playlist.id, activeTrack.id);
-          await apiRequest(`/playlists/${playlist.id}/tracks/${activeTrack.id}`, {
-            method: 'DELETE',
-            coalesceKey: `rm_pl_${playlist.id}_${activeTrack.id}`,
-            actionType: 'REMOVE_PLAYLIST_TRACK',
-          });
+      // Instant local offline cache update (0ms!)
+      if (nextHasTrack === 1) {
+        addTrackToOfflinePlaylist(playlist.id, activeTrack);
+        updateCachedPlaylistCount(playlist.id, 1);
+
+        const shouldCache = shouldTrackBeCachedOffline(activeTrack.id, playlist.id, likedTrackIds);
+        if (shouldCache) {
+          useOfflineStore.getState().cacheTrack(activeTrack).catch(() => {});
+          toast.success(
+            t(
+              `Track added to "${displayPlaylistName}" and saved offline`,
+              `Трек добавлен в «${displayPlaylistName}» и сохранен оффлайн`
+            )
+          );
         } else {
-          // Add to playlist
-          addTrackToOfflinePlaylist(playlist.id, activeTrack);
-          await apiRequest(`/playlists/${playlist.id}/tracks`, {
+          toast.success(
+            t(`Track added to "${displayPlaylistName}"`, `Трек добавлен в «${displayPlaylistName}»`)
+          );
+        }
+      } else {
+        removeTrackFromOfflinePlaylist(playlist.id, activeTrack.id);
+        updateCachedPlaylistCount(playlist.id, -1);
+        toast.success(
+          t(`Track removed from "${displayPlaylistName}"`, `Трек удален из «${displayPlaylistName}»`)
+        );
+      }
+      onUpdated?.();
+
+      // Background network sync (automatically absorbed into Outbox if slow/offline)
+      const syncPromise = nextHasTrack === 1
+        ? apiRequest(`/playlists/${playlist.id}/tracks`, {
             method: 'POST',
             body: JSON.stringify({ trackId: activeTrack.id }),
-            coalesceKey: `add_pl_${playlist.id}_${activeTrack.id}`,
+            coalesceKey: `pl_track_${playlist.id}_${activeTrack.id}`,
             actionType: 'ADD_PLAYLIST_TRACK',
+            queueIfOffline: true,
+          })
+        : apiRequest(`/playlists/${playlist.id}/tracks/${activeTrack.id}`, {
+            method: 'DELETE',
+            coalesceKey: `pl_track_${playlist.id}_${activeTrack.id}`,
+            actionType: 'REMOVE_PLAYLIST_TRACK',
+            queueIfOffline: true,
           });
 
-          // Auto-cache track if this playlist or any offline condition is met!
-          const shouldCache = shouldTrackBeCachedOffline(activeTrack.id, playlist.id, likedTrackIds);
-          if (shouldCache) {
-            useOfflineStore.getState().cacheTrack(activeTrack).catch(() => {});
-            toast.success(
-              t(
-                `Track added to "${displayPlaylistName}" and saved offline`,
-                `Трек добавлен в «${displayPlaylistName}» и сохранен оффлайн`
-              )
-            );
+      syncPromise.catch((err: any) => {
+        console.warn('[Background playlist sync error]:', err);
+        // Only rollback on permanent client errors (e.g. 400 blacklisted or 404 deleted)
+        if (err?.status && err.status >= 400 && err.status < 500) {
+          pendingToggles.current.delete(playlist.id);
+          setPlaylists((prev) =>
+            prev.map((p) =>
+              p.id === playlist.id
+                ? {
+                    ...p,
+                    has_track: isCurrentlyAdded ? 1 : 0,
+                    track_count: playlist.track_count,
+                  }
+                : p
+            )
+          );
+          if (nextHasTrack === 1) {
+            removeTrackFromOfflinePlaylist(playlist.id, activeTrack.id);
+            updateCachedPlaylistCount(playlist.id, -1);
           } else {
-            toast.success(
-              t(`Track added to "${displayPlaylistName}"`, `Трек добавлен в «${displayPlaylistName}»`)
-            );
+            addTrackToOfflinePlaylist(playlist.id, activeTrack);
+            updateCachedPlaylistCount(playlist.id, 1);
           }
+          toast.error(err.message || t('Failed to update playlist', 'Не удалось обновить плейлист'));
         }
-        onUpdated?.();
-      } catch (err: any) {
-        console.warn('[Toggle playlist error]:', err);
-      } finally {
-        setTogglingId(null);
-      }
+      });
       return;
     }
 
-    // 2. If Spotify track not yet downloaded: automatically download and add to playlist!
+    // 2. If Spotify track not yet downloaded
     if (spotifyTrack) {
-      try {
-        const res = await apiRequest<{ success: boolean; track: Track }>('/tracks/download-single', {
+      const isCurrentlyAdded = playlist.has_track === 1;
+      const nextHasTrack = isCurrentlyAdded ? 0 : 1;
+      const nextCount = Math.max(0, playlist.track_count + (isCurrentlyAdded ? -1 : 1));
+
+      pendingToggles.current.set(playlist.id, nextHasTrack);
+
+      // Instant optimistic UI update (0ms!)
+      setPlaylists((prev) =>
+        prev.map((p) =>
+          p.id === playlist.id
+            ? {
+                ...p,
+                has_track: nextHasTrack,
+                track_count: nextCount,
+              }
+            : p
+        )
+      );
+
+      if (nextHasTrack === 1) {
+        toast.success(
+          t(
+            `Track added to "${displayPlaylistName}" (downloading in background)`,
+            `Трек добавлен в «${displayPlaylistName}» (скачивание в фоне)`
+          )
+        );
+
+        apiRequest<{ success: boolean; track: Track }>('/tracks/download-single', {
           method: 'POST',
           body: JSON.stringify({
             track: spotifyTrack,
             playlistId: playlist.id,
           }),
           timeoutMs: 300000,
-        });
+        }).then((res) => {
+          if (res.success && res.track) {
+            setActiveTrack(res.track);
+            addTrackToOfflinePlaylist(playlist.id, res.track);
+            updateCachedPlaylistCount(playlist.id, 1);
+            onSpotifyTrackDownloaded?.(spotifyTrack, res.track);
+            onUpdated?.();
 
-        if (res.success && res.track) {
-          setActiveTrack(res.track);
+            const shouldCache = shouldTrackBeCachedOffline(res.track.id, playlist.id, usePlayerStore.getState().likedTrackIds);
+            if (shouldCache) {
+              useOfflineStore.getState().cacheTrack(res.track).catch(() => {});
+            }
+          }
+        }).catch((err) => {
+          console.warn('[Spotify background download error]:', err);
+          pendingToggles.current.delete(playlist.id);
           setPlaylists((prev) =>
             prev.map((p) =>
               p.id === playlist.id
-                ? {
-                    ...p,
-                    has_track: 1,
-                    track_count: p.track_count + 1,
-                  }
+                ? { ...p, has_track: 0, track_count: playlist.track_count }
                 : p
             )
           );
-          onSpotifyTrackDownloaded?.(spotifyTrack, res.track);
-          onUpdated?.();
-
-          // Auto-cache track if this playlist or any offline condition is met!
-          const shouldCache = shouldTrackBeCachedOffline(res.track.id, playlist.id, usePlayerStore.getState().likedTrackIds);
-          if (shouldCache) {
-            await useOfflineStore.getState().cacheTrack(res.track);
-            addTrackToOfflinePlaylist(playlist.id, res.track);
-            toast.success(
-              t(
-                `Track added to "${displayPlaylistName}" and saved offline`,
-                `Трек добавлен в «${displayPlaylistName}» и сохранен оффлайн`
-              )
-            );
-          } else {
-            toast.success(
-              t(`Track added to "${displayPlaylistName}"`, `Трек добавлен в «${displayPlaylistName}»`)
-            );
-          }
-        }
-      } catch (err: any) {
-        toast.error(err.message || t('Error downloading and adding to playlist', 'Ошибка скачивания и добавления в плейлист'));
-      } finally {
-        setTogglingId(null);
+          toast.error(err.message || t('Error downloading track', 'Ошибка скачивания трека'));
+        });
       }
     }
   };
@@ -436,8 +509,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
             <div className="pb-1 border-b border-cat-surface0/60">
               <button
                 onClick={handleToggleLikedSongs}
-                disabled={togglingLiked}
-                className="w-full flex items-center justify-between p-2 rounded-2xl hover:bg-cat-surface0/60 active:scale-[0.99] transition-all text-left group"
+                className="w-full flex items-center justify-between p-2 rounded-2xl hover:bg-cat-surface0/60 active:scale-[0.99] transition-all text-left group cursor-pointer"
               >
                 <div className="flex items-center gap-3 min-w-0 flex-1 pr-2">
                   <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cat-red/25 to-cat-pink/15 overflow-hidden flex-shrink-0 flex items-center justify-center border border-cat-red/30 shadow-inner">
@@ -459,14 +531,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                 </div>
 
                 <div className="shrink-0 pl-2">
-                  {togglingLiked ? (
-                    <div className="flex items-center gap-1.5 text-cat-mauve">
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      {!activeTrack && spotifyTrack && (
-                        <span className="text-[10px] font-semibold hidden xs:inline">{t('Downloading...', 'Качается...')}</span>
-                      )}
-                    </div>
-                  ) : isLiked ? (
+                  {isLiked ? (
                     <CheckCircle2 className="w-5 h-5 text-cat-red fill-cat-red/20" />
                   ) : (
                     <Circle className="w-5 h-5 text-cat-surface2 group-hover:text-cat-subtext0 transition-colors" />
@@ -498,8 +563,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                       <button
                         key={p.id}
                         onClick={() => handleToggle(p)}
-                        disabled={togglingId === p.id}
-                        className="w-full flex items-center justify-between p-2 rounded-2xl hover:bg-cat-surface0/60 active:scale-[0.99] transition-all text-left group"
+                        className="w-full flex items-center justify-between p-2 rounded-2xl hover:bg-cat-surface0/60 active:scale-[0.99] transition-all text-left group cursor-pointer"
                       >
                         <div className="flex items-center gap-3 min-w-0 flex-1 pr-2">
                           <div className="w-10 h-10 rounded-xl bg-cat-surface0 overflow-hidden flex-shrink-0 flex items-center justify-center border border-cat-surface1/30">
@@ -520,16 +584,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                         </div>
 
                         <div className="shrink-0 pl-2">
-                          {togglingId === p.id ? (
-                            <div className="flex items-center gap-1.5 text-cat-mauve">
-                              <Loader2 className="w-5 h-5 animate-spin" />
-                              {!activeTrack && spotifyTrack && (
-                                <span className="text-[10px] font-semibold hidden xs:inline">{t('Downloading...', 'Качается...')}</span>
-                              )}
-                            </div>
-                          ) : (
-                            <CheckCircle2 className="w-5 h-5 text-cat-green fill-cat-green/20" />
-                          )}
+                          <CheckCircle2 className="w-5 h-5 text-cat-green fill-cat-green/20" />
                         </div>
                       </button>
                     ))}
@@ -550,8 +605,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                       <button
                         key={p.id}
                         onClick={() => handleToggle(p)}
-                        disabled={togglingId === p.id}
-                        className="w-full flex items-center justify-between p-2 rounded-2xl hover:bg-cat-surface0/60 active:scale-[0.99] transition-all text-left group"
+                        className="w-full flex items-center justify-between p-2 rounded-2xl hover:bg-cat-surface0/60 active:scale-[0.99] transition-all text-left group cursor-pointer"
                       >
                         <div className="flex items-center gap-3 min-w-0 flex-1 pr-2">
                           <div className="w-10 h-10 rounded-xl bg-cat-surface0 overflow-hidden flex-shrink-0 flex items-center justify-center border border-cat-surface1/30">
@@ -572,16 +626,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                         </div>
 
                         <div className="shrink-0 pl-2">
-                          {togglingId === p.id ? (
-                            <div className="flex items-center gap-1.5 text-cat-mauve">
-                              <Loader2 className="w-5 h-5 animate-spin" />
-                              {!activeTrack && spotifyTrack && (
-                                <span className="text-[10px] font-semibold hidden xs:inline">{t('Downloading...', 'Качается...')}</span>
-                              )}
-                            </div>
-                          ) : (
-                            <Circle className="w-5 h-5 text-cat-surface2 group-hover:text-cat-subtext0 transition-colors" />
-                          )}
+                          <Circle className="w-5 h-5 text-cat-surface2 group-hover:text-cat-subtext0 transition-colors" />
                         </div>
                       </button>
                     ))}
@@ -596,7 +641,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         <div className="pt-3 border-t border-cat-surface0/60 mt-3 flex justify-end">
           <button
             onClick={onClose}
-            className="px-5 py-2 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-text text-xs font-bold transition-colors"
+            className="px-5 py-2 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-text text-xs font-bold transition-colors cursor-pointer active:scale-95"
           >
             {t('Done', 'Готово')}
           </button>

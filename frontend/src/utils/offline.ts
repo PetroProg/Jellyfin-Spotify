@@ -164,6 +164,18 @@ export function getAllPlaylistsCache(): Playlist[] {
   }
 }
 
+export function updateCachedPlaylistCount(playlistId: number, delta: number): void {
+  try {
+    const cached = getAllPlaylistsCache();
+    if (cached && cached.length > 0) {
+      const updated = cached.map((p) =>
+        p.id === playlistId ? { ...p, track_count: Math.max(0, (p.track_count ?? 0) + delta) } : p
+      );
+      saveAllPlaylistsCache(updated);
+    }
+  } catch (_) {}
+}
+
 export function saveOfflinePlaylistData(
   playlist: Playlist,
   tracks: Track[],
