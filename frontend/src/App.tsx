@@ -357,6 +357,7 @@ export const App: React.FC = () => {
 
           {currentTab === 'playlist' && selectedPlaylistId && (
             <PlaylistView
+              key={selectedPlaylistId}
               playlistId={selectedPlaylistId}
               onBack={handleBack}
               onRenamed={() => {

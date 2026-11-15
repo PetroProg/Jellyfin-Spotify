@@ -205,7 +205,32 @@ export function getOfflinePlaylistData(
 ): { playlist: Playlist; tracks: Track[]; version?: string } | null {
   try {
     const raw = localStorage.getItem(`${OFFLINE_PLAYLIST_PREFIX}${playlistId}`);
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.playlist || Number(parsed.playlist.id) !== Number(playlistId)) {
+      return null;
+    }
+    const tracksList = Array.isArray(parsed.tracks) ? parsed.tracks : [];
+    // Validate that cached tracks count matches version metadata (heals any prior cross-playlist cache poisoning)
+    if (typeof parsed.version === 'string') {
+      const m = parsed.version.match(/^v_(\d+)_(\d+)_/);
+      if (m) {
+        const verPlaylistId = Number(m[1]);
+        const verCount = Number(m[2]);
+        if (verPlaylistId !== Number(playlistId) || (verCount > 0 && tracksList.length === 0) || Math.abs(tracksList.length - verCount) > 5) {
+          return {
+            playlist: parsed.playlist,
+            tracks: [],
+            version: undefined,
+          };
+        }
+      }
+    }
+    return {
+      playlist: parsed.playlist,
+      tracks: tracksList,
+      version: parsed.version,
+    };
   } catch {
     return null;
   }

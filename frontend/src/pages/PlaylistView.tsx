@@ -35,6 +35,8 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const activePlaylistIdRef = useRef<number>(Number(playlistId));
+  const requestSeqRef = useRef<number>(0);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -66,23 +68,26 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
     }
   };
 
-  const loadData = async (silent = false) => {
+  const loadData = async (silent = false, forceFull = false) => {
+    const targetId = Number(playlistId);
+    const reqSeq = ++requestSeqRef.current;
+
     try {
-      const cached = getOfflinePlaylistData(Number(playlistId));
-      const currentTracks = tracks.length > 0 ? tracks : (cached?.tracks || []);
-      const currentVer = cached?.version || (cached?.playlist as any)?.version || '';
-      const maxPos = currentTracks.reduce((max, t) => Math.max(max, t.position ?? -1), -1);
-      const knownCount = currentTracks.length;
+      const cached = forceFull ? null : getOfflinePlaylistData(targetId);
+      const baseTracks = cached?.tracks || [];
+      const currentVer = !forceFull && cached?.version && baseTracks.length > 0 ? cached.version : '';
+      const maxPos = baseTracks.reduce((max, t) => Math.max(max, t.position ?? -1), -1);
+      const knownCount = baseTracks.length;
 
       const params = new URLSearchParams();
       if (currentVer) params.append('version', currentVer);
-      if (knownCount > 0) {
+      if (knownCount > 0 && currentVer) {
         params.append('knownCount', String(knownCount));
         params.append('knownMaxPos', String(maxPos));
       }
 
       const queryString = params.toString() ? `?${params.toString()}` : '';
-      if (!silent && !playlist && !cached?.playlist) setLoading(true);
+      if (!silent && !cached?.playlist) setLoading(true);
 
       const data = await apiRequest<{
         upToDate?: boolean;
@@ -92,31 +97,45 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
         tracks?: Track[];
         addedTracks?: Track[];
         activeJob?: any;
-      }>(`/playlists/${playlistId}${queryString}`, { silentOffline: true });
+      }>(`/playlists/${targetId}${queryString}`, { silentOffline: true });
+
+      // Ignore stale responses if user already switched to another playlist or a newer request started
+      if (activePlaylistIdRef.current !== targetId || requestSeqRef.current !== reqSeq) {
+        return;
+      }
+      if (data.playlist && Number(data.playlist.id) !== targetId) {
+        return;
+      }
 
       if (data.upToDate) {
+        if (baseTracks.length === 0 && Number((data.playlist as any)?.track_count || 0) > 0 && !forceFull) {
+          // Cache had no valid tracks despite matching version: force a full fetch
+          await loadData(silent, true);
+          return;
+        }
         if (data.playlist) setPlaylist(data.playlist);
+        setTracks(baseTracks);
         setActiveJob(data.activeJob || null);
-        if (data.playlist && currentTracks.length > 0) {
-          saveOfflinePlaylistData(data.playlist, currentTracks, false, data.version);
-          if (useOfflineStore.getState().isDownloaded(Number(playlistId))) {
-            useOfflineStore.getState().syncPlaylist(Number(playlistId), currentTracks, data.playlist);
+        if (data.playlist && baseTracks.length > 0) {
+          saveOfflinePlaylistData(data.playlist, baseTracks, false, data.version);
+          if (useOfflineStore.getState().isDownloaded(targetId)) {
+            useOfflineStore.getState().syncPlaylist(targetId, baseTracks, data.playlist);
           }
         }
         return;
       }
 
       if (data.delta && data.addedTracks) {
-        const existingIds = new Set(currentTracks.map((t) => t.id));
+        const existingIds = new Set(baseTracks.map((t) => t.id));
         const newTracks = data.addedTracks.filter((t) => !existingIds.has(t.id));
-        const updatedTracks = [...currentTracks, ...newTracks];
+        const updatedTracks = [...baseTracks, ...newTracks];
         setPlaylist(data.playlist);
         setTracks(updatedTracks);
         setActiveJob(data.activeJob || null);
-        usePlayerStore.getState().updateQueueIfCurrent(Number(playlistId), updatedTracks);
+        usePlayerStore.getState().updateQueueIfCurrent(targetId, updatedTracks);
         saveOfflinePlaylistData(data.playlist, updatedTracks, false, data.version);
-        if (useOfflineStore.getState().isDownloaded(Number(playlistId))) {
-          useOfflineStore.getState().syncPlaylist(Number(playlistId), updatedTracks, data.playlist);
+        if (useOfflineStore.getState().isDownloaded(targetId)) {
+          useOfflineStore.getState().syncPlaylist(targetId, updatedTracks, data.playlist);
         }
         return;
       }
@@ -125,29 +144,39 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
       setPlaylist(data.playlist);
       setTracks(nextTracks);
       setActiveJob(data.activeJob || null);
-      usePlayerStore.getState().updateQueueIfCurrent(Number(playlistId), nextTracks);
+      usePlayerStore.getState().updateQueueIfCurrent(targetId, nextTracks);
       saveOfflinePlaylistData(data.playlist, nextTracks, false, data.version);
-      if (useOfflineStore.getState().isDownloaded(Number(playlistId))) {
-        useOfflineStore.getState().syncPlaylist(Number(playlistId), nextTracks, data.playlist);
+      if (useOfflineStore.getState().isDownloaded(targetId)) {
+        useOfflineStore.getState().syncPlaylist(targetId, nextTracks, data.playlist);
       }
     } catch (e: any) {
+      if (activePlaylistIdRef.current !== targetId || requestSeqRef.current !== reqSeq) {
+        return;
+      }
       console.warn('[PlaylistView] Network error or offline, fallback to offline cache:', e);
-      const offline = getOfflinePlaylistData(Number(playlistId));
+      const offline = getOfflinePlaylistData(targetId);
       if (offline && offline.playlist) {
         setPlaylist(offline.playlist);
         setTracks(offline.tracks || []);
       }
     } finally {
-      setLoading(false);
+      if (activePlaylistIdRef.current === targetId && requestSeqRef.current === reqSeq) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    const cached = getOfflinePlaylistData(Number(playlistId));
+    const targetId = Number(playlistId);
+    activePlaylistIdRef.current = targetId;
+    setActiveJob(null);
+    setMenuState(null);
+
+    const cached = getOfflinePlaylistData(targetId);
     if (cached?.playlist) {
       setPlaylist(cached.playlist);
       setTracks(cached.tracks || []);
-      setLoading(false);
+      setLoading((cached.tracks || []).length === 0 && !cached.version);
     } else {
       setPlaylist(null);
       setTracks([]);
