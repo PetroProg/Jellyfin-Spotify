@@ -47,7 +47,8 @@ import {
   invalidateUserBlacklistCache,
   getDownloadSchedulerStats,
   isPathInsideMusicDir,
-  matchesArtistPattern
+  matchesArtistPattern,
+  repairVariantTracksIfNeeded
 } from './downloader';
 import { getRecommendations, invalidateUserRecCache } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
@@ -2843,4 +2844,6 @@ server.listen({ port: PORT, host: '0.0.0.0' }, async (err, address) => {
   startNightlyScheduler();
   // Automatically backfill genre/style covers for any playlists without artwork
   initPlaylistCoversBackfill(db);
+  // One-time background repair for existing variant tracks (Slowed, Sped Up, Reverb, Instrumental, etc.)
+  repairVariantTracksIfNeeded();
 });
