@@ -55,6 +55,7 @@ import { setupWebSocketSync, broadcastToUser, terminateUserSessions } from './sy
 import { getOrGenerateDailyMixes, saveDailyMixAsPlaylist } from './dailyMix';
 import { startNightlyScheduler, getNightlySchedulerStatus, updateNightlySchedule } from './nightlyScheduler';
 import { getOrGenerateJwtSecret } from './authSecret';
+import { resolveAndSavePlaylistCover, initPlaylistCoversBackfill } from './playlistCover';
 
 dotenv.config();
 
@@ -1157,7 +1158,18 @@ server.post('/api/playlists', { preHandler: [(server as any).authenticate] }, as
     VALUES (?, ?, ?, 0)
   `).run(req.user.id, cleanName, cleanDesc);
 
-  return { id: info.lastInsertRowid, name: cleanName, description: cleanDesc };
+  const playlistId = Number(info.lastInsertRowid);
+  let coverUrl = '';
+  try {
+    coverUrl = await resolveAndSavePlaylistCover(playlistId, cleanName, cleanDesc);
+    if (coverUrl) {
+      db.prepare('UPDATE playlists SET cover_url = ? WHERE id = ?').run(coverUrl, playlistId);
+    }
+  } catch (err: any) {
+    console.warn('[Playlist] Auto cover resolution failed:', err.message);
+  }
+
+  return { id: playlistId, name: cleanName, description: cleanDesc, cover_url: coverUrl };
 });
 
 server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
@@ -1286,6 +1298,17 @@ server.put('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
     db.prepare('UPDATE playlists SET name = ? WHERE id = ?').run(name, playlistId);
   }
 
+  // If the playlist has no cover art yet, auto-assign one based on the new name
+  const currentPl = db.prepare('SELECT cover_url FROM playlists WHERE id = ?').get(playlistId) as any;
+  if (!currentPl?.cover_url || currentPl.cover_url === '-' || currentPl.cover_url === '') {
+    try {
+      const coverUrl = await resolveAndSavePlaylistCover(playlistId, name, description);
+      if (coverUrl) {
+        db.prepare('UPDATE playlists SET cover_url = ? WHERE id = ?').run(coverUrl, playlistId);
+      }
+    } catch (_) {}
+  }
+
   db.prepare('UPDATE download_jobs SET playlist_name = ? WHERE playlist_id = ?').run(name, playlistId);
 
   const updated: any = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId);
@@ -1362,7 +1385,22 @@ server.get('/api/playlists/:id/cover', { config: { compress: false } }, async (r
     return reply.status(400).send('Invalid playlist ID');
   }
   const coversDir = path.join(process.cwd(), 'data', 'covers');
-  const filePath = path.join(coversDir, `playlist_${playlistId}.jpg`);
+  let filePath = path.join(coversDir, `playlist_${playlistId}.jpg`);
+  let mimeType = 'image/jpeg';
+  if (!fs.existsSync(filePath)) {
+    const svgPath = path.join(coversDir, `playlist_${playlistId}.svg`);
+    if (fs.existsSync(svgPath)) {
+      filePath = svgPath;
+      mimeType = 'image/svg+xml';
+    } else {
+      const pngPath = path.join(coversDir, `playlist_${playlistId}.png`);
+      if (fs.existsSync(pngPath)) {
+        filePath = pngPath;
+        mimeType = 'image/png';
+      }
+    }
+  }
+
   try {
     const stat = await fs.promises.stat(filePath);
     const etag = `W/"cover-${playlistId}-${stat.mtimeMs}"`;
@@ -1371,7 +1409,7 @@ server.get('/api/playlists/:id/cover', { config: { compress: false } }, async (r
     if (clientEtag && (clientEtag === cleanEtag || clientEtag === '*')) {
       return reply.status(304).send();
     }
-    reply.type('image/jpeg').headers({
+    reply.type(mimeType).headers({
       'Cache-Control': 'public, max-age=86400',
       'ETag': etag,
       'Last-Modified': stat.mtime.toUTCString(),
@@ -2803,4 +2841,6 @@ server.listen({ port: PORT, host: '0.0.0.0' }, async (err, address) => {
   await resumePendingDownloads();
   // Start automated nightly mix background generator & pre-downloader
   startNightlyScheduler();
+  // Automatically backfill genre/style covers for any playlists without artwork
+  initPlaylistCoversBackfill(db);
 });
