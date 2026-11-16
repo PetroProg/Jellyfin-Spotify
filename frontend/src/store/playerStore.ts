@@ -119,6 +119,63 @@ const STORAGE_KEY_NORMALIZER = 'jellyfy_normalizer_enabled';
 const STORAGE_KEY_SHUFFLE = 'jellyfy_shuffle';
 const STORAGE_KEY_LIKED_IDS = 'jellyfy_cached_liked_ids';
 const STORAGE_KEY_CROSSFADE = 'jellyfy_crossfade';
+const STORAGE_KEY_PLAYER_SESSION = 'jellyfy_player_session';
+
+interface SavedPlayerSession {
+  currentTrack: Track | null;
+  currentPlaylistId: number | null;
+  currentTime: number;
+  duration: number;
+  queue: Track[];
+  originalQueue: Track[];
+  currentIndex: number;
+  repeat: RepeatMode;
+  savedAt: number;
+}
+
+const loadSavedPlayerSession = (): SavedPlayerSession | null => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PLAYER_SESSION);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.currentTrack || !parsed.currentTrack.id) return null;
+    if (parsed.savedAt && Date.now() - parsed.savedAt > 7 * 24 * 60 * 60 * 1000) {
+      return null;
+    }
+    return parsed as SavedPlayerSession;
+  } catch (_) {
+    return null;
+  }
+};
+
+let lastSessionSaveTs = 0;
+const savePlayerSessionState = (state: Partial<PlayerState>, force: boolean = false) => {
+  if (typeof localStorage === 'undefined') return;
+  const now = Date.now();
+  if (!force && now - lastSessionSaveTs < 3000) return;
+  lastSessionSaveTs = now;
+
+  try {
+    if (!state.currentTrack) {
+      localStorage.removeItem(STORAGE_KEY_PLAYER_SESSION);
+      return;
+    }
+    const q = Array.isArray(state.queue) ? state.queue.slice(0, 300) : [];
+    const oq = Array.isArray(state.originalQueue) ? state.originalQueue.slice(0, 300) : [];
+    const payload: SavedPlayerSession = {
+      currentTrack: state.currentTrack,
+      currentPlaylistId: state.currentPlaylistId ?? null,
+      currentTime: Number(state.currentTime) || 0,
+      duration: Number(state.duration) || 0,
+      queue: q,
+      originalQueue: oq,
+      currentIndex: typeof state.currentIndex === 'number' ? state.currentIndex : 0,
+      repeat: state.repeat || 'off',
+      savedAt: now,
+    };
+    localStorage.setItem(STORAGE_KEY_PLAYER_SESSION, JSON.stringify(payload));
+  } catch (_) {}
+};
 
 const loadSavedShuffle = (): boolean => {
   try {
@@ -236,20 +293,22 @@ let isFadingOut = false;
 let silentAnchorUrl: string | null = null;
 let silentAnchorAudio: HTMLAudioElement | null = null;
 let standbyTimeoutTimer: any = null;
-const STANDBY_GRACE_PERIOD_MS = 10 * 60 * 1000; // 10 minutes grace period on pause
+let pauseKeepAliveInterval: any = null;
+const STANDBY_GRACE_PERIOD_MS = 15 * 60 * 1000; // 15 minutes grace period on pause
 
 function getSilentAudioUrl(): string {
   if (silentAnchorUrl) return silentAnchorUrl;
   try {
-    // 60-second 8000 Hz mono 16-bit PCM WAV with alternating ±3 LSB dithering.
-    // 1) Duration 60s (>> Chromium's 5s kMinimumContentDuration) ensures Chromium's MediaSessionImpl
-    //    classifies it as MediaContentType::kPersistent rather than a short transient sound effect.
-    // 2) Alternating ±3 LSB at volume 0.02 (-110 dBFS) is 100% physically inaudible (below 16-bit thermal noise),
-    //    but strictly non-zero in IEEE-754 float32 so Chromium's SilentSinkSuspender never closes the AudioTrack!
+    // 120-second 8000 Hz mono 16-bit PCM WAV with alternating ±18 LSB dithering.
+    // 1) Duration 120s (>> Chromium's 5s kMinimumContentDuration) ensures Chromium's MediaSessionImpl
+    //    classifies it as MediaContentType::kPersistent and avoids 60s loop boundary resets.
+    // 2) Alternating ±18 LSB at volume 0.03 (~-96 dBFS, ~1.65e-5 float32) is physically inaudible,
+    //    yet stays strictly above Chromium's SilentSinkSuspender audibility floor so Android/Chrome
+    //    does not tear down the AudioTrack & Media Notification after 1-2 minutes of pause.
     const sampleRate = 8000;
     const numChannels = 1;
     const bitsPerSample = 16;
-    const durationSec = 60;
+    const durationSec = 120;
     const numSamples = durationSec * sampleRate * numChannels;
     const dataSize = numSamples * (bitsPerSample / 8);
     const totalSize = 44 + dataSize;
@@ -275,9 +334,9 @@ function getSilentAudioUrl(): string {
     view.setUint32(36, 0x64617461, false);
     view.setUint32(40, dataSize, true);
 
-    // Fill with non-zero sub-LSB alternating samples (±3 out of 32768)
+    // Fill with non-zero sub-LSB alternating samples (±18 out of 32768)
     for (let i = 0; i < numSamples; i++) {
-      view.setInt16(44 + i * 2, (i & 1) === 0 ? 3 : -3, true);
+      view.setInt16(44 + i * 2, (i & 1) === 0 ? 18 : -18, true);
     }
 
     const blob = new Blob([buffer], { type: 'audio/wav' });
@@ -295,7 +354,7 @@ function primeSilentAnchor() {
       silentAnchorAudio = new Audio(getSilentAudioUrl());
       silentAnchorAudio.loop = true;
       silentAnchorAudio.preload = 'auto';
-      silentAnchorAudio.volume = 0.02;
+      silentAnchorAudio.volume = 0.03;
       silentAnchorAudio.onerror = () => {};
       mountHiddenAudioElement(silentAnchorAudio, 'jellyfy-silent-anchor');
     } else if (!silentAnchorAudio.isConnected) {
@@ -308,6 +367,10 @@ function clearStandbyTimer() {
   if (standbyTimeoutTimer) {
     clearTimeout(standbyTimeoutTimer);
     standbyTimeoutTimer = null;
+  }
+  if (pauseKeepAliveInterval) {
+    clearInterval(pauseKeepAliveInterval);
+    pauseKeepAliveInterval = null;
   }
 }
 
@@ -336,8 +399,20 @@ function activateSilentAnchor(forPause: boolean = false) {
   }
 
   if (forPause) {
+    pauseKeepAliveInterval = setInterval(() => {
+      try {
+        if (silentAnchorAudio && silentAnchorAudio.paused && audio.paused) {
+          silentAnchorAudio.play().catch(() => {});
+        }
+        if ('mediaSession' in navigator && audio.paused) {
+          navigator.mediaSession.playbackState = 'paused';
+          updateMediaPositionState();
+        }
+      } catch (_) {}
+    }, 20000);
+
     standbyTimeoutTimer = setTimeout(() => {
-      console.log('[SilentAnchor] 10m grace period expired. Releasing anchor.');
+      console.log('[SilentAnchor] 15m grace period expired. Releasing anchor.');
       deactivateSilentAnchor();
     }, STANDBY_GRACE_PERIOD_MS);
   }
@@ -1297,6 +1372,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         navigator.mediaSession.playbackState = 'paused';
       }
       updateMediaPositionState();
+      savePlayerSessionState(get(), true);
       useSyncStore.getState().sendPlaybackState({ isPlaying: false });
 
       // Start 10-minute standby timer for external interruption
@@ -1315,6 +1391,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       navigator.mediaSession.playbackState = 'paused';
     }
     updateMediaPositionState();
+    savePlayerSessionState(get(), true);
     useSyncStore.getState().sendPlaybackState({ isPlaying: false });
   };
 
@@ -1445,6 +1522,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
 
     set(update);
+    savePlayerSessionState(get(), false);
 
     // Event-driven next-track prefetching: immune to Chrome's 5-minute background setTimeout throttling!
     if (cur >= 6 && !isPrefetching) {
@@ -1867,18 +1945,51 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
   };
 
+  const savedSession = typeof window !== 'undefined' ? loadSavedPlayerSession() : null;
+  if (savedSession?.currentTrack) {
+    const restoredTrack = savedSession.currentTrack;
+    const restoredTime = Math.max(0, Number(savedSession.currentTime) || 0);
+    setTimeout(async () => {
+      try {
+        if (audio.src || get().currentTrack?.id !== restoredTrack.id) return;
+        let streamUrl = `/api/stream/${restoredTrack.id}`;
+        try {
+          const cachedUrl = await getCachedTrackUrl(restoredTrack.id);
+          if (cachedUrl) streamUrl = cachedUrl;
+        } catch (_) {}
+        if (audio.src || get().currentTrack?.id !== restoredTrack.id) return;
+        isInternalSrcChange = true;
+        audio.src = streamUrl;
+        const applyRestoredPos = () => {
+          try {
+            if (restoredTime > 0 && isFinite(audio.duration) && restoredTime < audio.duration) {
+              audio.currentTime = restoredTime;
+            }
+          } catch (_) {}
+          isInternalSrcChange = false;
+          updateMediaSession(restoredTrack);
+          updateMediaPositionState();
+        };
+        if (audio.readyState >= 1) applyRestoredPos();
+        else audio.addEventListener('loadedmetadata', applyRestoredPos, { once: true });
+      } catch (_) {
+        isInternalSrcChange = false;
+      }
+    }, 0);
+  }
+
   return {
-    currentTrack: null,
-    currentPlaylistId: null,
+    currentTrack: savedSession?.currentTrack || null,
+    currentPlaylistId: savedSession?.currentPlaylistId ?? null,
     isPlaying: false,
-    currentTime: 0,
-    duration: 0,
-    queue: [],
-    originalQueue: [],
-    currentIndex: -1,
+    currentTime: savedSession?.currentTime || 0,
+    duration: savedSession?.duration || (savedSession?.currentTrack?.duration_ms ? savedSession.currentTrack.duration_ms / 1000 : 0),
+    queue: savedSession?.queue || [],
+    originalQueue: savedSession?.originalQueue || [],
+    currentIndex: savedSession?.currentIndex ?? -1,
     shuffle: loadSavedShuffle(),
     smartShuffle: true,
-    repeat: 'off',
+    repeat: savedSession?.repeat || 'off',
     volume: initialVolume,
     isFullPlayerOpen: false,
     isQueueOpen: false,
@@ -2133,6 +2244,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           navigator.mediaSession.playbackState = 'paused';
         }
         updateMediaPositionState();
+        savePlayerSessionState(get(), true);
         useSyncStore.getState().sendPlaybackState({ isPlaying: false });
       } else {
         clearInterruptionRetries();
@@ -2191,6 +2303,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         navigator.mediaSession.playbackState = 'paused';
       }
       updateMediaPositionState();
+      savePlayerSessionState(get(), true);
       useSyncStore.getState().sendPlaybackState({ isPlaying: false });
     },
 

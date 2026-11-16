@@ -591,7 +591,8 @@ export function setupWebSocketSync(server: FastifyInstance) {
           clearTimeout(existingTimer);
           disconnectTimers.delete(userId);
         }
-        // Active device went offline. Give 45 seconds grace in case of mobile network switch / cell tower handover
+        // Give 45s grace if actively playing, or 10 minutes if paused (prevents mobile background/screen-off freeze from wiping playback)
+        const graceMs = playback.isPlaying ? 45000 : 10 * 60 * 1000;
         const timer = setTimeout(() => {
           disconnectTimers.delete(userId);
           const currentClients = userClients.get(userId);
@@ -599,13 +600,6 @@ export function setupWebSocketSync(server: FastifyInstance) {
             playback.isPlaying = false;
             playback.activeDeviceId = null;
             playback.activeDeviceName = null;
-
-            // If user has zero active connections, free heavy queue memory and delete playback to prevent RAM retention
-            if (!currentClients || currentClients.size === 0) {
-              playback.queue = [];
-              playback.originalQueue = [];
-              userPlayback.delete(userId);
-            }
 
             broadcastToUser(userId, {
               type: 'DEVICES_CHANGED',
@@ -620,7 +614,7 @@ export function setupWebSocketSync(server: FastifyInstance) {
               state: playback,
             });
           }
-        }, 45000);
+        }, graceMs);
         disconnectTimers.set(userId, timer);
       }
 
