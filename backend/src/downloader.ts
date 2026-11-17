@@ -20,7 +20,7 @@ interface QueueItem {
 const queue: QueueItem[] = [];
 let isWorkerRunning = false;
 
-function sanitizeFilename(name: string): string {
+export function sanitizeFilename(name: string): string {
   if (!name) return 'track';
   let safe = String(name)
     .replace(/[\x00-\x1f\x7f\\/:*?"<>|]/g, '_')
@@ -1604,6 +1604,7 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
 
       const freshTrack: any = db.prepare('SELECT * FROM tracks WHERE id = ?').get(trackId);
       workerResolve({ success: true, track: freshTrack });
+      broadcastToAll({ type: 'TRACK_UPDATED', track: sanitizeTrackRecord(freshTrack) });
 
       if (isTrackBlacklistedForUser(item.userId, details.title || track.title, details.artist || track.artist, track.id)) {
         console.log(`[Downloader] Track "${track.artist} - ${track.title}" was blacklisted during download. Skipping playlist link.`);
@@ -1695,42 +1696,15 @@ export async function downloadSingleSpotifyTrackDirect(
   }
 }
 
+const inFlightTrackIdDownloads = new Set<number>();
+
 async function downloadSingleSpotifyTrackDirectInternal(
   track: SpotifyTrack,
   userId?: number,
   playlistId?: number,
   isLikedOnly?: boolean
-): Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean; liked?: boolean }> {
+): Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean; liked?: boolean; downloading?: boolean }> {
   try {
-    // 1. Resolve full details if needed
-    if (track.id) {
-      const details = await resolveSpotifyTrackDetails(track.id);
-      if (details.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
-        track.cover_url = String(details.cover_url).slice(0, 2048);
-      }
-      if (details.album) {
-        track.album = String(details.album).slice(0, 200);
-      }
-      if (details.artist && (!track.artist || track.artist === 'Unknown Artist')) {
-        track.artist = String(details.artist).slice(0, 200);
-      }
-    }
-
-    if (!track.cover_url || !track.album) {
-      try {
-        const dz = await resolveDeezerTrackInfo(track.artist, track.title);
-        if (dz.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
-          track.cover_url = String(dz.cover_url).slice(0, 2048);
-        }
-        if (dz.album && !track.album) {
-          track.album = String(dz.album).slice(0, 200);
-        }
-        if (dz.duration && (!track.duration_ms || track.duration_ms <= 0)) {
-          track.duration_ms = dz.duration * 1000;
-        }
-      } catch (_) {}
-    }
-
     // Helper to attach to playlist or liked tracks
     const attachToPlaylist = (trackRecord: any) => {
       if (!trackRecord?.id) return;
@@ -1774,8 +1748,8 @@ async function downloadSingleSpotifyTrackDirectInternal(
       }
     };
 
-    // 2. Check if already exists in DB AND file exists on disk
-    const existing: any = db.prepare(`
+    // 1. Check if already exists in DB
+    let existing: any = db.prepare(`
       SELECT * FROM tracks 
       WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
          OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
@@ -1784,7 +1758,6 @@ async function downloadSingleSpotifyTrackDirectInternal(
 
     if (existing && existing.file_path && isPathInsideMusicDir(existing.file_path) && fs.existsSync(existing.file_path)) {
       attachToPlaylist(existing);
-      // Opportunistically queue quality upgrade in background if legacy .m4a or low bitrate
       queueTrackQualityUpgrade(existing);
       return {
         success: true,
@@ -1794,102 +1767,143 @@ async function downloadSingleSpotifyTrackDirectInternal(
       };
     }
 
-    // 3. Prepare target path
-    const targetDir = getSafeArtistDir(track.artist || 'Unknown Artist');
-    if (!fs.existsSync(targetDir)) {
-      fs.mkdirSync(targetDir, { recursive: true });
-    }
-
-    const safeTitle = sanitizeFilename(track.title);
-    const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
-
-    // 4. Acquire concurrency slot with HIGH priority (max 2 concurrent downloads on 2-core CPU) and download
-    const success = await runWithPrioritySlot(
-      DownloadPriority.HIGH,
-      `direct:${track.artist} - ${track.title}`,
-      async () => {
-        // Re-check if downloaded while waiting in queue
-        const existingCandidate = resolveAudioFilePath(targetDir, safeTitle);
-        if (existingCandidate && fs.existsSync(existingCandidate)) {
-          const preProbe = await probeAudioFile(existingCandidate, track.duration_ms);
-          if (preProbe.valid && preProbe.durationSec > 15) {
-            return true;
-          }
-        }
-
-        return await downloadAudioWithFallback(
-          track.artist,
-          track.title,
-          track.duration_ms,
-          outputTemplate,
-          targetDir,
-          safeTitle,
-          150000,
-          false
-        );
-      }
-    );
-
-    if (!success) {
-      return { success: false, error: 'Не удалось скачать аудиофайл с YouTube' };
-    }
-
-    const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.mp3`);
-
-    // Verify audio file
-    const probe = await probeAudioFile(finalFile, track.duration_ms);
-    if (track.duration_ms > 30000 && probe.valid && !probe.isHighQuality && probe.reason?.includes('Обрезан')) {
-      console.warn(`[yt-dlp single direct] Truncated audio detected for "${track.artist} - ${track.title}". Discarding.`);
-      try { fs.unlinkSync(finalFile); } catch (_) {}
-      return { success: false, error: `Скачанный файл оказался неполным (${Math.round(probe.durationSec)}с)` };
-    }
-
-    // Safety re-check before insert
-    const doubleCheck: any = db.prepare(`
-      SELECT * FROM tracks 
-      WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
-         OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
-      LIMIT 1
-    `).get(track.id || null, track.title, track.artist);
-
-    let newTrack: any = doubleCheck;
-    const actualDurationMs = (probe.valid && probe.durationSec > 0)
-      ? Math.round(probe.durationSec * 1000)
-      : (track.duration_ms || 180000);
-
-    if (!newTrack) {
+    // 2. Immediately create pending DB record if it doesn't exist yet, attach to playlist right away, and return!
+    if (!existing) {
       const info = db.prepare(`
         INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id, bitrate)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, NULL, ?, ?, 0)
       `).run(
         track.title,
         track.artist,
         track.album || '',
-        actualDurationMs,
-        finalFile,
+        track.duration_ms || 180000,
         track.cover_url || '',
-        track.id || null,
-        probe.bitrateKbps || 320
+        track.id || null
       );
-      newTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
-    } else {
-      db.prepare(`
-        UPDATE tracks 
-        SET file_path = ?, duration_ms = ?, bitrate = ?,
-            album = CASE WHEN album IS NULL OR album = '' OR album = '-' OR album = 'Любимые треки' THEN ? ELSE album END,
-            cover_url = CASE WHEN cover_url IS NULL OR cover_url = '' OR cover_url LIKE '%mosaic.scdn.co%' THEN ? ELSE cover_url END
-        WHERE id = ?
-      `).run(finalFile, actualDurationMs, probe.bitrateKbps || 320, track.album || '', track.cover_url || '', newTrack.id);
-      newTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(newTrack.id);
+      existing = db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
     }
 
-    attachToPlaylist(newTrack);
-    await refreshJellyfinLibrary();
+    attachToPlaylist(existing);
+    if (userId && playlistId && playlistId !== -1) {
+      broadcastToUser(userId, { type: 'PLAYLIST_UPDATED', playlistId });
+    }
+
+    const pendingTrackId = Number(existing.id);
+
+    // 3. Run metadata resolution + yt-dlp download asynchronously in background
+    if (!inFlightTrackIdDownloads.has(pendingTrackId)) {
+      inFlightTrackIdDownloads.add(pendingTrackId);
+      (async () => {
+        try {
+          if (track.id) {
+            const details = await resolveSpotifyTrackDetails(track.id);
+            if (details.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
+              track.cover_url = String(details.cover_url).slice(0, 2048);
+            }
+            if (details.album) {
+              track.album = String(details.album).slice(0, 200);
+            }
+            if (details.artist && (!track.artist || track.artist === 'Unknown Artist')) {
+              track.artist = String(details.artist).slice(0, 200);
+            }
+          }
+
+          if (!track.cover_url || !track.album) {
+            try {
+              const dz = await resolveDeezerTrackInfo(track.artist, track.title);
+              if (dz.cover_url && (!track.cover_url || track.cover_url.includes('mosaic.scdn.co'))) {
+                track.cover_url = String(dz.cover_url).slice(0, 2048);
+              }
+              if (dz.album && !track.album) {
+                track.album = String(dz.album).slice(0, 200);
+              }
+              if (dz.duration && (!track.duration_ms || track.duration_ms <= 0)) {
+                track.duration_ms = dz.duration * 1000;
+              }
+            } catch (_) {}
+          }
+
+          const targetDir = getSafeArtistDir(track.artist || 'Unknown Artist');
+          if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
+          }
+
+          const safeTitle = sanitizeFilename(track.title);
+          const outputTemplate = path.join(targetDir, `${safeTitle}.%(ext)s`);
+
+          const success = await runWithPrioritySlot(
+            DownloadPriority.HIGH,
+            `direct:${track.artist} - ${track.title}`,
+            async () => {
+              const existingCandidate = resolveAudioFilePath(targetDir, safeTitle);
+              if (existingCandidate && fs.existsSync(existingCandidate)) {
+                const preProbe = await probeAudioFile(existingCandidate, track.duration_ms);
+                if (preProbe.valid && preProbe.durationSec > 15) {
+                  return true;
+                }
+              }
+
+              return await downloadAudioWithFallback(
+                track.artist,
+                track.title,
+                track.duration_ms,
+                outputTemplate,
+                targetDir,
+                safeTitle,
+                150000,
+                false
+              );
+            }
+          );
+
+          if (!success) {
+            console.warn(`[Download Single Track Background Failed] "${track.artist} - ${track.title}"`);
+            return;
+          }
+
+          const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.mp3`);
+          const probe = await probeAudioFile(finalFile, track.duration_ms);
+          if (track.duration_ms > 30000 && probe.valid && !probe.isHighQuality && probe.reason?.includes('Обрезан')) {
+            console.warn(`[yt-dlp single direct] Truncated audio detected for "${track.artist} - ${track.title}". Discarding.`);
+            try { fs.unlinkSync(finalFile); } catch (_) {}
+            return;
+          }
+
+          const actualDurationMs = (probe.valid && probe.durationSec > 0)
+            ? Math.round(probe.durationSec * 1000)
+            : (track.duration_ms || 180000);
+
+          db.prepare(`
+            UPDATE tracks 
+            SET file_path = ?, duration_ms = ?, bitrate = ?,
+                album = CASE WHEN album IS NULL OR album = '' OR album = '-' OR album = 'Любимые треки' THEN ? ELSE album END,
+                cover_url = CASE WHEN cover_url IS NULL OR cover_url = '' OR cover_url LIKE '%mosaic.scdn.co%' THEN ? ELSE cover_url END
+            WHERE id = ?
+          `).run(finalFile, actualDurationMs, probe.bitrateKbps || 320, track.album || '', track.cover_url || '', pendingTrackId);
+
+          const updatedTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(pendingTrackId);
+          await refreshJellyfinLibrary();
+
+          const safeUpdated = sanitizeTrackRecord(updatedTrack);
+          broadcastToAll({ type: 'TRACK_UPDATED', track: safeUpdated });
+          if (userId && playlistId && playlistId !== -1) {
+            broadcastToUser(userId, { type: 'PLAYLIST_UPDATED', playlistId });
+          }
+          console.log(`[Download Single Track] Background download completed for #${pendingTrackId}: "${track.artist} - ${track.title}"`);
+        } catch (bgErr: any) {
+          console.error(`[Download Single Track Background Error] #${pendingTrackId}:`, bgErr.message);
+        } finally {
+          inFlightTrackIdDownloads.delete(pendingTrackId);
+        }
+      })();
+    }
+
     return {
       success: true,
-      track: sanitizeTrackRecord(newTrack),
+      track: sanitizeTrackRecord(existing),
       addedToPlaylist: !!playlistId && playlistId !== -1,
-      liked: Boolean(isLikedOnly || playlistId === -1)
+      liked: Boolean(isLikedOnly || playlistId === -1),
+      downloading: true,
     };
   } catch (err: any) {
     console.error('[Download Single Track Error]', err);
@@ -2216,7 +2230,10 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
 export function sanitizeTrackRecord(tr: any) {
   if (!tr) return tr;
   const { file_path, ...safe } = tr;
-  return safe;
+  return {
+    ...safe,
+    is_downloaded: Boolean(file_path && String(file_path).trim().length > 0),
+  };
 }
 
 const inFlightRedownloads = new Map<number, Promise<{ success: boolean; track?: any; error?: string }>>();

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, MoreHorizontal, Music2, Heart } from 'lucide-react';
+import { Play, MoreHorizontal, Music2, Heart, Loader2 } from 'lucide-react';
 import { Track } from '../types';
 import { usePlayerStore } from '../store/playerStore';
 import { useI18nStore } from '../store/i18nStore';
@@ -79,9 +79,19 @@ export const TrackRow: React.FC<TrackRowProps> = ({
         </div>
 
         <div className="min-w-0 flex-1">
-          <h4 className={`text-sm font-medium truncate ${isCurrent ? 'text-cat-mauve font-semibold' : 'text-cat-text'}`}>
-            {track.title}
-          </h4>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <h4 className={`text-sm font-medium truncate ${isCurrent ? 'text-cat-mauve font-semibold' : 'text-cat-text'}`}>
+              {track.title}
+            </h4>
+            {(track.is_downloaded === 0 || track.is_downloaded === false) && (
+              <span
+                title={t('Downloading in background (playable)', 'Скачивается в фоне (можно включать)')}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-cat-mauve/15 text-cat-mauve text-[10px] font-medium flex-shrink-0"
+              >
+                <Loader2 className="w-2.5 h-2.5 animate-spin" />
+              </span>
+            )}
+          </div>
           <p className="text-xs text-cat-subtext0 truncate mt-0.5 md:hidden">
             {track.artist}
           </p>

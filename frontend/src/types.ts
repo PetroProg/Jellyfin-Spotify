@@ -19,6 +19,7 @@ export interface Track {
   bitrate?: number | null;
   streamUrl?: string;
   isPreview?: boolean;
+  is_downloaded?: boolean | number;
 }
 
 export interface Playlist {

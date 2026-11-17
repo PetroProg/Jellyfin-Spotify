@@ -361,12 +361,20 @@ export const useSyncStore = create<SyncState>((set, get) => {
 
               case 'TRACK_UPDATED': {
                 if (data.track && data.track.id) {
+                  window.dispatchEvent(new CustomEvent('jellyfy:track_updated', { detail: data.track }));
                   evictTrackOfflineCache(data.track.id).then(() => {
                     const pState = usePlayerStore.getState();
                     if (pState.currentTrack?.id === data.track.id) {
                       pState.reloadCurrentTrackStream(data.track);
                     }
                   });
+                }
+                break;
+              }
+
+              case 'PLAYLIST_UPDATED': {
+                if (data.playlistId) {
+                  window.dispatchEvent(new CustomEvent('jellyfy:playlist_updated', { detail: data.playlistId }));
                 }
                 break;
               }

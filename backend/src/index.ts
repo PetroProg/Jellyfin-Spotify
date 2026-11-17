@@ -48,7 +48,9 @@ import {
   getDownloadSchedulerStats,
   isPathInsideMusicDir,
   matchesArtistPattern,
-  repairVariantTracksIfNeeded
+  repairVariantTracksIfNeeded,
+  getSafeArtistDir,
+  sanitizeFilename
 } from './downloader';
 import { getRecommendations, invalidateUserRecCache } from './recommendations';
 import { getJellyfinStatus } from './jellyfin';
@@ -921,12 +923,67 @@ server.get('/api/stream/:trackId', { config: { compress: false } }, async (req: 
   if (!trackId || !Number.isInteger(trackId) || trackId <= 0) {
     return reply.status(400).send({ error: 'Некорректный ID трека' });
   }
-  const track: any = db.prepare('SELECT file_path FROM tracks WHERE id = ?').get(trackId);
-  if (!track || !track.file_path) {
-    return reply.status(404).send({ error: 'Аудиофайл не найден' });
+  const track: any = db.prepare('SELECT id, title, artist, file_path FROM tracks WHERE id = ?').get(trackId);
+  if (!track) {
+    return reply.status(404).send({ error: 'Трек не найден' });
   }
 
-  const filePath = track.file_path;
+  let filePath: string | null = track.file_path || null;
+  let isPartialStream = false;
+
+  // If the full track hasn't finished downloading yet, look for a playable partial file on disk or stream Deezer preview
+  if (!filePath || !fs.existsSync(filePath)) {
+    const targetDir = getSafeArtistDir(track.artist || 'Unknown Artist');
+    const safeTitle = sanitizeFilename(track.title || 'track');
+    const candidateNames = [
+      `${safeTitle}.mp3`,
+      `${safeTitle}.m4a`,
+      `${safeTitle}.webm`,
+      `${safeTitle}.opus`,
+      `${safeTitle}.mp3.part`,
+      `${safeTitle}.m4a.part`,
+      `${safeTitle}.webm.part`,
+      `${safeTitle}.opus.part`,
+    ];
+
+    filePath = null;
+    for (const cname of candidateNames) {
+      const cpath = path.join(targetDir, cname);
+      try {
+        if (fs.existsSync(cpath)) {
+          const st = fs.statSync(cpath);
+          if (st.size >= 32 * 1024) {
+            filePath = cpath;
+            isPartialStream = true;
+            break;
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (!filePath) {
+      // Fallback: stream instant Deezer 30s preview while yt-dlp downloads the full track in background
+      try {
+        const dz = await resolveDeezerTrackInfo(track.artist, track.title);
+        if (dz?.preview && typeof dz.preview === 'string' && dz.preview.startsWith('http')) {
+          const upstream = await fetch(dz.preview, { signal: AbortSignal.timeout(8000) });
+          if (upstream.ok && upstream.body) {
+            reply.status(200).headers({
+              'Content-Type': 'audio/mpeg',
+              'Cache-Control': 'no-store',
+              'X-Stream-Partial': '1',
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Expose-Headers': 'X-Stream-Partial',
+            });
+            return reply.send(upstream.body);
+          }
+        }
+      } catch (_) {}
+
+      return reply.status(404).send({ error: 'Аудиофайл ещё скачивается' });
+    }
+  }
+
   const resolvedPath = path.resolve(filePath);
   const resolvedMusicDir = path.resolve(MUSIC_DIR);
   if (!resolvedPath.startsWith(resolvedMusicDir + path.sep) && resolvedPath !== resolvedMusicDir) {
@@ -942,10 +999,12 @@ server.get('/api/stream/:trackId', { config: { compress: false } }, async (req: 
   const total = stat.size;
   const range = req.headers.range;
 
-  const ext = path.extname(filePath).toLowerCase();
+  const cleanExtPath = filePath.endsWith('.part') ? filePath.slice(0, -5) : filePath;
+  const ext = path.extname(cleanExtPath).toLowerCase();
   let contentType = 'audio/mpeg';
   if (ext === '.m4a' || ext === '.aac') contentType = 'audio/mp4';
   else if (ext === '.ogg' || ext === '.opus') contentType = 'audio/ogg';
+  else if (ext === '.webm') contentType = 'audio/webm';
   else if (ext === '.flac') contentType = 'audio/flac';
 
   const etag = `W/"track-${trackId}-${stat.mtimeMs}-${total}"`;
@@ -954,23 +1013,26 @@ server.get('/api/stream/:trackId', { config: { compress: false } }, async (req: 
   const clientEtag = (req.headers['if-none-match'] || '').replace(/^W\//, '').replace(/^"|"$/g, '').trim();
   const cleanEtag = `track-${trackId}-${stat.mtimeMs}-${total}`;
 
-  // ETag conditional check (instant 304 response)
-  if (clientEtag && (clientEtag === cleanEtag || clientEtag === '*')) {
+  // ETag conditional check (instant 304 response, skip for partial files)
+  if (!isPartialStream && clientEtag && (clientEtag === cleanEtag || clientEtag === '*')) {
     return reply.status(304).send();
   }
 
-  const baseHeaders = {
+  const baseHeaders: Record<string, any> = {
     'Content-Type': contentType,
     'Accept-Ranges': 'bytes',
-    'Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800',
+    'Cache-Control': isPartialStream ? 'no-store' : 'public, max-age=86400, stale-while-revalidate=604800',
     'ETag': etag,
     'Last-Modified': lastModified,
     'Connection': 'keep-alive',
     'Timing-Allow-Origin': '*',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Range, Content-Range, Accept-Ranges, Cache-Control',
-    'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges, ETag, Cache-Control',
+    'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges, ETag, Cache-Control, X-Stream-Partial',
   };
+  if (isPartialStream) {
+    baseHeaders['X-Stream-Partial'] = '1';
+  }
 
   // 1 MB high-water mark for high-throughput burst delivery over WAN (eliminates buffer starvation on high-ping networks)
   const HIGH_WATER_MARK = 1024 * 1024;
@@ -1182,15 +1244,21 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
   if (!playlist) return reply.status(404).send({ error: 'Плейлист не найден' });
 
   const stats: any = db.prepare(`
-    SELECT COUNT(*) as count, COALESCE(MAX(position), 0) as maxPos, COALESCE(MAX(added_at), '') as maxAdded
-    FROM playlist_tracks WHERE playlist_id = ?
+    SELECT COUNT(*) as count,
+           COALESCE(MAX(pt.position), 0) as maxPos,
+           COALESCE(MAX(pt.added_at), '') as maxAdded,
+           COALESCE(SUM(CASE WHEN t.file_path IS NOT NULL AND t.file_path != '' THEN 1 ELSE 0 END), 0) as dlCount
+    FROM playlist_tracks pt
+    JOIN tracks t ON pt.track_id = t.id
+    WHERE pt.playlist_id = ?
   `).get(playlistId);
 
   const currentCount = Number(stats?.count) || 0;
   const currentMaxPos = Number(stats?.maxPos) || 0;
   const currentMaxAdded = String(stats?.maxAdded || '');
+  const dlCount = Number(stats?.dlCount) || 0;
   const blVer = getUserBlacklistVersion(req.user.id);
-  const currentVersion = `v_${playlistId}_${currentCount}_${currentMaxPos}_${currentMaxAdded}_${playlist.name}_${playlist.cover_url || ''}_${blVer}`;
+  const currentVersion = `v_${playlistId}_${currentCount}_${currentMaxPos}_${currentMaxAdded}_${playlist.name}_${playlist.cover_url || ''}_${blVer}_${dlCount}`;
 
   const clientVersion = req.query.version;
   const knownCount = req.query.knownCount !== undefined ? Number(req.query.knownCount) : -1;
@@ -1216,7 +1284,8 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
 
     if (minPosRow && minPosRow.appendedCount === (currentCount - knownCount)) {
       const rawAdded: any[] = db.prepare(`
-        SELECT t.id, t.spotify_id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, pt.added_at, pt.position
+        SELECT t.id, t.spotify_id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, pt.added_at, pt.position,
+               CASE WHEN t.file_path IS NOT NULL AND t.file_path != '' THEN 1 ELSE 0 END as is_downloaded
         FROM playlist_tracks pt
         JOIN tracks t ON pt.track_id = t.id
         WHERE pt.playlist_id = ? AND pt.position > ?
@@ -1236,7 +1305,8 @@ server.get('/api/playlists/:id', { preHandler: [(server as any).authenticate] },
 
   // Full fetch: single batch query for tracks + 1 query for blacklist filtering
   const rawTracks: any[] = db.prepare(`
-    SELECT t.id, t.spotify_id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, pt.added_at, pt.position
+    SELECT t.id, t.spotify_id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, pt.added_at, pt.position,
+           CASE WHEN t.file_path IS NOT NULL AND t.file_path != '' THEN 1 ELSE 0 END as is_downloaded
     FROM playlist_tracks pt
     JOIN tracks t ON pt.track_id = t.id
     WHERE pt.playlist_id = ?

@@ -651,6 +651,7 @@ export async function cacheTrackOffline(
   externalSignal?: AbortSignal
 ): Promise<boolean> {
   if (typeof window === 'undefined' || !('caches' in window) || !track || !track.id || track.id <= 0) return false;
+  if (track.is_downloaded === false || track.is_downloaded === 0) return false;
 
   const streamUrl = `/api/stream/${track.id}`;
   try {
@@ -688,6 +689,9 @@ export async function cacheTrackOffline(
       });
 
       if (res.ok && (res.status === 200 || res.status === 0)) {
+        if (res.headers.get('x-stream-partial') === '1') {
+          return false;
+        }
         const contentLen = Number(res.headers.get('content-length') || '0');
         if (contentLen > 0 && contentLen < 1024) {
           recordTrackDownloadFailure(track.id);
