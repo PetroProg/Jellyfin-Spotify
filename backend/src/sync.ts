@@ -591,8 +591,8 @@ export function setupWebSocketSync(server: FastifyInstance) {
           clearTimeout(existingTimer);
           disconnectTimers.delete(userId);
         }
-        // Give 45s grace if actively playing, or 10 minutes if paused (prevents mobile background/screen-off freeze from wiping playback)
-        const graceMs = playback.isPlaying ? 45000 : 10 * 60 * 1000;
+        // Give 45s grace if actively playing, or 30 minutes if paused (matches client standby grace period and prevents mobile background/screen-off freeze from wiping playback)
+        const graceMs = playback.isPlaying ? 45000 : 30 * 60 * 1000;
         const timer = setTimeout(() => {
           disconnectTimers.delete(userId);
           const currentClients = userClients.get(userId);
