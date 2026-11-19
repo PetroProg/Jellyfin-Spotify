@@ -142,7 +142,8 @@ export async function checkAndRunNightlyQualityHealer(maxTracksPerNight = 15): P
   const candidates = db.prepare(`
     SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.file_path, t.cover_url, t.spotify_id, t.bitrate
     FROM tracks t
-    WHERE t.file_path LIKE '%.m4a' OR (t.bitrate IS NOT NULL AND t.bitrate < 250)
+    WHERE t.file_path IS NOT NULL AND t.file_path != ''
+      AND (t.file_path LIKE '%.m4a' OR (t.bitrate IS NOT NULL AND t.bitrate < 250))
     ORDER BY
       CASE WHEN EXISTS (SELECT 1 FROM liked_tracks lt WHERE lt.track_id = t.id)
              OR EXISTS (SELECT 1 FROM playlist_tracks pt WHERE pt.track_id = t.id)

@@ -238,8 +238,52 @@ export const SearchImport: React.FC<SearchImportProps> = ({ onOpenPlaylist, onBa
         });
       }
     };
+    const onTrackUpdated = (e: any) => {
+      const updatedTrack: Track | undefined = e.detail;
+      if (!updatedTrack || !updatedTrack.id) return;
+      setLocalResults((prev) => {
+        let changed = false;
+        const next = prev.map((t) => {
+          if (t.id === updatedTrack.id) {
+            changed = true;
+            return { ...t, ...updatedTrack, is_downloaded: updatedTrack.is_downloaded ?? 1 };
+          }
+          return t;
+        });
+        return changed ? next : prev;
+      });
+      setSpotifyResults((prev) => {
+        let changed = false;
+        const next = prev.map((item) => {
+          const matches =
+            item.local_track_id === updatedTrack.id ||
+            item.local_track?.id === updatedTrack.id ||
+            (!!updatedTrack.spotify_id && item.id === updatedTrack.spotify_id);
+          if (matches) {
+            changed = true;
+            const mergedTrack: Track = {
+              ...(item.local_track || {}),
+              ...updatedTrack,
+              is_downloaded: updatedTrack.is_downloaded ?? 1,
+            };
+            return {
+              ...item,
+              is_downloaded: Boolean(mergedTrack.is_downloaded),
+              local_track_id: mergedTrack.id,
+              local_track: mergedTrack,
+            };
+          }
+          return item;
+        });
+        return changed ? next : prev;
+      });
+    };
     window.addEventListener('jellyfy:instant_track_downloaded', onInstantDownloaded);
-    return () => window.removeEventListener('jellyfy:instant_track_downloaded', onInstantDownloaded);
+    window.addEventListener('jellyfy:track_updated', onTrackUpdated);
+    return () => {
+      window.removeEventListener('jellyfy:instant_track_downloaded', onInstantDownloaded);
+      window.removeEventListener('jellyfy:track_updated', onTrackUpdated);
+    };
   }, [playTrack]);
 
   const handlePlayInstant = async (st: SpotifySearchResult) => {

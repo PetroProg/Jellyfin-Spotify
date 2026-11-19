@@ -50,7 +50,7 @@ db.exec(`
     artist TEXT NOT NULL,
     album TEXT,
     duration_ms INTEGER DEFAULT 0,
-    file_path TEXT NOT NULL,
+    file_path TEXT NOT NULL DEFAULT '',
     cover_url TEXT,
     spotify_id TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP

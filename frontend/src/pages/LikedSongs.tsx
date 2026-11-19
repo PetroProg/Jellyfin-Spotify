@@ -205,7 +205,37 @@ export const LikedSongs: React.FC<LikedSongsProps> = ({ onBack }) => {
       );
     };
     window.addEventListener('jellyfy:track_blacklisted', handleBlacklisted);
-    return () => window.removeEventListener('jellyfy:track_blacklisted', handleBlacklisted);
+
+    const handleTrackUpdated = (e: any) => {
+      const updatedTrack: Track | undefined = e.detail;
+      if (!updatedTrack || !updatedTrack.id) return;
+      setTracks((prev) => {
+        let changed = false;
+        const next = prev.map((t) => {
+          if (t.id === updatedTrack.id) {
+            changed = true;
+            return { ...t, ...updatedTrack, is_downloaded: updatedTrack.is_downloaded ?? 1 };
+          }
+          return t;
+        });
+        if (changed) {
+          try {
+            localStorage.setItem(CACHED_LIKED_TRACKS_KEY, JSON.stringify(next));
+          } catch (_) {}
+          const offline = getOfflinePlaylistData(LIKED_PLAYLIST_ID);
+          if (offline) {
+            saveOfflinePlaylistData(offline.playlist, next, false, offline.version);
+          }
+        }
+        return changed ? next : prev;
+      });
+    };
+    window.addEventListener('jellyfy:track_updated', handleTrackUpdated);
+
+    return () => {
+      window.removeEventListener('jellyfy:track_blacklisted', handleBlacklisted);
+      window.removeEventListener('jellyfy:track_updated', handleTrackUpdated);
+    };
   }, []);
 
   const handleBlacklist = async (track: Track) => {

@@ -37,7 +37,7 @@ services:
       - JELLYFIN_URL=http://jellyfin:8096
       - JELLYFIN_PUBLIC_URL=http://100.107.4.120:8096
       - NOTIFY_PHONE_IP=100.76.188.111
-      - JWT_SECRET=catppuccin-jellyfin-spotify-secret-key-change-in-prod
+      - JWT_SECRET=${JWT_SECRET:-}
     depends_on:
       - jellyfin
     deploy:

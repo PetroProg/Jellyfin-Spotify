@@ -1355,6 +1355,7 @@ interface SingleDownloadResult {
   error?: string;
   addedToPlaylist?: boolean;
   liked?: boolean;
+  downloading?: boolean;
 }
 
 const inFlightSingleDownloads = new Map<string, Promise<SingleDownloadResult>>();
@@ -1649,7 +1650,7 @@ export async function downloadSingleSpotifyTrackDirect(
   userId?: number,
   playlistId?: number,
   isLikedOnly?: boolean
-): Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean; liked?: boolean }> {
+): Promise<SingleDownloadResult> {
   const downloadKey = (track.id || `${track.artist}:::${track.title}`).toLowerCase();
   if (inFlightSingleDownloads.has(downloadKey)) {
     const result = await inFlightSingleDownloads.get(downloadKey)!;
@@ -1697,6 +1698,7 @@ export async function downloadSingleSpotifyTrackDirect(
 }
 
 const inFlightTrackIdDownloads = new Set<number>();
+const pendingTrackNotifyUsers = new Map<number, Set<number>>();
 
 async function downloadSingleSpotifyTrackDirectInternal(
   track: SpotifyTrack,
@@ -1771,7 +1773,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
     if (!existing) {
       const info = db.prepare(`
         INSERT INTO tracks (title, artist, album, duration_ms, file_path, cover_url, spotify_id, bitrate)
-        VALUES (?, ?, ?, ?, NULL, ?, ?, 0)
+        VALUES (?, ?, ?, ?, '', ?, ?, NULL)
       `).run(
         track.title,
         track.artist,
@@ -1789,6 +1791,14 @@ async function downloadSingleSpotifyTrackDirectInternal(
     }
 
     const pendingTrackId = Number(existing.id);
+    if (userId) {
+      let recipients = pendingTrackNotifyUsers.get(pendingTrackId);
+      if (!recipients) {
+        recipients = new Set<number>();
+        pendingTrackNotifyUsers.set(pendingTrackId, recipients);
+      }
+      recipients.add(userId);
+    }
 
     // 3. Run metadata resolution + yt-dlp download asynchronously in background
     if (!inFlightTrackIdDownloads.has(pendingTrackId)) {
@@ -1886,6 +1896,19 @@ async function downloadSingleSpotifyTrackDirectInternal(
 
           const safeUpdated = sanitizeTrackRecord(updatedTrack);
           broadcastToAll({ type: 'TRACK_UPDATED', track: safeUpdated });
+          const spotifyIdToNotify = (updatedTrack as any)?.spotify_id || track.id;
+          if (spotifyIdToNotify) {
+            const recipients = pendingTrackNotifyUsers.get(pendingTrackId);
+            if (recipients) {
+              for (const uid of recipients) {
+                broadcastToUser(uid, {
+                  type: 'INSTANT_TRACK_DOWNLOADED',
+                  spotifyId: spotifyIdToNotify,
+                  track: safeUpdated,
+                });
+              }
+            }
+          }
           if (userId && playlistId && playlistId !== -1) {
             broadcastToUser(userId, { type: 'PLAYLIST_UPDATED', playlistId });
           }
@@ -1894,6 +1917,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
           console.error(`[Download Single Track Background Error] #${pendingTrackId}:`, bgErr.message);
         } finally {
           inFlightTrackIdDownloads.delete(pendingTrackId);
+          pendingTrackNotifyUsers.delete(pendingTrackId);
         }
       })();
     }
@@ -1907,7 +1931,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
     };
   } catch (err: any) {
     console.error('[Download Single Track Error]', err);
-    return { success: false, error: err.message };
+    return { success: false, error: 'Не удалось добавить или скачать трек' };
   }
 }
 
@@ -2047,7 +2071,7 @@ const pendingUpgrades = new Set<number>();
 let isSingleUpgradeProcessing = false;
 
 export function queueTrackQualityUpgrade(track: any): void {
-  if (!track || !track.id) return;
+  if (!track || !track.id || !track.file_path) return;
   // If already confirmed high quality (MP3 and bitrate >= 250), nothing to do
   if (track.file_path && track.file_path.endsWith('.mp3') && track.bitrate && track.bitrate >= 250) {
     return;
@@ -2139,6 +2163,7 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
   const allTracks = db.prepare(`
     SELECT t.id, t.title, t.artist, t.album, t.duration_ms, t.file_path, t.cover_url, t.spotify_id, t.bitrate
     FROM tracks t
+    WHERE t.file_path IS NOT NULL AND t.file_path != ''
     ORDER BY
       CASE 
         WHEN t.file_path LIKE '%.m4a' THEN 0
@@ -2172,6 +2197,7 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
       }
 
       const tr = allTracks[i];
+      if (inFlightTrackIdDownloads.has(tr.id)) continue;
       upgradeProgress.current = i + 1;
       upgradeProgress.currentTrack = `${tr.artist} - ${tr.title}`;
 
@@ -2230,9 +2256,13 @@ export async function reDownloadAllTracksInHighQuality(): Promise<{ started: boo
 export function sanitizeTrackRecord(tr: any) {
   if (!tr) return tr;
   const { file_path, ...safe } = tr;
+  const isDownloaded =
+    file_path !== undefined
+      ? Boolean(file_path && String(file_path).trim().length > 0)
+      : Boolean(safe.is_downloaded);
   return {
     ...safe,
-    is_downloaded: Boolean(file_path && String(file_path).trim().length > 0),
+    is_downloaded: isDownloaded,
   };
 }
 

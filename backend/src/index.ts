@@ -949,6 +949,7 @@ server.get('/api/stream/:trackId', { config: { compress: false } }, async (req: 
     filePath = null;
     for (const cname of candidateNames) {
       const cpath = path.join(targetDir, cname);
+      if (!isPathInsideMusicDir(cpath)) continue;
       try {
         if (fs.existsSync(cpath)) {
           const st = fs.statSync(cpath);
@@ -1601,7 +1602,11 @@ server.get('/api/tracks/:id', { preHandler: [(server as any).authenticate] }, as
   if (!trackId || !Number.isInteger(trackId) || trackId <= 0) {
     return reply.status(400).send({ error: 'Некорректный ID трека' });
   }
-  const track: any = db.prepare('SELECT id, title, artist, album, duration_ms, cover_url, spotify_id FROM tracks WHERE id = ?').get(trackId);
+  const track: any = db.prepare(`
+    SELECT id, title, artist, album, duration_ms, cover_url, spotify_id,
+           CASE WHEN file_path IS NOT NULL AND file_path != '' THEN 1 ELSE 0 END as is_downloaded
+    FROM tracks WHERE id = ?
+  `).get(trackId);
   if (!track) return reply.status(404).send({ error: 'Трек не найден' });
   return { track };
 });
@@ -2392,7 +2397,9 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
   // 1. Search Local Database (up to 5 tracks, deduplicated by title & artist)
   const escapedQuery = query.replace(/[%_\\]/g, '\\$&');
   const localTracks = db.prepare(`
-    SELECT id, title, artist, album, duration_ms, cover_url, spotify_id FROM tracks
+    SELECT id, title, artist, album, duration_ms, cover_url, spotify_id,
+           CASE WHEN file_path IS NOT NULL AND file_path != '' THEN 1 ELSE 0 END as is_downloaded
+    FROM tracks
     WHERE LOWER(title) LIKE LOWER(?) ESCAPE '\\' 
        OR LOWER(artist) LIKE LOWER(?) ESCAPE '\\' 
        OR LOWER(album) LIKE LOWER(?) ESCAPE '\\'
@@ -2515,7 +2522,7 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
   // 2. Start background download asynchronously with deduplication
   const bgPromise = downloadSingleSpotifyTrackDirect(track, req.user.id);
   bgPromise.then((res) => {
-    if (res.success && res.track) {
+    if (res.success && res.track && !res.downloading) {
       broadcastToUser(req.user.id, {
         type: 'INSTANT_TRACK_DOWNLOADED',
         spotifyId: track.id,
@@ -2573,7 +2580,7 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
     new Promise<{ timeout: true }>((resolve) => setTimeout(() => resolve({ timeout: true }), 1500))
   ]);
 
-  if ('success' in quickResult && quickResult.success && quickResult.track) {
+  if ('success' in quickResult && quickResult.success && quickResult.track && !quickResult.downloading) {
     return {
       isExisting: true,
       isPreview: false,
@@ -2630,21 +2637,28 @@ server.get('/api/downloads/scheduler/status', { preHandler: [(server as any).aut
 server.get('/api/likes', { preHandler: [(server as any).authenticate] }, async (req: any) => {
   const blVer = getUserBlacklistVersion(req.user.id);
   const stats: any = db.prepare(`
-    SELECT COUNT(*) as count, COALESCE(MAX(created_at), '') as maxAdded, COALESCE(TOTAL(track_id), 0) as idSum
-    FROM liked_tracks WHERE user_id = ?
+    SELECT COUNT(*) as count,
+           COALESCE(MAX(lt.created_at), '') as maxAdded,
+           COALESCE(TOTAL(lt.track_id), 0) as idSum,
+           COALESCE(SUM(CASE WHEN t.file_path IS NOT NULL AND t.file_path != '' THEN 1 ELSE 0 END), 0) as dlCount
+    FROM liked_tracks lt
+    JOIN tracks t ON lt.track_id = t.id
+    WHERE lt.user_id = ?
   `).get(req.user.id);
 
   const currentCount = Number(stats?.count) || 0;
   const currentMaxAdded = String(stats?.maxAdded || '');
   const idSum = Math.round(Number(stats?.idSum) || 0);
-  const currentVersion = `v_likes_${req.user.id}_${currentCount}_${idSum}_${currentMaxAdded}_${blVer}`;
+  const dlCount = Number(stats?.dlCount) || 0;
+  const currentVersion = `v_likes_${req.user.id}_${currentCount}_${idSum}_${currentMaxAdded}_${blVer}_${dlCount}`;
 
   if (req.query.version && req.query.version === currentVersion) {
     return { upToDate: true, version: currentVersion };
   }
 
   const rawTracks: any[] = db.prepare(`
-    SELECT t.id, t.spotify_id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, lt.created_at as added_at
+    SELECT t.id, t.spotify_id, t.title, t.artist, t.album, t.duration_ms, t.cover_url, lt.created_at as added_at,
+           CASE WHEN t.file_path IS NOT NULL AND t.file_path != '' THEN 1 ELSE 0 END as is_downloaded
     FROM liked_tracks lt
     JOIN tracks t ON lt.track_id = t.id
     WHERE lt.user_id = ?
@@ -2673,7 +2687,11 @@ server.post('/api/likes/:trackId', { preHandler: [(server as any).authenticate] 
 
   let trackRow: any = null;
   if (newLikedState) {
-    trackRow = db.prepare('SELECT id, spotify_id, title, artist, album, duration_ms, cover_url FROM tracks WHERE id = ?').get(trackId);
+    trackRow = db.prepare(`
+      SELECT id, spotify_id, title, artist, album, duration_ms, cover_url,
+             CASE WHEN file_path IS NOT NULL AND file_path != '' THEN 1 ELSE 0 END as is_downloaded
+      FROM tracks WHERE id = ?
+    `).get(trackId);
     if (!trackRow) {
       return reply.status(404).send({ error: 'Трек не найден' });
     }
