@@ -18,6 +18,9 @@ import {
   isTrackDownloadedLocally,
   setCurrentlyPlayingTrackId
 } from '../utils/offline';
+import { diag, diagHeartbeat, initPlaybackDiagnostics } from '../utils/playbackDiag';
+
+initPlaybackDiagnostics();
 
 export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
 
@@ -152,7 +155,9 @@ let lastSessionSaveTs = 0;
 const savePlayerSessionState = (state: Partial<PlayerState>, force: boolean = false) => {
   if (typeof localStorage === 'undefined') return;
   const now = Date.now();
-  if (!force && now - lastSessionSaveTs < 3000) return;
+  // In background, serialize the (up to 2×300 tracks) session snapshot less often to save CPU/battery
+  const minIntervalMs = (typeof document !== 'undefined' && document.hidden) ? 15000 : 3000;
+  if (!force && now - lastSessionSaveTs < minIntervalMs) return;
   lastSessionSaveTs = now;
 
   try {
@@ -382,6 +387,138 @@ function deactivateSilentAnchor() {
   }
   if (audio.paused && audioCtx && audioCtx.state === 'running') {
     audioCtx.suspend().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Track-transition MediaSession bridge (Android / Chromium background playback)
+//
+// Changing `audio.src` destroys the element's WebMediaPlayer, so Chromium removes it from
+// MediaSessionImpl until the next track actually starts playing. In the background this leaves
+// the page with NO controllable media session for a moment: Chrome hides the media notification,
+// drops the foreground service and lowers the renderer's process importance — Android (Samsung
+// especially) may then kill the renderer right at the end of a song. WebAudio output does NOT
+// count as a media session on Android, so the infrasonic keep-alive cannot cover this gap.
+//
+// The bridge is a second <audio> element that plays a >5 s near-silent loop ONLY around a track
+// transition (from ~2.5 s before EOF until the next track is really playing). It is torn down
+// completely (src removed + load()) afterwards, so it never lingers in the MediaSession while the
+// user is paused (which was the cause of the earlier Bluetooth-resume bug with silentAnchorAudio).
+// ---------------------------------------------------------------------------------------------
+const transitionBridgeAudio = new Audio();
+transitionBridgeAudio.preload = 'auto';
+transitionBridgeAudio.loop = true;
+transitionBridgeAudio.volume = 1.0;
+mountHiddenAudioElement(transitionBridgeAudio, 'jellyfy-transition-bridge');
+
+let transitionBridgeUrl: string | null = null;
+let isTransitionBridgeActive = false;
+let transitionBridgeSafetyTimer: any = null;
+let transitionBridgeStopTimer: any = null;
+const TRANSITION_BRIDGE_MAX_MS = 45000;
+
+function getTransitionBridgeUrl(): string | null {
+  if (transitionBridgeUrl) return transitionBridgeUrl;
+  try {
+    // 8 s mono 8 kHz 16-bit PCM WAV (≈128 KB). Duration > 5 s so Chromium treats it as a normal
+    // (controllable) player, not a "one-shot" sound. Content: 15 Hz + 19 Hz at ≈ -67 dBFS — inaudible.
+    const sampleRate = 8000;
+    const seconds = 8;
+    const numSamples = sampleRate * seconds;
+    const dataSize = numSamples * 2;
+    const buf = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buf);
+    const writeStr = (offset: number, s: string) => {
+      for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+    };
+    writeStr(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, 1, true); // mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, 'data');
+    view.setUint32(40, dataSize, true);
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / sampleRate;
+      const v = 0.00045 * Math.sin(2 * Math.PI * 15 * t) + 0.00045 * Math.cos(2 * Math.PI * 19 * t);
+      view.setInt16(44 + i * 2, Math.round(v * 32767), true);
+    }
+    transitionBridgeUrl = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  } catch (_) {
+    transitionBridgeUrl = null;
+  }
+  return transitionBridgeUrl;
+}
+
+function startTransitionBridge(reason: string) {
+  if (typeof document === 'undefined') return;
+  if (transitionBridgeStopTimer) {
+    clearTimeout(transitionBridgeStopTimer);
+    transitionBridgeStopTimer = null;
+  }
+  if (isTransitionBridgeActive && !transitionBridgeAudio.paused) return;
+  const url = getTransitionBridgeUrl();
+  if (!url) return;
+
+  isTransitionBridgeActive = true;
+  try {
+    if (transitionBridgeAudio.src !== url) {
+      transitionBridgeAudio.src = url;
+    }
+    const p = transitionBridgeAudio.play();
+    if (p !== undefined) {
+      p.catch((err) => {
+        diag(`[bridge] play() failed: ${err?.name || err}`);
+        isTransitionBridgeActive = false;
+      });
+    }
+    diag(`[bridge] start (${reason})`);
+  } catch (_) {
+    isTransitionBridgeActive = false;
+  }
+
+  if (transitionBridgeSafetyTimer) clearTimeout(transitionBridgeSafetyTimer);
+  transitionBridgeSafetyTimer = setTimeout(() => {
+    transitionBridgeSafetyTimer = null;
+    diag('[bridge] safety timeout reached');
+    stopTransitionBridge('safety-timeout', true);
+  }, TRANSITION_BRIDGE_MAX_MS);
+}
+
+function stopTransitionBridge(reason: string, immediate = false) {
+  if (!isTransitionBridgeActive && transitionBridgeAudio.paused && !transitionBridgeAudio.getAttribute('src')) return;
+
+  const doStop = () => {
+    transitionBridgeStopTimer = null;
+    if (transitionBridgeSafetyTimer) {
+      clearTimeout(transitionBridgeSafetyTimer);
+      transitionBridgeSafetyTimer = null;
+    }
+    isTransitionBridgeActive = false;
+    try {
+      transitionBridgeAudio.pause();
+      // Fully destroy the WebMediaPlayer so it is removed from Chromium's MediaSession
+      transitionBridgeAudio.removeAttribute('src');
+      transitionBridgeAudio.load();
+    } catch (_) {}
+    diag(`[bridge] stop (${reason})`);
+  };
+
+  if (transitionBridgeStopTimer) {
+    clearTimeout(transitionBridgeStopTimer);
+    transitionBridgeStopTimer = null;
+  }
+  if (immediate) {
+    doStop();
+  } else {
+    // Small hand-over delay so Chromium registers the new main player before the bridge leaves
+    transitionBridgeStopTimer = setTimeout(doStop, 1200);
   }
 }
 
@@ -830,6 +967,7 @@ function startPlaybackWatchdog() {
     const cur = audio.currentTime || 0;
     if (!store.currentTrack.isPreview && audio.ended) {
       console.log('[Watchdog] Track ended in background, advancing queue...');
+      diag('[watchdog] track ended without onended → advancing');
       markTrackTransitionStart();
       if (store.repeat === 'one') {
         audio.currentTime = 0;
@@ -854,6 +992,7 @@ function startPlaybackWatchdog() {
       lastWatchdogWallTime = Date.now();
     } else if (Date.now() - lastWatchdogWallTime > 8000) {
       console.warn('[Watchdog] Playhead frozen for >8s in background, triggering stream recovery...');
+      diag(`[watchdog] playhead frozen at ${cur.toFixed(1)}s → recovery`);
       lastWatchdogWallTime = Date.now();
       recoverAudioStream(cur > 0 ? cur : store.currentTime, true);
     }
@@ -871,7 +1010,12 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
   // so Chromium keeps the renderer audible and at high importance during track handover.
   if (autoPlay) {
     activateSilentAnchor(false);
+    // Hold the Android MediaSession / media notification while audio.src is swapped in background
+    if (typeof document !== 'undefined' && document.hidden) {
+      startTransitionBridge(`track #${track.id}`);
+    }
   }
+  diag(`[track] start #${track.id} autoPlay=${autoPlay} hidden=${typeof document !== 'undefined' && document.hidden} blob=${Boolean(track.id > 0 && getSynchronousBlobUrl(track.id))}`);
 
   // If track has an explicit streamUrl (e.g. instant streaming from search)
   if (track.streamUrl) {
@@ -1117,6 +1261,7 @@ async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true)
     }
 
     console.log(`[Audio Recovery] Reconnecting stream for "${track.title}" at ${targetTime.toFixed(1)}s (autoPlay: ${autoPlay})`);
+    diag(`[recovery] #${track.id} at ${targetTime.toFixed(1)}s autoPlay=${autoPlay}`);
 
     // 1. Check local offline cache first for instant 0ms playback without internet
     let targetSrc = getSynchronousBlobUrl(track.id);
@@ -1295,7 +1440,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     wasInterruptedByExternalApp = false;
     stopPlaybackWatchdog();
     releaseScreenWakeLock();
+    stopTransitionBridge('main paused', true);
     activateSilentAnchor(true);
+    diag(`[pause] main element paused at ${cur.toFixed(1)}/${(dur || 0).toFixed(1)}s hidden=${document.hidden}`);
+    diagHeartbeat(false, get().currentTrack?.id);
 
     set({ isPlaying: false });
     if ('mediaSession' in navigator) {
@@ -1314,6 +1462,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     const err = audio.error;
     const { currentTrack, isPlaying } = get();
     console.warn('[Audio Error Event]: code =', err?.code, 'message =', err?.message, 'track =', currentTrack?.title);
+    diag(`[error] media error code=${err?.code} track=#${currentTrack?.id} online=${navigator.onLine}`);
 
     if (!currentTrack) return;
 
@@ -1359,6 +1508,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       consecutiveErrors = 0;
       networkRetryCount = 0;
       set({ isPlaying: false });
+      stopTransitionBridge('playback error', true);
       if ('mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'paused';
       }
@@ -1389,6 +1539,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       navigator.mediaSession.playbackState = 'playing';
     }
     updateMediaPositionState();
+    // Main element is really playing again → hand the MediaSession back and remove the bridge
+    if (isTransitionBridgeActive) {
+      stopTransitionBridge('main playing');
+    }
+    diag(`[playing] #${get().currentTrack?.id} at ${(audio.currentTime || 0).toFixed(1)}s src=${audio.src.startsWith('blob:') ? 'blob' : 'net'}`);
+    diagHeartbeat(true, get().currentTrack?.id);
     // Restart prefetch schedule once playback is actively flowing (after any initial onwaiting event)
     scheduleNextTrackPrefetch();
   };
@@ -1450,6 +1606,22 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     set(update);
     savePlayerSessionState(get(), false);
 
+    // Pre-arm the MediaSession bridge ~2.5 s before EOF while in background, so a controllable
+    // player is already registered when audio.src is swapped to the next track.
+    {
+      const bridgeDur = (dur && isFinite(dur) && dur > 5) ? dur : 0;
+      if (bridgeDur > 0 && !audio.paused && !get().currentTrack?.isPreview) {
+        const remainingSec = bridgeDur - cur;
+        const isHidden = typeof document !== 'undefined' && document.hidden;
+        if (isHidden && remainingSec <= 2.5 && remainingSec > 0 && !isTransitionBridgeActive && get().repeat !== 'one') {
+          startTransitionBridge('pre-EOF');
+        } else if (isTransitionBridgeActive && !isTransitioningTrack && remainingSec > 6 && !transitionBridgeStopTimer) {
+          // User seeked back / track restarted: the bridge is no longer needed
+          stopTransitionBridge('seek away from EOF');
+        }
+      }
+    }
+
     // Event-driven next-track prefetching: immune to Chrome's 5-minute background setTimeout throttling!
     if (cur >= 6 && !isPrefetching) {
       triggerEventDrivenPrefetch();
@@ -1507,6 +1679,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       markTrackTransitionStart();
       cancelFade();
       restoreTargetVolume();
+      diag(`[transition] pre-roll at ${cur.toFixed(1)}/${mediaDur.toFixed(1)}s hidden=${!isAppVisible} bridge=${isTransitionBridgeActive}`);
       if (!useSyncStore.getState().isLocalActive) {
         useSyncStore.setState({ isLocalActive: true });
       }
@@ -1526,6 +1699,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     const syncIntervalMs = isAppVisible ? 2000 : 10000;
     if (now - lastSyncTime > syncIntervalMs) {
       lastSyncTime = now;
+      diagHeartbeat(!audio.paused, get().currentTrack?.id);
       updateMediaPositionState(cur, update.duration || get().duration);
       if (useSyncStore.getState().isLocalActive) {
         useSyncStore.getState().sendPlaybackState({ currentTime: cur, duration: update.duration || get().duration });
@@ -1538,6 +1712,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   audio.oncanplay = handleAudioDuration;
 
   audio.onended = () => {
+    diag(`[ended] #${get().currentTrack?.id} transitioning=${isTransitioningTrack}`);
     if (isTransitioningTrack && Date.now() - lastTrackTransitionWallTime < 2500) return;
     markTrackTransitionStart();
 
@@ -2034,7 +2209,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       useSyncStore.getState().sendPlaybackState({ currentTime: 0, duration: initialDur, isPlaying: true });
       scheduleNextTrackPrefetch();
       prefetchRecommendationsIfNeeded();
-      prewarmQueueBlobUrls(q, idx + 1, 6);
+      // Defer queue Blob pre-warming (6× cache lookups + HEAD validations) so it never competes
+      // with the network/cache start of the new track at the transition moment
+      setTimeout(() => prewarmQueueBlobUrls(q, idx + 1, 6), 4000);
     },
 
     playTrackLocally: (track, newQueue, index, startTime, autoPlay = true, playlistId) => {
@@ -2072,7 +2249,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       useSyncStore.getState().sendPlaybackState();
       scheduleNextTrackPrefetch();
       prefetchRecommendationsIfNeeded();
-      prewarmQueueBlobUrls(q, idx + 1, 6);
+      // Defer queue Blob pre-warming (6× cache lookups + HEAD validations) so it never competes
+      // with the network/cache start of the new track at the transition moment
+      setTimeout(() => prewarmQueueBlobUrls(q, idx + 1, 6), 4000);
     },
 
     stopLocalPlayback: () => {
@@ -2081,6 +2260,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       try {
         audio.pause();
       } catch (_) {}
+      stopTransitionBridge('stop local playback', true);
       deactivateSilentAnchor();
       releaseScreenWakeLock();
     },
@@ -2221,6 +2401,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       isUserInitiatedPause = true;
       wasInterruptedByExternalApp = false;
       releaseScreenWakeLock();
+      stopTransitionBridge('user pause', true);
+      diagHeartbeat(false, get().currentTrack?.id);
 
       const isLocal = useSyncStore.getState().isLocalActive;
       if (!isLocal) {
@@ -2368,8 +2550,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
 
       // End of playback
+      diag('[queue] end of queue reached — playback stopped');
       markTrackTransitionEnd();
       stopPlaybackWatchdog();
+      stopTransitionBridge('end of queue', true);
       set({ isPlaying: false });
       deactivateSilentAnchor();
       releaseScreenWakeLock();

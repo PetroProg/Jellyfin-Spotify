@@ -39,6 +39,7 @@ import { getOfflineStorageUsage, clearAllOfflineCache } from '../utils/offline';
 import { BlacklistItem, DownloadJob, Playlist } from '../types';
 import { toast, confirmDialog } from '../store/toastStore';
 import { useI18nStore } from '../store/i18nStore';
+import { getDiagLogText, clearDiagLog } from '../utils/playbackDiag';
 
 interface SettingsProps {
   onBack?: () => void;
@@ -193,6 +194,22 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const [exportingBackup, setExportingBackup] = useState(false);
   const [importingBackup, setImportingBackup] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleCopyDiagnostics = async () => {
+    const text = getDiagLogText();
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success(t('Diagnostics copied to clipboard', 'Диагностика скопирована в буфер обмена'));
+    } catch (_) {
+      // Clipboard API unavailable (insecure context): fall back to a downloadable text file
+      const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `jellyfy-playback-diag-${Date.now()}.txt`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }
+  };
 
   const handleExportBackup = async () => {
     try {
@@ -1494,6 +1511,47 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
               onChange={handleFileSelected}
               className="hidden"
             />
+          </div>
+        </section>
+
+        {/* 4.6 Playback Diagnostics */}
+        <section className="bg-cat-mantle p-6 rounded-3xl border border-cat-surface0/60 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-xl bg-cat-peach/20 text-cat-peach">
+              <Radio className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="font-bold text-base text-cat-text">
+                {t('Background Playback Diagnostics', 'Диагностика фонового воспроизведения')}
+              </h2>
+              <p className="text-xs text-cat-subtext0 mt-0.5">
+                {t(
+                  'Log of track transitions, page freezes and app kills — helps find why playback stops in background',
+                  'Журнал переходов между треками, заморозок страницы и закрытий приложения — помогает понять, почему музыка останавливается в фоне'
+                )}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={handleCopyDiagnostics}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-text font-semibold text-xs transition-colors cursor-pointer"
+            >
+              <Copy className="w-4 h-4 text-cat-mauve" />
+              <span>{t('Copy log', 'Скопировать журнал')}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                clearDiagLog();
+                toast.success(t('Diagnostics cleared', 'Журнал очищен'));
+              }}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-text font-semibold text-xs transition-colors cursor-pointer"
+            >
+              <Trash2 className="w-4 h-4 text-cat-red" />
+              <span>{t('Clear', 'Очистить')}</span>
+            </button>
           </div>
         </section>
 
