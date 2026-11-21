@@ -1152,6 +1152,7 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
       }
 
       const applySeek = () => {
+        if (reqId !== currentPlayRequestId) return;
         try {
           if (startTime > 0) audio.currentTime = startTime;
         } catch (_) {}
@@ -1182,8 +1183,11 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
             if (reqId !== currentPlayRequestId) return;
             setInternalSrcChange(false);
             console.warn('[Audio instant play interrupted / autoplay]:', err);
+            if (err?.name === 'NotSupportedError' || audio.error !== null) {
+              return;
+            }
             setTimeout(() => {
-              if (reqId !== currentPlayRequestId || isUserInitiatedPause || !audio.paused) return;
+              if (reqId !== currentPlayRequestId || isUserInitiatedPause || !audio.paused || audio.error !== null) return;
               audio.play().catch(() => {
                 if (reqId === currentPlayRequestId && !isUserInitiatedPause) {
                   recoverAudioStream(startTime || 0, true);
@@ -1214,6 +1218,7 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
     }
 
     const applySeek = () => {
+      if (reqId !== currentPlayRequestId) return;
       try {
         if (startTime > 0) {
           audio.currentTime = startTime;
@@ -1258,9 +1263,14 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
             toast.info(tr('Click anywhere to enable audio on this device', 'Нажмите в любом месте для включения звука на этом устройстве'));
             return;
           }
+          // If the underlying media element already failed (e.g. HTTP 404 / NotSupportedError),
+          // let audio.onerror handle recovery or skipping instead of racing with a blind retry.
+          if (err?.name === 'NotSupportedError' || audio.error !== null) {
+            return;
+          }
           // Automatic retry after 200ms if play() was interrupted at track boundary in background
           setTimeout(() => {
-            if (reqId !== currentPlayRequestId || isUserInitiatedPause || !audio.paused) return;
+            if (reqId !== currentPlayRequestId || isUserInitiatedPause || !audio.paused || audio.error !== null) return;
             if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
               audioCtx.resume().catch(() => {});
             }
@@ -1425,11 +1435,63 @@ const updateMediaPositionState = (cur?: number, dur?: number) => {
 };
 
 let networkRetryCount = 0;
+let consecutiveErrors = 0;
 let isRecoveringStream = false;
 let errorRecoveryTimeout: any = null;
 let stallTimeout: any = null;
 let waitingTimeout: any = null;
 let downloadedInstantTrack: Track | null = null;
+
+async function isTrackMissingOnServer(trackId: number): Promise<boolean> {
+  if (!trackId || trackId <= 0) return false;
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(`/api/stream/${trackId}`, {
+      method: 'HEAD',
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+    clearTimeout(timer);
+    return res.status === 404 || res.status === 410 || res.status === 403;
+  } catch {
+    return false;
+  }
+}
+
+function skipUnavailableTrack(track: Track, reason: string) {
+  const store = usePlayerStore.getState();
+  if (!store.currentTrack || store.currentTrack.id !== track.id) return;
+  if (isUserInitiatedPause) return;
+
+  consecutiveErrors++;
+  networkRetryCount = 0;
+
+  if (consecutiveErrors >= 3) {
+    consecutiveErrors = 0;
+    usePlayerStore.setState({ isPlaying: false, isBuffering: false });
+    stopTransitionBridge('playback error', true);
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = 'paused';
+    }
+    diag(`[error] 3 consecutive track failures (${reason}) → stopped`, true);
+    toast.error(tr('Playback error: network connection lost', 'Ошибка воспроизведения: потеряно подключение к сети'));
+    return;
+  }
+
+  diag(`[error] skipping #${track.id} (${reason}, streak=${consecutiveErrors}/3)`, true);
+  toast.warning(tr(`Skipping «${track.title}»`, `Пропуск «${track.title}» (файл недоступен)`));
+  if (typeof document !== 'undefined' && document.hidden) {
+    startTransitionBridge(`skip #${track.id}`);
+  }
+  if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
+  errorRecoveryTimeout = setTimeout(() => {
+    const latest = usePlayerStore.getState();
+    if (isUserInitiatedPause || !latest.currentTrack || latest.currentTrack.id !== track.id) return;
+    latest.nextTrack();
+  }, 300);
+}
 
 /**
  * Resilient stream recovery when network drops, switches from Wi-Fi to LTE,
@@ -1524,12 +1586,19 @@ async function recoverAudioStream(
     audio.src = targetSrc;
     audio.load();
 
-    // 4. Wait for metadata or canplay before restoring playback position
+    // 4. Wait for metadata, canplay, or immediate error before restoring playback position
     await new Promise<void>((resolve) => {
       let resolved = false;
+      const cleanupListeners = () => {
+        audio.removeEventListener('loadedmetadata', onCanPlay);
+        audio.removeEventListener('canplay', onCanPlay);
+        audio.removeEventListener('error', onLoadError);
+      };
       const done = () => {
         if (!resolved) {
           resolved = true;
+          clearTimeout(fallbackTimer);
+          cleanupListeners();
           resolve();
         }
       };
@@ -1537,7 +1606,6 @@ async function recoverAudioStream(
       const fallbackTimer = setTimeout(done, 4000);
 
       const onCanPlay = () => {
-        clearTimeout(fallbackTimer);
         if (targetTime > 0 && isFinite(targetTime)) {
           try {
             audio.currentTime = Math.min(targetTime, audio.duration || targetTime);
@@ -1548,11 +1616,17 @@ async function recoverAudioStream(
         done();
       };
 
-      if (audio.readyState >= 1) {
-        onCanPlay();
+      const onLoadError = () => {
+        done();
+      };
+
+      if (audio.readyState >= 1 || audio.error !== null) {
+        if (audio.readyState >= 1) onCanPlay();
+        else done();
       } else {
         audio.addEventListener('loadedmetadata', onCanPlay, { once: true });
         audio.addEventListener('canplay', onCanPlay, { once: true });
+        audio.addEventListener('error', onLoadError, { once: true });
       }
     });
 
@@ -1574,14 +1648,24 @@ async function recoverAudioStream(
         networkRetryCount = 0;
       } catch (playErr: any) {
         setInternalSrcChange(false);
-        stopTransitionBridge('recovery ended', true);
         console.warn('[Play after recovery failed]:', playErr);
         diag(`[recovery] play() failed: ${playErr?.name || playErr}`, true);
-        if (playErr.name === 'NotAllowedError') {
+        if (playErr?.name === 'NotAllowedError') {
+          stopTransitionBridge('recovery ended', true);
           usePlayerStore.setState({ isPlaying: false, isBuffering: false });
           if ('mediaSession' in navigator) {
             navigator.mediaSession.playbackState = 'paused';
           }
+        } else if (playErr?.name === 'NotSupportedError' || audio.error?.code === 4) {
+          const missing = await isTrackMissingOnServer(track.id);
+          if (missing || (typeof navigator !== 'undefined' && navigator.onLine)) {
+            usePlayerStore.setState({ isBuffering: false });
+            skipUnavailableTrack(track, missing ? 'recovery HTTP 404' : 'recovery NotSupportedError');
+          } else {
+            stopTransitionBridge('recovery ended', true);
+          }
+        } else {
+          stopTransitionBridge('recovery ended', true);
         }
       }
     } else {
@@ -1656,6 +1740,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       return;
     }
 
+    // 1b. Ignore browser-generated pause triggered by a fatal media load error (e.g. HTTP 404 / MEDIA_ERR_SRC_NOT_SUPPORTED)
+    //     so audio.onerror / skipUnavailableTrack can recover or advance the queue instead of treating it as a user pause.
+    if (audio.error !== null && get().isPlaying && !isUserInitiatedPause) {
+      return;
+    }
+
     // 2. If the track reached the end, this is a natural EOF pause preceding 'ended', NOT an interruption
     const cur = audio.currentTime;
     const dur = (audio.duration && isFinite(audio.duration) && audio.duration > 0) ? audio.duration : get().duration;
@@ -1692,8 +1782,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     useSyncStore.getState().sendPlaybackState({ isPlaying: false });
   };
 
-  let consecutiveErrors = 0;
-
   audio.onerror = () => {
     markTrackTransitionEnd();
     setInternalSrcChange(false);
@@ -1705,27 +1793,68 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     if (!currentTrack) return;
 
+    // If recoverAudioStream is actively running, let it handle the error itself (avoids duplicate retries/skips)
+    if (isRecoveringStream) return;
+
     const savedPos = audio.currentTime > 0 ? audio.currentTime : get().currentTime;
 
-    // Never call audio.load() / mutate audio.src while paused: Chromium removes the MediaSession
+    // Never call audio.load() / mutate audio.src while genuinely paused: Chromium removes the MediaSession
     // player and tears down the Android Media Notification when load() runs without play().
-    if (!isPlaying || isUserInitiatedPause || audio.paused) {
+    // Note: do NOT check audio.paused here — Chromium sets audio.paused = true before firing 'error' on
+    // MEDIA_ERR_SRC_NOT_SUPPORTED (e.g. HTTP 404), which would otherwise suppress auto-skip & recovery.
+    if (!isPlaying || isUserInitiatedPause) {
       pendingRecoveryOnResume = true;
       pendingRecoveryTime = savedPos;
       console.log(`[Audio Error while paused] Deferring stream recovery at ${savedPos.toFixed(1)}s until resume to keep MediaSession alive.`);
       return;
     }
 
-    // Check if offline or network stream failure:
+    const failedTrack = currentTrack;
+    const errCode = err?.code;
+    const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+
+    // Fast-path for MEDIA_ERR_SRC_NOT_SUPPORTED (code=4) while online:
+    // probe HEAD to immediately distinguish a missing file (HTTP 404) from a transient network/gateway error.
+    if (errCode === 4 && !isOffline && failedTrack.id > 0 && !failedTrack.streamUrl) {
+      isTrackMissingOnServer(failedTrack.id).then((missing) => {
+        const latest = get();
+        if (isUserInitiatedPause || !latest.isPlaying || latest.currentTrack?.id !== failedTrack.id) return;
+
+        if (missing) {
+          skipUnavailableTrack(failedTrack, 'HTTP 404');
+          return;
+        }
+
+        if (networkRetryCount < 2) {
+          networkRetryCount++;
+          console.warn(`[Audio Error] Source not supported (transient?). Retry ${networkRetryCount}/2 at ${savedPos.toFixed(1)}s...`);
+          if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
+          const delay = 600 + networkRetryCount * 700;
+          errorRecoveryTimeout = setTimeout(() => {
+            const cur = get();
+            if (!cur.isPlaying || isUserInitiatedPause || cur.currentTrack?.id !== failedTrack.id) return;
+            recoverAudioStream(savedPos, true);
+          }, delay);
+          return;
+        }
+
+        skipUnavailableTrack(failedTrack, 'code=4 retries exhausted');
+      }).catch(() => {
+        skipUnavailableTrack(failedTrack, 'code=4 probe failed');
+      });
+      return;
+    }
+
+    // Check if offline or network/decode stream failure:
     // MediaError.MEDIA_ERR_NETWORK (2)
     // MediaError.MEDIA_ERR_DECODE (3 - abruptly severed stream causes decode error at EOF)
-    // MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED (4 - 504 / network fetch failure)
-    const isNetworkErr = (typeof navigator !== 'undefined' && !navigator.onLine) ||
-      err?.code === 2 || err?.code === 3 || err?.code === 4;
+    // MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED (4 when offline or instant streamUrl)
+    const isNetworkErr = isOffline || errCode === 2 || errCode === 3 || errCode === 4;
+    const maxRetries = errCode === 4 ? 2 : 10;
 
-    if (isNetworkErr && networkRetryCount < 10) {
+    if (isNetworkErr && networkRetryCount < maxRetries) {
       networkRetryCount++;
-      console.warn(`[Audio Error] Network stream interrupted. Attempting auto-reconnect ${networkRetryCount}/10 at ${savedPos.toFixed(1)}s...`);
+      console.warn(`[Audio Error] Network stream interrupted. Attempting auto-reconnect ${networkRetryCount}/${maxRetries} at ${savedPos.toFixed(1)}s...`);
 
       if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
       const delay = Math.min(4000, 400 + networkRetryCount * 500);
@@ -1741,25 +1870,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       return;
     }
 
-    // If persistent non-network error or retries exhausted
-    consecutiveErrors++;
-    if (consecutiveErrors >= 3) {
-      consecutiveErrors = 0;
-      networkRetryCount = 0;
-      set({ isPlaying: false, isBuffering: false });
-      stopTransitionBridge('playback error', true);
-      if ('mediaSession' in navigator) {
-        navigator.mediaSession.playbackState = 'paused';
-      }
-      toast.error(tr('Playback error: network connection lost', 'Ошибка воспроизведения: потеряно подключение к сети'));
-      return;
-    }
-
-    toast.warning(tr(`Skipping «${currentTrack.title}»`, `Пропуск «${currentTrack.title}» (файл недоступен)`));
-    if (errorRecoveryTimeout) clearTimeout(errorRecoveryTimeout);
-    errorRecoveryTimeout = setTimeout(() => {
-      get().nextTrack();
-    }, 400);
+    // Persistent error or retries exhausted → skip to next track
+    skipUnavailableTrack(failedTrack, `code=${errCode ?? 'unknown'}`);
   };
 
   audio.onplaying = () => {
@@ -2366,6 +2478,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audio.src = streamUrl;
         updateMediaSession(restoredTrack);
         const applyRestoredPos = () => {
+          if (get().currentTrack?.id !== restoredTrack.id) return;
           try {
             if (restoredTime > 0 && isFinite(audio.duration) && restoredTime < audio.duration) {
               audio.currentTime = restoredTime;

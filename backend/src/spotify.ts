@@ -1091,10 +1091,13 @@ function generateDeezerCandidateQueries(artist: string, title: string): string[]
   const queries: string[] = [];
 
   const cleanTitle = title
-    .replace(/\s*\((feat\.|ft\.|with|remix|acoustic|radio edit|deluxe|version)[^)]*\)/gi, '')
-    .replace(/\s*\[(feat\.|ft\.|with|remix|acoustic|radio edit|deluxe|version)[^\]]*\]/gi, '')
+    .replace(/\s*\((feat\.|ft\.|with|remix|acoustic|radio edit|deluxe|version|digitally remastered|remaster(?:ed)?)[^)]*\)/gi, '')
+    .replace(/\s*\[(feat\.|ft\.|with|remix|acoustic|radio edit|deluxe|version|digitally remastered|remaster(?:ed)?)[^\]]*\]/gi, '')
     .replace(/\s*\([^)]*\)/g, '')
     .replace(/\s*\[[^\]]*\]/g, '')
+    .replace(/\s*-\s*(?:\d{4}\s*-\s*)?(?:digitally\s+)?remaster(?:ed)?(?:\s+\d{4})?(?:\s+version)?\s*$/gi, '')
+    .replace(/\s*-\s*(?:single|album|radio|deluxe)\s+(?:version|edit)\s*$/gi, '')
+    .replace(/\s*-\s*from\s+["«']?[^"»']+["»']?\s+soundtrack\s*$/gi, '')
     .trim() || title;
 
   const artistParts = artist
