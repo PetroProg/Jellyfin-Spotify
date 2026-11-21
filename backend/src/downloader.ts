@@ -5,6 +5,8 @@ import { db } from './db';
 import { refreshJellyfinLibrary } from './jellyfin';
 import { SpotifyTrack, resolveSpotifyTrackDetails, fetchSpotifyPlaylist, resolveDeezerTrackInfo } from './spotify';
 import { broadcastToUser, broadcastToAll } from './sync';
+import { invalidateTrackStreamMeta } from './streamOptimizer';
+import { invalidateTranscodeCacheForTrack } from './transcoder';
 
 const MUSIC_DIR = process.env.MUSIC_DIR || path.join(process.cwd(), 'music');
 
@@ -1604,6 +1606,8 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
       }
 
       const freshTrack: any = db.prepare('SELECT * FROM tracks WHERE id = ?').get(trackId);
+      invalidateTrackStreamMeta(Number(trackId));
+      invalidateTranscodeCacheForTrack(Number(trackId)).catch(() => {});
       workerResolve({ success: true, track: freshTrack });
       broadcastToAll({ type: 'TRACK_UPDATED', track: sanitizeTrackRecord(freshTrack) });
 
@@ -1892,6 +1896,8 @@ async function downloadSingleSpotifyTrackDirectInternal(
           `).run(finalFile, actualDurationMs, probe.bitrateKbps || 320, track.album || '', track.cover_url || '', pendingTrackId);
 
           const updatedTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(pendingTrackId);
+          invalidateTrackStreamMeta(pendingTrackId);
+          invalidateTranscodeCacheForTrack(pendingTrackId).catch(() => {});
           await refreshJellyfinLibrary();
 
           const safeUpdated = sanitizeTrackRecord(updatedTrack);
@@ -2056,6 +2062,8 @@ export async function upgradeSingleTrackFile(tr: any): Promise<boolean> {
   const updatedDur = Math.round(newProbe.durationSec * 1000) || tr.duration_ms;
   const newBitrate = newProbe.bitrateKbps || 320;
   db.prepare('UPDATE tracks SET file_path = ?, duration_ms = ?, bitrate = ? WHERE id = ?').run(destinationFile, updatedDur, newBitrate, tr.id);
+  invalidateTrackStreamMeta(tr.id);
+  invalidateTranscodeCacheForTrack(tr.id).catch(() => {});
 
   broadcastToAll({
     type: 'TRACK_QUALITY_UPGRADED',
@@ -2359,6 +2367,8 @@ async function redownloadTrackStudioMasterInternal(trackId: number): Promise<{ s
 
     db.prepare('UPDATE tracks SET file_path = ?, duration_ms = ?, bitrate = ? WHERE id = ?')
       .run(finalFile, actualDurationMs, probe.bitrateKbps || 320, track.id);
+    invalidateTrackStreamMeta(track.id);
+    invalidateTranscodeCacheForTrack(track.id).catch(() => {});
 
     const updatedTrack: any = db.prepare('SELECT * FROM tracks WHERE id = ?').get(track.id);
     const safeTrack = sanitizeTrackRecord(updatedTrack);

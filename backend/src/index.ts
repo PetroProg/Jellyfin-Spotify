@@ -59,6 +59,22 @@ import { getOrGenerateDailyMixes, saveDailyMixAsPlaylist } from './dailyMix';
 import { startNightlyScheduler, getNightlySchedulerStatus, updateNightlySchedule } from './nightlyScheduler';
 import { getOrGenerateJwtSecret } from './authSecret';
 import { resolveAndSavePlaylistCover, initPlaylistCoversBackfill } from './playlistCover';
+import { getCachedMp3Offset, invalidateTrackStreamMeta } from './streamOptimizer';
+import {
+  parseStreamQuality,
+  parseStreamFormat,
+  getTranscodeContentType,
+  getCachedTranscodePath,
+  getInFlightTranscodeJob,
+  canStartLiveTranscode,
+  ensureTranscodedFile,
+  streamAndCacheTranscode,
+  enqueuePrepareTracks,
+  touchCacheFile,
+  getTranscodeCacheStats,
+  StreamQuality,
+  StreamFormat,
+} from './transcoder';
 
 dotenv.config();
 
@@ -76,6 +92,7 @@ setGlobalDispatcher(globalDispatcher);
 const server = Fastify({ 
   logger: false,
   trustProxy: true,
+  keepAliveTimeout: 65000,
   bodyLimit: 15 * 1024 * 1024 // 15 MB limit for high-res cover uploads and bulk sync payloads
 });
 
@@ -854,6 +871,125 @@ server.post('/api/user/library/restore', { preHandler: [(server as any).authenti
 });
 
 // ----------------- AUDIO STREAMING (High-Performance WAN Stream & Caching) -----------------
+const STREAM_HIGH_WATER_MARK = 64 * 1024;
+const STREAM_EXPOSE_HEADERS =
+  'Content-Range, Content-Length, Accept-Ranges, ETag, Cache-Control, X-Stream-Partial, X-Stream-Quality, X-Transcode-Cache, X-ID3-Stripped, X-Audio-Duration';
+
+function inferAudioContentType(filePath: string): string {
+  const cleanExtPath = filePath.endsWith('.part') ? filePath.slice(0, -5) : filePath;
+  const ext = path.extname(cleanExtPath).toLowerCase();
+  if (ext === '.m4a' || ext === '.aac') return 'audio/mp4';
+  if (ext === '.ogg' || ext === '.opus') return 'audio/ogg';
+  if (ext === '.webm') return 'audio/webm';
+  if (ext === '.flac') return 'audio/flac';
+  return 'audio/mpeg';
+}
+
+function serveAudioFileWithRanges(
+  req: any,
+  reply: any,
+  opts: {
+    filePath: string;
+    stat: fs.Stats;
+    contentType: string;
+    etag: string;
+    cleanEtag: string;
+    audioOffset: number;
+    isPartialStream: boolean;
+    extraHeaders?: Record<string, string>;
+  }
+) {
+  const { filePath, stat, contentType, etag, cleanEtag, audioOffset, isPartialStream, extraHeaders } = opts;
+  const virtualTotal = Math.max(0, stat.size - audioOffset);
+  if (virtualTotal <= 0) {
+    return reply.status(404).send({ error: 'Аудиофайл не найден' });
+  }
+
+  const clientEtag = (req.headers['if-none-match'] || '').replace(/^W\//, '').replace(/^"|"$/g, '').trim();
+  if (!isPartialStream && clientEtag && (clientEtag === cleanEtag || clientEtag === '*')) {
+    return reply.status(304).send();
+  }
+
+  const baseHeaders: Record<string, any> = {
+    'Content-Type': contentType,
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': isPartialStream ? 'no-store' : 'public, max-age=86400, stale-while-revalidate=604800',
+    'ETag': etag,
+    'Last-Modified': stat.mtime.toUTCString(),
+    'Connection': 'keep-alive',
+    'Timing-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Range, Content-Range, Accept-Ranges, Cache-Control',
+    'Access-Control-Expose-Headers': STREAM_EXPOSE_HEADERS,
+    ...(extraHeaders || {}),
+  };
+  if (isPartialStream) {
+    baseHeaders['X-Stream-Partial'] = '1';
+  }
+
+  const range = req.headers.range;
+  if (range) {
+    const parts = String(range).replace(/bytes=/, '').split('-');
+    const partialstart = parts[0];
+    const partialend = parts[1];
+
+    let start: number;
+    let end: number;
+    if (partialstart === '' && partialend) {
+      const suffixLen = parseInt(partialend, 10);
+      start = isNaN(suffixLen) || suffixLen <= 0 ? 0 : Math.max(0, virtualTotal - suffixLen);
+      end = virtualTotal - 1;
+    } else {
+      start = parseInt(partialstart, 10);
+      if (isNaN(start) || start < 0) start = 0;
+      end = partialend ? parseInt(partialend, 10) : virtualTotal - 1;
+      if (isNaN(end) || end >= virtualTotal) end = virtualTotal - 1;
+    }
+
+    if (start > end || start >= virtualTotal) {
+      reply.status(416);
+      reply.headers({ 'Content-Range': `bytes */${virtualTotal}` });
+      return reply.send();
+    }
+
+    const chunksize = (end - start) + 1;
+    const fileStream = fs.createReadStream(filePath, {
+      start: audioOffset + start,
+      end: audioOffset + end,
+      highWaterMark: STREAM_HIGH_WATER_MARK,
+    });
+
+    req.raw.on('close', () => {
+      fileStream.destroy();
+    });
+
+    reply.status(206);
+    reply.headers({
+      ...baseHeaders,
+      'Content-Range': `bytes ${start}-${end}/${virtualTotal}`,
+      'Content-Length': chunksize,
+    });
+    return reply.send(fileStream);
+  }
+
+  const streamOpts: any = { highWaterMark: STREAM_HIGH_WATER_MARK };
+  if (audioOffset > 0) {
+    streamOpts.start = audioOffset;
+  }
+  const fileStream = fs.createReadStream(filePath, streamOpts);
+
+  req.raw.on('close', () => {
+    fileStream.destroy();
+  });
+
+  reply.status(200);
+  reply.headers({
+    ...baseHeaders,
+    'Content-Length': virtualTotal,
+  });
+  return reply.send(fileStream);
+}
+
 // Dedicated lightweight HEAD route: instant 0ms validation for PWA ETag / Content-Length
 server.head('/api/stream/:trackId', { config: { compress: false } }, async (req: any, reply: any) => {
   const trackId = Number(req.params.trackId);
@@ -874,27 +1010,72 @@ server.head('/api/stream/:trackId', { config: { compress: false } }, async (req:
 
   try {
     const stat = await fs.promises.stat(filePath);
-    const total = stat.size;
-    const ext = path.extname(filePath).toLowerCase();
-    let contentType = 'audio/mpeg';
-    if (ext === '.m4a' || ext === '.aac') contentType = 'audio/mp4';
-    else if (ext === '.ogg' || ext === '.opus') contentType = 'audio/ogg';
-    else if (ext === '.flac') contentType = 'audio/flac';
+    const quality: StreamQuality = parseStreamQuality(req.query?.q);
+    const format: StreamFormat = parseStreamFormat(req.query?.fmt);
+    const stripId3 = req.query?.stripId3 === '1';
 
-    const etag = `W/"track-${trackId}-${stat.mtimeMs}-${total}"`;
+    if (quality !== 'original') {
+      const cached = await getCachedTranscodePath(trackId, stat.mtimeMs, quality, format);
+      const contentType = getTranscodeContentType(format);
+      if (cached) {
+        const cleanEtag = `track-${trackId}-${quality}-${format}-${Math.floor(stat.mtimeMs)}-${cached.stat.size}`;
+        const etag = `W/"${cleanEtag}"`;
+        const clientEtag = (req.headers['if-none-match'] || '').replace(/^W\//, '').replace(/^"|"$/g, '').trim();
+        if (clientEtag && (clientEtag === cleanEtag || clientEtag === '*')) {
+          return reply.status(304).send();
+        }
+        reply.status(200).headers({
+          'Content-Type': contentType,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': cached.stat.size,
+          'ETag': etag,
+          'Last-Modified': cached.stat.mtime.toUTCString(),
+          'Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800',
+          'Connection': 'keep-alive',
+          'Timing-Allow-Origin': '*',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Headers': 'Range, Content-Range, Accept-Ranges, Cache-Control',
+          'Access-Control-Expose-Headers': STREAM_EXPOSE_HEADERS,
+          'X-Stream-Quality': quality,
+          'X-Transcode-Cache': 'hit',
+        });
+        return reply.send();
+      }
+
+      reply.status(200).headers({
+        'Content-Type': contentType,
+        'Cache-Control': 'no-store',
+        'Connection': 'keep-alive',
+        'Timing-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Range, Content-Range, Accept-Ranges, Cache-Control',
+        'Access-Control-Expose-Headers': STREAM_EXPOSE_HEADERS,
+        'X-Stream-Quality': quality,
+        'X-Transcode-Cache': 'miss',
+      });
+      return reply.send();
+    }
+
+    const total = stat.size;
+    const audioOffset = stripId3 ? await getCachedMp3Offset(trackId, filePath, stat) : 0;
+    const virtualTotal = Math.max(0, total - audioOffset);
+    const contentType = inferAudioContentType(filePath);
+
+    const cleanEtag = audioOffset > 0
+      ? `track-${trackId}-s-${stat.mtimeMs}-${virtualTotal}`
+      : `track-${trackId}-${stat.mtimeMs}-${total}`;
+    const etag = `W/"${cleanEtag}"`;
     const lastModified = stat.mtime.toUTCString();
 
     const clientEtag = (req.headers['if-none-match'] || '').replace(/^W\//, '').replace(/^"|"$/g, '').trim();
-    const cleanEtag = `track-${trackId}-${stat.mtimeMs}-${total}`;
-
     if (clientEtag && (clientEtag === cleanEtag || clientEtag === '*')) {
       return reply.status(304).send();
     }
 
-    reply.status(200).headers({
+    const headers: Record<string, any> = {
       'Content-Type': contentType,
       'Accept-Ranges': 'bytes',
-      'Content-Length': total,
+      'Content-Length': virtualTotal,
       'ETag': etag,
       'Last-Modified': lastModified,
       'Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800',
@@ -902,8 +1083,14 @@ server.head('/api/stream/:trackId', { config: { compress: false } }, async (req:
       'Timing-Allow-Origin': '*',
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Headers': 'Range, Content-Range, Accept-Ranges, Cache-Control',
-      'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges, ETag, Cache-Control',
-    });
+      'Access-Control-Expose-Headers': STREAM_EXPOSE_HEADERS,
+      'X-Stream-Quality': 'original',
+    };
+    if (audioOffset > 0) {
+      headers['X-ID3-Stripped'] = String(audioOffset);
+    }
+
+    reply.status(200).headers(headers);
     return reply.send();
   } catch (_) {
     return reply.status(404).send();
@@ -923,7 +1110,7 @@ server.get('/api/stream/:trackId', { config: { compress: false } }, async (req: 
   if (!trackId || !Number.isInteger(trackId) || trackId <= 0) {
     return reply.status(400).send({ error: 'Некорректный ID трека' });
   }
-  const track: any = db.prepare('SELECT id, title, artist, file_path FROM tracks WHERE id = ?').get(trackId);
+  const track: any = db.prepare('SELECT id, title, artist, file_path, duration_ms FROM tracks WHERE id = ?').get(trackId);
   if (!track) {
     return reply.status(404).send({ error: 'Трек не найден' });
   }
@@ -997,91 +1184,198 @@ server.get('/api/stream/:trackId', { config: { compress: false } }, async (req: 
   } catch (_) {
     return reply.status(404).send({ error: 'Аудиофайл не найден' });
   }
-  const total = stat.size;
-  const range = req.headers.range;
 
-  const cleanExtPath = filePath.endsWith('.part') ? filePath.slice(0, -5) : filePath;
-  const ext = path.extname(cleanExtPath).toLowerCase();
-  let contentType = 'audio/mpeg';
-  if (ext === '.m4a' || ext === '.aac') contentType = 'audio/mp4';
-  else if (ext === '.ogg' || ext === '.opus') contentType = 'audio/ogg';
-  else if (ext === '.webm') contentType = 'audio/webm';
-  else if (ext === '.flac') contentType = 'audio/flac';
+  const quality: StreamQuality = parseStreamQuality(req.query?.q);
+  const format: StreamFormat = parseStreamFormat(req.query?.fmt);
+  const stripId3 = req.query?.stripId3 === '1';
+  const durationSec = Math.max(0, Math.round((Number(track.duration_ms) || 0) / 1000));
 
-  const etag = `W/"track-${trackId}-${stat.mtimeMs}-${total}"`;
-  const lastModified = stat.mtime.toUTCString();
-
-  const clientEtag = (req.headers['if-none-match'] || '').replace(/^W\//, '').replace(/^"|"$/g, '').trim();
-  const cleanEtag = `track-${trackId}-${stat.mtimeMs}-${total}`;
-
-  // ETag conditional check (instant 304 response, skip for partial files)
-  if (!isPartialStream && clientEtag && (clientEtag === cleanEtag || clientEtag === '*')) {
-    return reply.status(304).send();
-  }
-
-  const baseHeaders: Record<string, any> = {
-    'Content-Type': contentType,
-    'Accept-Ranges': 'bytes',
-    'Cache-Control': isPartialStream ? 'no-store' : 'public, max-age=86400, stale-while-revalidate=604800',
-    'ETag': etag,
-    'Last-Modified': lastModified,
-    'Connection': 'keep-alive',
-    'Timing-Allow-Origin': '*',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Range, Content-Range, Accept-Ranges, Cache-Control',
-    'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges, ETag, Cache-Control, X-Stream-Partial',
-  };
-  if (isPartialStream) {
-    baseHeaders['X-Stream-Partial'] = '1';
-  }
-
-  // 1 MB high-water mark for high-throughput burst delivery over WAN (eliminates buffer starvation on high-ping networks)
-  const HIGH_WATER_MARK = 1024 * 1024;
-
-  if (range) {
-    const parts = range.replace(/bytes=/, '').split('-');
-    const partialstart = parts[0];
-    const partialend = parts[1];
-    let start = parseInt(partialstart, 10);
-    if (isNaN(start) || start < 0) start = 0;
-
-    let end = partialend ? parseInt(partialend, 10) : total - 1;
-    if (isNaN(end) || end >= total) end = total - 1;
-    if (start > end) {
-      reply.status(416);
-      reply.headers({ 'Content-Range': `bytes */${total}` });
-      return reply.send();
+  // Adaptive transcoded stream for remote connections (excludes partial downloads)
+  if (!isPartialStream && quality !== 'original') {
+    const contentType = getTranscodeContentType(format);
+    const cached = await getCachedTranscodePath(trackId, stat.mtimeMs, quality, format);
+    if (cached) {
+      touchCacheFile(cached.path);
+      const cleanEtag = `track-${trackId}-${quality}-${format}-${Math.floor(stat.mtimeMs)}-${cached.stat.size}`;
+      return serveAudioFileWithRanges(req, reply, {
+        filePath: cached.path,
+        stat: cached.stat,
+        contentType,
+        etag: `W/"${cleanEtag}"`,
+        cleanEtag,
+        audioOffset: 0,
+        isPartialStream: false,
+        extraHeaders: {
+          'X-Stream-Quality': quality,
+          'X-Transcode-Cache': 'hit',
+          ...(durationSec > 0 ? { 'X-Audio-Duration': String(durationSec) } : {}),
+        },
+      });
     }
 
-    const chunksize = (end - start) + 1;
-    const fileStream = fs.createReadStream(filePath, { start, end, highWaterMark: HIGH_WATER_MARK });
+    const range = req.headers.range ? String(req.headers.range).trim() : '';
+    const midTrackMatch = range.match(/bytes=(\d+)-/);
+    const rangeStart = midTrackMatch ? parseInt(midTrackMatch[1], 10) : 0;
+    const finiteProbeMatch = range.match(/^bytes=0-(\d+)$/);
+    const isSmallProbeRange = Boolean(finiteProbeMatch && parseInt(finiteProbeMatch[1], 10) < 65536);
+    const inFlight = getInFlightTranscodeJob(trackId, stat.mtimeMs, quality, format);
 
-    // Cleanly destroy stream on client disconnect to avoid orphan read streams
-    req.raw.on('close', () => {
-      fileStream.destroy();
-    });
+    if (rangeStart > 0 || isSmallProbeRange || inFlight) {
+      const completedPath = inFlight
+        ? await inFlight.promise
+        : await ensureTranscodedFile(trackId, filePath, stat.mtimeMs, quality, format, 'live');
+      if (completedPath) {
+        try {
+          const cStat = await fs.promises.stat(completedPath);
+          touchCacheFile(completedPath);
+          const cleanEtag = `track-${trackId}-${quality}-${format}-${Math.floor(stat.mtimeMs)}-${cStat.size}`;
+          return serveAudioFileWithRanges(req, reply, {
+            filePath: completedPath,
+            stat: cStat,
+            contentType,
+            etag: `W/"${cleanEtag}"`,
+            cleanEtag,
+            audioOffset: 0,
+            isPartialStream: false,
+            extraHeaders: {
+              'X-Stream-Quality': quality,
+              'X-Transcode-Cache': 'hit',
+              ...(durationSec > 0 ? { 'X-Audio-Duration': String(durationSec) } : {}),
+            },
+          });
+        } catch (_) {}
+      }
+    } else if (canStartLiveTranscode()) {
+      try {
+        const { stream, cleanup } = streamAndCacheTranscode(
+          trackId,
+          filePath,
+          stat.mtimeMs,
+          quality,
+          format
+        );
+        reply.raw.on('close', () => {
+          if (!reply.raw.writableEnded) {
+            cleanup();
+          }
+        });
 
-    reply.status(206);
-    reply.headers({
-      ...baseHeaders,
-      'Content-Range': `bytes ${start}-${end}/${total}`,
-      'Content-Length': chunksize,
-    });
-    return reply.send(fileStream);
-  } else {
-    const fileStream = fs.createReadStream(filePath, { highWaterMark: HIGH_WATER_MARK });
-
-    req.raw.on('close', () => {
-      fileStream.destroy();
-    });
-
-    reply.status(200);
-    reply.headers({
-      ...baseHeaders,
-      'Content-Length': total,
-    });
-    return reply.send(fileStream);
+        reply.status(200);
+        reply.headers({
+          'Content-Type': contentType,
+          'Cache-Control': 'no-store',
+          'Connection': 'keep-alive',
+          'Timing-Allow-Origin': '*',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Headers': 'Range, Content-Range, Accept-Ranges, Cache-Control',
+          'Access-Control-Expose-Headers': STREAM_EXPOSE_HEADERS,
+          'X-Stream-Quality': quality,
+          'X-Transcode-Cache': 'live',
+          ...(durationSec > 0 ? { 'X-Audio-Duration': String(durationSec) } : {}),
+        });
+        return reply.send(stream);
+      } catch (_) {
+        // Fall back to direct original stream if live transcoder cannot start
+      }
+    }
   }
+
+  // Original / fallback stream (zero-copy ID3v2 skip ONLY when ?stripId3=1 or fallback from remote quality)
+  const shouldStripId3 = stripId3 || quality !== 'original';
+  const audioOffset = (!isPartialStream && shouldStripId3)
+    ? await getCachedMp3Offset(trackId, filePath, stat)
+    : 0;
+  const virtualTotal = Math.max(0, stat.size - audioOffset);
+  const cleanEtag = audioOffset > 0
+    ? `track-${trackId}-s-${stat.mtimeMs}-${virtualTotal}`
+    : `track-${trackId}-${stat.mtimeMs}-${stat.size}`;
+
+  const extraHeaders: Record<string, string> = {
+    'X-Stream-Quality': 'original',
+    ...(durationSec > 0 ? { 'X-Audio-Duration': String(durationSec) } : {}),
+  };
+  if (audioOffset > 0) {
+    extraHeaders['X-ID3-Stripped'] = String(audioOffset);
+  }
+
+  return serveAudioFileWithRanges(req, reply, {
+    filePath,
+    stat,
+    contentType: inferAudioContentType(filePath),
+    etag: `W/"${cleanEtag}"`,
+    cleanEtag,
+    audioOffset,
+    isPartialStream,
+    extraHeaders,
+  });
+});
+
+server.post('/api/stream/prepare', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('stream_prepare:' + req.user.id, 60, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({ error: `Слишком много запросов. Подождите ${limitCheck.retryAfterSec || 60} сек.` });
+  }
+
+  const body = req.body || {};
+  const rawIds = Array.isArray(body.trackIds) ? body.trackIds : [];
+  const quality = parseStreamQuality(body.quality);
+  const format = parseStreamFormat(body.format);
+
+  if (quality === 'original' || rawIds.length === 0) {
+    return { cached: [], queued: [] };
+  }
+
+  const ids: number[] = [];
+  for (const val of rawIds) {
+    const id = Number(val);
+    if (Number.isInteger(id) && id > 0 && !ids.includes(id)) {
+      ids.push(id);
+      if (ids.length >= 3) break;
+    }
+  }
+  if (ids.length === 0) {
+    return { cached: [], queued: [] };
+  }
+
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = db.prepare(`SELECT id, file_path FROM tracks WHERE id IN (${placeholders})`).all(...ids) as any[];
+  const byId = new Map<number, string>();
+  for (const r of rows) {
+    if (r?.id && r?.file_path) {
+      byId.set(Number(r.id), String(r.file_path));
+    }
+  }
+
+  const entries: Array<{
+    trackId: number;
+    sourcePath: string;
+    sourceMtimeMs: number;
+    quality: StreamQuality;
+    format: StreamFormat;
+  }> = [];
+
+  for (const id of ids) {
+    const fp = byId.get(id);
+    if (!fp || !isPathInsideMusicDir(fp)) continue;
+    try {
+      const st = await fs.promises.stat(fp);
+      if (st.isFile() && st.size > 1024) {
+        entries.push({
+          trackId: id,
+          sourcePath: fp,
+          sourceMtimeMs: st.mtimeMs,
+          quality,
+          format,
+        });
+      }
+    } catch (_) {}
+  }
+
+  return await enqueuePrepareTracks(entries);
+});
+
+server.get('/api/stream/cache-stats', { preHandler: [(server as any).authenticate] }, async () => {
+  return await getTranscodeCacheStats();
 });
 
 // ----------------- DAILY MIXES -----------------

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Pause, SkipForward, Music2, Radio, ListMusic } from 'lucide-react';
+import { Play, Pause, SkipForward, Music2, Radio, ListMusic, Loader2 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { useSyncStore } from '../store/syncStore';
 import { useI18nStore } from '../store/i18nStore';
@@ -9,6 +9,7 @@ export const MiniPlayer: React.FC = () => {
   const {
     currentTrack,
     isPlaying,
+    isBuffering,
     togglePlay,
     nextTrack,
     currentTime,
@@ -84,7 +85,13 @@ export const MiniPlayer: React.FC = () => {
             onClick={togglePlay}
             className="w-9 h-9 rounded-full bg-cat-mauve text-cat-base flex items-center justify-center hover:opacity-90 active:scale-95 transition-all shadow-md"
           >
-            {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
+            {isPlaying && isBuffering ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : isPlaying ? (
+              <Pause className="w-4 h-4 fill-current" />
+            ) : (
+              <Play className="w-4 h-4 fill-current ml-0.5" />
+            )}
           </button>
           <button
             onClick={nextTrack}

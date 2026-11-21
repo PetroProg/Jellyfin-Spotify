@@ -2,19 +2,23 @@ import React, { useState, useEffect } from 'react';
 import { 
   ChevronDown, Heart, Shuffle, SkipBack, Play, Pause, 
   SkipForward, Repeat, Repeat1, Music2, Sparkles, FolderPlus,
-  Ban, Radio, ListMusic
+  Ban, Radio, ListMusic, Loader2
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { useSyncStore } from '../store/syncStore';
 import { AddToPlaylistModal } from './AddToPlaylistModal';
 import { toast } from '../store/toastStore';
 import { useI18nStore } from '../store/i18nStore';
+import { formatQualityLabel, getPreferredStreamFormat } from '../utils/networkQuality';
 
 export const FullPlayer: React.FC = () => {
-  const { t } = useI18nStore();
+  const { lang, t } = useI18nStore();
   const {
     currentTrack,
     isPlaying,
+    isBuffering,
+    bufferedEnd,
+    activeStreamQuality,
     currentTime,
     duration,
     togglePlay,
@@ -90,6 +94,10 @@ export const FullPlayer: React.FC = () => {
     trackDurSec,
     currentTime
   );
+  const bufferedPercent = effectiveDuration > 0
+    ? Math.min(100, Math.max(0, (bufferedEnd / effectiveDuration) * 100))
+    : 0;
+  const qualityLabel = formatQualityLabel(activeStreamQuality, getPreferredStreamFormat(), lang);
 
   const handleClose = () => {
     if (window.history.state?.isFullPlayer) {
@@ -110,10 +118,17 @@ export const FullPlayer: React.FC = () => {
           <ChevronDown className="w-7 h-7" />
         </button>
         <div className="text-center">
-          <span className="text-[11px] uppercase tracking-wider text-cat-subtext0 font-semibold block">
-            {t('Now Playing', 'Сейчас играет')}
-          </span>
-          <span className="text-xs text-cat-text font-medium truncate max-w-[200px] block">
+          <div className="flex items-center justify-center gap-1.5">
+            <span className="text-[11px] uppercase tracking-wider text-cat-subtext0 font-semibold">
+              {t('Now Playing', 'Сейчас играет')}
+            </span>
+            {qualityLabel && (
+              <span className="px-1.5 py-0.5 rounded-full bg-cat-surface0/80 border border-cat-surface1/50 text-[10px] font-semibold text-cat-mauve">
+                {qualityLabel}
+              </span>
+            )}
+          </div>
+          <span className="text-xs text-cat-text font-medium truncate max-w-[200px] block mx-auto">
             {currentTrack.album || t('From Library', 'Из медиатеки')}
           </span>
         </div>
@@ -188,14 +203,22 @@ export const FullPlayer: React.FC = () => {
 
       {/* Timeline Scrubber */}
       <div className="space-y-1.5 mb-4">
-        <input
-          type="range"
-          min={0}
-          max={effectiveDuration || 100}
-          value={Math.min(currentTime, effectiveDuration || currentTime)}
-          onChange={(e) => seek(Number(e.target.value))}
-          className="w-full h-1.5 bg-cat-surface1 rounded-lg appearance-none cursor-pointer accent-cat-mauve"
-        />
+        <div className="relative flex items-center">
+          <div className="absolute inset-x-0 h-1.5 rounded-lg bg-cat-surface1 overflow-hidden pointer-events-none">
+            <div
+              className="h-full bg-cat-overlay0/50 transition-all duration-300"
+              style={{ width: `${bufferedPercent}%` }}
+            />
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={effectiveDuration || 100}
+            value={Math.min(currentTime, effectiveDuration || currentTime)}
+            onChange={(e) => seek(Number(e.target.value))}
+            className="relative z-10 w-full h-1.5 bg-transparent rounded-lg appearance-none cursor-pointer accent-cat-mauve"
+          />
+        </div>
         <div className="flex justify-between text-xs text-cat-subtext0 font-mono">
           <span>{formatTime(currentTime)}</span>
           <span>{formatTime(effectiveDuration)}</span>
@@ -224,7 +247,9 @@ export const FullPlayer: React.FC = () => {
           onClick={togglePlay}
           className="w-18 h-18 w-[72px] h-[72px] rounded-full bg-cat-mauve text-cat-base flex items-center justify-center hover:opacity-95 active:scale-95 transition-all shadow-xl shadow-cat-mauve/25"
         >
-          {isPlaying ? (
+          {isPlaying && isBuffering ? (
+            <Loader2 className="w-8 h-8 animate-spin" />
+          ) : isPlaying ? (
             <Pause className="w-8 h-8 fill-current" />
           ) : (
             <Play className="w-8 h-8 fill-current ml-1" />

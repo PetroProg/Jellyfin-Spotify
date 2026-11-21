@@ -8,7 +8,6 @@ import { useOfflineStore } from './offlineStore';
 import {
   getCachedTrackUrl,
   isTrackCached,
-  cacheTrackOffline,
   saveOfflinePlaylistData,
   getSynchronousBlobUrl,
   prewarmQueueBlobUrls,
@@ -18,6 +17,27 @@ import {
   isTrackDownloadedLocally,
   setCurrentlyPlayingTrackId
 } from '../utils/offline';
+import {
+  StreamQualityPreference,
+  ResolvedStreamQuality,
+  getSavedStreamQualityPref,
+  saveStreamQualityPref,
+  parseStreamQualityPref,
+  getPreferredStreamFormat,
+  resolveEffectiveStreamQuality,
+  buildStreamUrl,
+  getPrefetchProfile,
+  reportStreamStall,
+  resetStreamStalls,
+  registerRemoteStreamPriorityCheck,
+} from '../utils/networkQuality';
+import {
+  getSynchronousStreamBlob,
+  hasTrackInStreamCache,
+  getStreamCachedTrackUrl,
+  prefetchTrackToStreamCache,
+  getStreamCacheLimitMb,
+} from '../utils/streamCache';
 import { diag, diagHeartbeat, initPlaybackDiagnostics } from '../utils/playbackDiag';
 
 initPlaybackDiagnostics();
@@ -75,6 +95,13 @@ interface PlayerState {
   eqPreset: string;
   isNormalizerEnabled: boolean;
   crossfade: number;
+
+  // Remote Streaming Quality & Buffer Telemetry
+  streamQualityPref: StreamQualityPreference;
+  activeStreamQuality: 'offline' | 'cache' | ResolvedStreamQuality | null;
+  isBuffering: boolean;
+  bufferedEnd: number;
+  setStreamQualityPref: (pref: StreamQualityPreference) => void;
 
   playTrack: (track: Track, newQueue?: Track[], index?: number, playlistId?: number | null) => void;
   playTrackLocally: (track: Track, newQueue?: Track[], index?: number, startTime?: number, autoPlay?: boolean, playlistId?: number | null) => void;
@@ -288,6 +315,97 @@ function preloadNextTrackElement(url: string | null) {
   } catch (_) {}
 }
 
+// Resilient background prefetch & server pre-transcode controller (module scope so track transitions cancel immediately)
+let prefetchTimeout: any = null;
+let isPrefetching = false;
+let prefetchAbortController: AbortController | null = null;
+let prepareServerTimeout: any = null;
+let lastPreparedKey = '';
+let lastPreparedAt = 0;
+
+function cancelActivePrefetch() {
+  if (prefetchTimeout) {
+    clearTimeout(prefetchTimeout);
+    prefetchTimeout = null;
+  }
+  if (prefetchAbortController) {
+    try {
+      prefetchAbortController.abort();
+    } catch (_) {}
+    prefetchAbortController = null;
+  }
+  isPrefetching = false;
+}
+
+function getBufferedEndAtCurrentTime(): number {
+  try {
+    const cur = audio.currentTime || 0;
+    for (let i = 0; i < audio.buffered.length; i++) {
+      const start = audio.buffered.start(i);
+      const end = audio.buffered.end(i);
+      if (start <= cur + 0.5 && cur <= end + 0.5) {
+        return end;
+      }
+    }
+    if (audio.buffered.length > 0) {
+      return audio.buffered.end(audio.buffered.length - 1);
+    }
+  } catch (_) {}
+  return 0;
+}
+
+function schedulePrepareUpcomingOnServer() {
+  if (prepareServerTimeout) {
+    clearTimeout(prepareServerTimeout);
+  }
+  prepareServerTimeout = setTimeout(() => {
+    prepareServerTimeout = null;
+    try {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      const store = usePlayerStore.getState();
+      if (!store.isPlaying || !store.queue || store.queue.length === 0 || store.currentIndex < 0) return;
+
+      const quality = resolveEffectiveStreamQuality(store.streamQualityPref);
+      if (quality === 'original') return;
+      const format = getPreferredStreamFormat();
+
+      const ids: number[] = [];
+      for (let offset = 1; offset <= 3; offset++) {
+        const idx = store.currentIndex + offset;
+        let candidate: Track | undefined;
+        if (idx < store.queue.length) {
+          candidate = store.queue[idx];
+        } else if (store.repeat === 'all' && store.queue.length > 1) {
+          const wrapped = idx % store.queue.length;
+          if (wrapped !== store.currentIndex) candidate = store.queue[wrapped];
+        }
+        if (!candidate || !candidate.id || candidate.id <= 0) continue;
+        if (candidate.is_downloaded === false || candidate.is_downloaded === 0) continue;
+        if (isTrackDownloadedLocally(candidate.id) || hasTrackInStreamCache(candidate.id)) continue;
+        if (!ids.includes(candidate.id)) {
+          ids.push(candidate.id);
+          if (ids.length >= 2) break;
+        }
+      }
+
+      if (ids.length === 0) return;
+      const key = `${quality}:${format}:${ids.join(',')}`;
+      const now = Date.now();
+      if (key === lastPreparedKey && now - lastPreparedAt < 20_000) return;
+      lastPreparedKey = key;
+      lastPreparedAt = now;
+
+      apiRequest('/stream/prepare', {
+        method: 'POST',
+        body: JSON.stringify({ trackIds: ids, quality, format }),
+        silentOffline: true,
+        retries: 0,
+        timeoutMs: 4000,
+      }).catch(() => {});
+    } catch (_) {}
+  }, 600);
+}
+
 // Crossfade fade controller
 let fadeInterval: any = null;
 let isFadingIn = false;
@@ -299,15 +417,27 @@ let isFadingOut = false;
 let prewarmingPausedTrackId: number | null = null;
 async function prewarmPausedTrack(track: Track | null | undefined) {
   if (!track || !track.id || track.id <= 0 || track.isPreview || track.streamUrl) return;
-  if (getSynchronousBlobUrl(track.id)) return;
+  if (getSynchronousBlobUrl(track.id) || getSynchronousStreamBlob(track.id)) return;
   if (prewarmingPausedTrackId === track.id) return;
   prewarmingPausedTrackId = track.id;
   try {
-    const cached = await isTrackCached(track.id);
-    if (!cached && (typeof navigator === 'undefined' || navigator.onLine)) {
-      await cacheTrackOffline(track, 35000);
+    const offlineCached = await isTrackCached(track.id);
+    if (offlineCached) {
+      await getCachedTrackUrl(track.id);
+      return;
     }
-    await getCachedTrackUrl(track.id);
+    if (hasTrackInStreamCache(track.id)) {
+      await getStreamCachedTrackUrl(track.id);
+      return;
+    }
+    if ((typeof navigator === 'undefined' || navigator.onLine) && getStreamCacheLimitMb() > 0) {
+      const q = resolveEffectiveStreamQuality(usePlayerStore.getState().streamQualityPref);
+      const fmt = getPreferredStreamFormat();
+      const ok = await prefetchTrackToStreamCache(track, q, fmt, undefined, 35000);
+      if (ok) {
+        await getStreamCachedTrackUrl(track.id, q);
+      }
+    }
   } catch (_) {
   } finally {
     if (prewarmingPausedTrackId === track.id) {
@@ -897,7 +1027,10 @@ function markTrackTransitionEnd() {
 // Background Playback Health Watchdog
 let playbackWatchdogTimer: any = null;
 let lastWatchdogMediaTime = -1;
+let lastWatchdogBufferedEnd = 0;
 let lastWatchdogWallTime = 0;
+let lastBufferProgressWallTime = 0;
+let stallsOnCurrentTrack = 0;
 
 function stopPlaybackWatchdog() {
   if (playbackWatchdogTimer) {
@@ -905,12 +1038,14 @@ function stopPlaybackWatchdog() {
     playbackWatchdogTimer = null;
   }
   lastWatchdogMediaTime = -1;
+  lastWatchdogBufferedEnd = 0;
   lastWatchdogWallTime = 0;
 }
 
 function startPlaybackWatchdog() {
   if (playbackWatchdogTimer) return;
   lastWatchdogMediaTime = audio.currentTime || 0;
+  lastWatchdogBufferedEnd = getBufferedEndAtCurrentTime();
   lastWatchdogWallTime = Date.now();
 
   playbackWatchdogTimer = setInterval(() => {
@@ -936,6 +1071,7 @@ function startPlaybackWatchdog() {
       Date.now() - lastTrackTransitionWallTime < 3500
     ) {
       lastWatchdogMediaTime = audio.currentTime || 0;
+      lastWatchdogBufferedEnd = getBufferedEndAtCurrentTime();
       lastWatchdogWallTime = Date.now();
       return;
     }
@@ -954,6 +1090,7 @@ function startPlaybackWatchdog() {
         store.nextTrack();
       }
       lastWatchdogMediaTime = 0;
+      lastWatchdogBufferedEnd = 0;
       lastWatchdogWallTime = Date.now();
       return;
     }
@@ -963,12 +1100,20 @@ function startPlaybackWatchdog() {
       return;
     }
 
-    // 3. Check for frozen playhead (> 8 seconds without advancing while not paused)
+    // 3. Check for frozen playhead: if buffer is actively growing over WAN, do NOT abort the stream!
+    const bufEnd = getBufferedEndAtCurrentTime();
     if (Math.abs(cur - lastWatchdogMediaTime) >= 0.05) {
       lastWatchdogMediaTime = cur;
+      lastWatchdogBufferedEnd = bufEnd;
       lastWatchdogWallTime = Date.now();
-    } else if (Date.now() - lastWatchdogWallTime > 8000) {
-      console.warn('[Watchdog] Playhead frozen for >8s in background, triggering stream recovery...');
+    } else if (
+      audio.networkState === HTMLMediaElement.NETWORK_LOADING &&
+      bufEnd > lastWatchdogBufferedEnd + 0.25
+    ) {
+      lastWatchdogBufferedEnd = bufEnd;
+      lastWatchdogWallTime = Date.now();
+    } else if (Date.now() - lastWatchdogWallTime > 14000) {
+      console.warn('[Watchdog] Playhead and buffer frozen for >14s, triggering stream recovery...');
       diag(`[watchdog] playhead frozen at ${cur.toFixed(1)}s → recovery`);
       lastWatchdogWallTime = Date.now();
       recoverAudioStream(cur > 0 ? cur : store.currentTime, true);
@@ -977,7 +1122,9 @@ function startPlaybackWatchdog() {
 }
 
 function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
+  cancelActivePrefetch();
   const reqId = ++currentPlayRequestId;
+  stallsOnCurrentTrack = 0;
   pendingRecoveryOnResume = false;
   pendingRecoveryTime = 0;
   setCurrentlyPlayingTrackId(track.id);
@@ -992,10 +1139,11 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
       startTransitionBridge(`track #${track.id}`);
     }
   }
-  diag(`[track] start #${track.id} autoPlay=${autoPlay} hidden=${typeof document !== 'undefined' && document.hidden} blob=${Boolean(track.id > 0 && getSynchronousBlobUrl(track.id))}`);
+  diag(`[track] start #${track.id} autoPlay=${autoPlay} hidden=${typeof document !== 'undefined' && document.hidden} blob=${Boolean(track.id > 0 && (getSynchronousBlobUrl(track.id) || getSynchronousStreamBlob(track.id)))}`);
 
   // If track has an explicit streamUrl (e.g. instant streaming from search)
   if (track.streamUrl) {
+    usePlayerStore.setState({ activeStreamQuality: null, isBuffering: autoPlay, bufferedEnd: 0 });
     const applyInstantPlayback = (targetSrc: string) => {
       const needsChange = !audio.src.endsWith(targetSrc) && audio.src !== targetSrc;
       if (needsChange) {
@@ -1057,9 +1205,6 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
     applyInstantPlayback(track.streamUrl);
     return;
   }
-
-  const syncBlobUrl = track.id > 0 ? getSynchronousBlobUrl(track.id) : null;
-  const streamUrl = `/api/stream/${track.id}?v=${track.duration_ms || 0}_${track.bitrate || 0}`;
 
   const applyPlayback = (targetSrc: string) => {
     const needsChange = !audio.src.endsWith(targetSrc) && audio.src !== targetSrc;
@@ -1141,24 +1286,101 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
     }
   };
 
-  // 1. If synchronous blob URL is already available in memory, play directly (0ms latency, zero network)!
-  if (syncBlobUrl) {
-    applyPlayback(syncBlobUrl);
+  // 1. If synchronous blob URL is already in RAM (Offline or Smart Stream Cache), play directly (0ms latency)!
+  const syncOfflineBlob = track.id > 0 ? getSynchronousBlobUrl(track.id) : null;
+  if (syncOfflineBlob) {
+    usePlayerStore.setState({
+      activeStreamQuality: 'offline',
+      isBuffering: false,
+      bufferedEnd: (track.duration_ms || 0) / 1000,
+    });
+    applyPlayback(syncOfflineBlob);
     return;
   }
 
-  // 2. Play immediately with streamUrl to maintain audio hardware session without asynchronous delay
-  applyPlayback(streamUrl);
+  const syncStreamBlob = track.id > 0 ? getSynchronousStreamBlob(track.id) : null;
+  if (syncStreamBlob) {
+    usePlayerStore.setState({
+      activeStreamQuality: 'cache',
+      isBuffering: false,
+      bufferedEnd: (track.duration_ms || 0) / 1000,
+    });
+    applyPlayback(syncStreamBlob.blobUrl);
+    return;
+  }
 
-  // 3. Simultaneously check CacheStorage: if the track is cached locally and network stream hasn't started playing yet
-  // (e.g. phone is in Doze mode after 10m), seamlessly swap to the local Blob URL!
-  if (track.id > 0) {
-    getCachedTrackUrl(track.id).then((blobUrl) => {
-      if (blobUrl && reqId === currentPlayRequestId && autoPlay && !isUserInitiatedPause) {
-        if (audio.paused || audio.readyState < 2 || audio.error !== null) {
-          console.log(`[Player] Upgrading stalled/pending network stream for "${track.title}" to local cached Blob URL`);
-          applyPlayback(blobUrl);
+  // 2. If index indicates track is already on disk in CacheStorage, read locally (~5-15ms) without firing wasted network request
+  const maybeOffline = track.id > 0 && isTrackDownloadedLocally(track.id);
+  const maybeStreamCached = track.id > 0 && hasTrackInStreamCache(track.id);
+
+  if (maybeOffline || maybeStreamCached) {
+    usePlayerStore.setState({
+      activeStreamQuality: maybeOffline ? 'offline' : 'cache',
+      isBuffering: false,
+      bufferedEnd: 0,
+    });
+    (async () => {
+      let localBlob: string | null = null;
+      let sourceKind: 'offline' | 'cache' = 'offline';
+      if (maybeOffline) {
+        localBlob = await getCachedTrackUrl(track.id).catch(() => null);
+      }
+      if (!localBlob && maybeStreamCached) {
+        const sc = await getStreamCachedTrackUrl(track.id).catch(() => null);
+        if (sc) {
+          localBlob = sc.blobUrl;
+          sourceKind = 'cache';
         }
+      }
+      if (reqId !== currentPlayRequestId) return;
+
+      if (localBlob) {
+        usePlayerStore.setState({
+          activeStreamQuality: sourceKind,
+          isBuffering: false,
+          bufferedEnd: (track.duration_ms || 0) / 1000,
+        });
+        applyPlayback(localBlob);
+        return;
+      }
+
+      // Fallback if CacheStorage entry was evicted externally
+      const q = resolveEffectiveStreamQuality(usePlayerStore.getState().streamQualityPref);
+      const fmt = getPreferredStreamFormat();
+      const remoteUrl = buildStreamUrl(track.id, q, fmt);
+      usePlayerStore.setState({ activeStreamQuality: q, isBuffering: autoPlay, bufferedEnd: 0 });
+      applyPlayback(remoteUrl);
+      schedulePrepareUpcomingOnServer();
+    })();
+    return;
+  }
+
+  // 3. Remote track: select adaptive quality/codec and stream immediately
+  const quality = resolveEffectiveStreamQuality(usePlayerStore.getState().streamQualityPref);
+  const format = getPreferredStreamFormat();
+  const streamUrl = buildStreamUrl(track.id, quality, format);
+  usePlayerStore.setState({
+    activeStreamQuality: quality,
+    isBuffering: autoPlay,
+    bufferedEnd: 0,
+  });
+  applyPlayback(streamUrl);
+  schedulePrepareUpcomingOnServer();
+
+  // 4. Safety check: if CacheStorage has this track even though localStorage index missed it, upgrade if stalled
+  if (track.id > 0) {
+    Promise.all([
+      getCachedTrackUrl(track.id).catch(() => null),
+      getStreamCachedTrackUrl(track.id, quality).catch(() => null),
+    ]).then(([offlineUrl, streamCached]) => {
+      if (reqId !== currentPlayRequestId || !autoPlay || isUserInitiatedPause) return;
+      const blobUrl = offlineUrl || streamCached?.blobUrl;
+      if (blobUrl && (audio.paused || audio.readyState < 2 || audio.error !== null)) {
+        usePlayerStore.setState({
+          activeStreamQuality: offlineUrl ? 'offline' : 'cache',
+          isBuffering: false,
+        });
+        applyPlayback(blobUrl);
       }
     }).catch(() => {});
   }
@@ -1211,9 +1433,14 @@ let downloadedInstantTrack: Track | null = null;
 
 /**
  * Resilient stream recovery when network drops, switches from Wi-Fi to LTE,
- * or when the HTMLMediaElement encounters an error state.
+ * seeks on an unseekable live transcode, or when the HTMLMediaElement encounters an error state.
  */
-async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true): Promise<void> {
+async function recoverAudioStream(
+  resumeTime?: number,
+  autoPlay: boolean = true,
+  forceCacheBust: boolean = true,
+  skipStreamCache: boolean = false
+): Promise<void> {
   if (isRecoveringStream) return;
   isRecoveringStream = true;
   pendingRecoveryOnResume = false;
@@ -1233,6 +1460,13 @@ async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true)
       targetTime = store.currentTime;
     }
 
+    if (autoPlay && !isUserInitiatedPause && forceCacheBust) {
+      stallsOnCurrentTrack++;
+      if (stallsOnCurrentTrack >= 2 && store.streamQualityPref === 'auto') {
+        reportStreamStall();
+      }
+    }
+
     console.log(`[Audio Recovery] Reconnecting stream for "${track.title}" at ${targetTime.toFixed(1)}s (autoPlay: ${autoPlay})`);
     diag(`[recovery] #${track.id} at ${targetTime.toFixed(1)}s autoPlay=${autoPlay}`);
 
@@ -1240,18 +1474,44 @@ async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true)
       startTransitionBridge('recovery');
     }
 
-    // 1. Check local offline cache first for instant 0ms playback without internet
-    let targetSrc = getSynchronousBlobUrl(track.id);
+    // 1. Check local offline cache & Smart Stream Cache first for instant 0ms playback without internet
+    let targetSrc: string | null = getSynchronousBlobUrl(track.id);
+    let recoveredQuality: 'offline' | 'cache' | ResolvedStreamQuality = 'offline';
+    if (!targetSrc && !skipStreamCache) {
+      const streamRam = getSynchronousStreamBlob(track.id);
+      if (streamRam) {
+        targetSrc = streamRam.blobUrl;
+        recoveredQuality = 'cache';
+      }
+    }
     if (!targetSrc) {
       try {
         targetSrc = await getCachedTrackUrl(track.id);
+        if (targetSrc) recoveredQuality = 'offline';
+      } catch (_) {}
+    }
+    if (!targetSrc && !skipStreamCache) {
+      try {
+        const sc = await getStreamCachedTrackUrl(track.id);
+        if (sc) {
+          targetSrc = sc.blobUrl;
+          recoveredQuality = 'cache';
+        }
       } catch (_) {}
     }
 
-    // 2. If not in cache, use remote stream URL with query timestamp to force a new TCP connection on active network
+    // 2. If not in cache, use canonical remote stream URL (with adaptive quality step-down on repeated stalls)
     if (!targetSrc) {
-      targetSrc = `/api/stream/${track.id}?reconnect=${Date.now()}`;
+      const q = resolveEffectiveStreamQuality(store.streamQualityPref);
+      const fmt = getPreferredStreamFormat();
+      recoveredQuality = q;
+      targetSrc = buildStreamUrl(track.id, q, fmt, forceCacheBust ? { reconnectTs: Date.now() } : undefined);
     }
+
+    usePlayerStore.setState({
+      activeStreamQuality: recoveredQuality,
+      isBuffering: autoPlay && !targetSrc.startsWith('blob:'),
+    });
 
     // 3. Reset HTMLMediaElement cleanly to wipe any MediaError state
     setInternalSrcChange(true);
@@ -1274,7 +1534,7 @@ async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true)
         }
       };
 
-      const fallbackTimer = setTimeout(done, 3000);
+      const fallbackTimer = setTimeout(done, 4000);
 
       const onCanPlay = () => {
         clearTimeout(fallbackTimer);
@@ -1305,7 +1565,7 @@ async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true)
       try {
         await audio.play();
         setInternalSrcChange(false);
-        usePlayerStore.setState({ isPlaying: true });
+        usePlayerStore.setState({ isPlaying: true, isBuffering: false });
         activateSilentAnchor();
         startPlaybackWatchdog();
         if ('mediaSession' in navigator) {
@@ -1318,7 +1578,7 @@ async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true)
         console.warn('[Play after recovery failed]:', playErr);
         diag(`[recovery] play() failed: ${playErr?.name || playErr}`, true);
         if (playErr.name === 'NotAllowedError') {
-          usePlayerStore.setState({ isPlaying: false });
+          usePlayerStore.setState({ isPlaying: false, isBuffering: false });
           if ('mediaSession' in navigator) {
             navigator.mediaSession.playbackState = 'paused';
           }
@@ -1344,25 +1604,15 @@ async function recoverAudioStream(resumeTime?: number, autoPlay: boolean = true)
 export const usePlayerStore = create<PlayerState>((set, get) => {
   // Sync Audio Events
   let lastSyncTime = 0;
+  let lastBufferedReport = 0;
 
-  // Resilient background prefetch controller with network-priority abort
-  let prefetchTimeout: any = null;
-  let isPrefetching = false;
-  let prefetchAbortController: AbortController | null = null;
-
-  const cancelActivePrefetch = () => {
-    if (prefetchTimeout) {
-      clearTimeout(prefetchTimeout);
-      prefetchTimeout = null;
-    }
-    if (prefetchAbortController) {
-      try {
-        prefetchAbortController.abort();
-      } catch (_) {}
-      prefetchAbortController = null;
-    }
-    isPrefetching = false;
-  };
+  registerRemoteStreamPriorityCheck(() => {
+    const s = get();
+    if (!s.isPlaying || !s.currentTrack) return false;
+    if (audio.src.startsWith('blob:')) return false;
+    if (s.activeStreamQuality === 'offline' || s.activeStreamQuality === 'cache') return false;
+    return s.isBuffering || (audio.currentTime || s.currentTime) < 15;
+  });
 
   const handleAudioDuration = () => {
     const dur = audio.duration;
@@ -1372,6 +1622,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (useSyncStore.getState().isLocalActive) {
         useSyncStore.getState().sendPlaybackState({ duration: dur });
       }
+    }
+  };
+
+  audio.onloadstart = () => {
+    if (get().isPlaying && !audio.src.startsWith('blob:')) {
+      set({ isBuffering: true, bufferedEnd: 0 });
     }
   };
 
@@ -1427,7 +1683,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     diag(`[pause] main element paused at ${cur.toFixed(1)}/${(dur || 0).toFixed(1)}s hidden=${document.hidden}`, true);
     diagHeartbeat(false, get().currentTrack?.id);
 
-    set({ isPlaying: false });
+    set({ isPlaying: false, isBuffering: false });
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'paused';
     }
@@ -1441,6 +1697,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   audio.onerror = () => {
     markTrackTransitionEnd();
     setInternalSrcChange(false);
+    set({ isBuffering: false });
     const err = audio.error;
     const { currentTrack, isPlaying } = get();
     console.warn('[Audio Error Event]: code =', err?.code, 'message =', err?.message, 'track =', currentTrack?.title);
@@ -1489,7 +1746,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     if (consecutiveErrors >= 3) {
       consecutiveErrors = 0;
       networkRetryCount = 0;
-      set({ isPlaying: false });
+      set({ isPlaying: false, isBuffering: false });
       stopTransitionBridge('playback error', true);
       if ('mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'paused';
@@ -1519,7 +1776,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       audioCtx.resume().catch(() => {});
     }
     startPlaybackWatchdog();
-    set({ isPlaying: true });
+    const bEnd = getBufferedEndAtCurrentTime();
+    set({ isPlaying: true, isBuffering: false, ...(bEnd > 0 ? { bufferedEnd: bEnd } : {}) });
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'playing';
     }
@@ -1540,17 +1798,24 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     if (isPrefetching) {
       cancelActivePrefetch();
     }
+    if (get().isPlaying && !audio.src.startsWith('blob:')) {
+      set({ isBuffering: true });
+    }
     if (get().isPlaying && 'mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'playing';
     }
-    // WAN buffer resilience: give connection up to 10 seconds before force-reconnecting
+    // WAN buffer resilience: give connection up to 14s and avoid resetting if buffer is actively arriving
     if (waitingTimeout) clearTimeout(waitingTimeout);
     waitingTimeout = setTimeout(() => {
-      if (get().isPlaying && audio.readyState < 3) {
-        console.warn('[Audio Waiting]: Stalled waiting for buffer for >10s, reconnecting stream...');
+      if (
+        get().isPlaying &&
+        audio.readyState < 3 &&
+        Date.now() - lastBufferProgressWallTime > 10000
+      ) {
+        console.warn('[Audio Waiting]: Stalled waiting for buffer for >14s, reconnecting stream...');
         recoverAudioStream(audio.currentTime || get().currentTime, true);
       }
-    }, 10000);
+    }, 14000);
   };
 
   audio.onstalled = () => {
@@ -1561,16 +1826,22 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     if (stallTimeout) clearTimeout(stallTimeout);
     stallTimeout = setTimeout(() => {
       if (get().isPlaying && audio.readyState < 3) {
-        console.warn('[Audio Stalled]: Stream stalled for >12s, reconnecting stream...');
+        console.warn('[Audio Stalled]: Stream stalled for >15s, reconnecting stream...');
         recoverAudioStream(audio.currentTime || get().currentTime, true);
       }
-    }, 12000);
+    }, 15000);
   };
 
   audio.onprogress = () => {
+    lastBufferProgressWallTime = Date.now();
     if (stallTimeout) {
       clearTimeout(stallTimeout);
       stallTimeout = null;
+    }
+    const bEnd = getBufferedEndAtCurrentTime();
+    if (Math.abs(bEnd - lastBufferedReport) >= 0.5) {
+      lastBufferedReport = bEnd;
+      set({ bufferedEnd: bEnd });
     }
   };
 
@@ -1588,8 +1859,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       update.duration = Math.max(cur, fallbackDur);
     }
 
+    const bEnd = getBufferedEndAtCurrentTime();
+    if (Math.abs(bEnd - lastBufferedReport) >= 1.0) {
+      lastBufferedReport = bEnd;
+      update.bufferedEnd = bEnd;
+    }
+
     set(update);
     savePlayerSessionState(get(), false);
+
+    if (cur >= 60 && stallsOnCurrentTrack === 0) {
+      resetStreamStalls();
+    }
 
     // Pre-arm the MediaSession bridge ~2.5 s before EOF while in background, so a controllable
     // player is already registered when audio.src is swapped to the next track.
@@ -1636,13 +1917,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const savedTime = cur;
       const nextTrack = downloadedInstantTrack;
       downloadedInstantTrack = null;
+      const q = resolveEffectiveStreamQuality(get().streamQualityPref);
+      const fmt = getPreferredStreamFormat();
       set({
         currentTrack: { ...nextTrack, isPreview: false },
         duration: (nextTrack.duration_ms || 180000) / 1000,
-        queue: [nextTrack]
+        queue: [nextTrack],
+        activeStreamQuality: q,
       });
       setInternalSrcChange(true);
-      audio.src = `/api/stream/${nextTrack.id}`;
+      audio.src = buildStreamUrl(nextTrack.id, q, fmt);
       const onReady = () => {
         try { audio.currentTime = savedTime; } catch (_) {}
         audio.play().then(() => { setInternalSrcChange(false); }).catch(() => { setInternalSrcChange(false); });
@@ -1694,10 +1978,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
   audio.onloadedmetadata = handleAudioDuration;
   audio.ondurationchange = handleAudioDuration;
-  audio.oncanplay = handleAudioDuration;
+  audio.oncanplay = () => {
+    handleAudioDuration();
+    if (get().isBuffering) {
+      set({ isBuffering: false });
+    }
+  };
 
   audio.onended = () => {
     diag(`[ended] #${get().currentTrack?.id} transitioning=${isTransitioningTrack}`);
+    set({ isBuffering: false });
     if (isTransitioningTrack && Date.now() - lastTrackTransitionWallTime < 2500) return;
     markTrackTransitionStart();
 
@@ -1712,13 +2002,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     if (get().currentTrack?.isPreview && downloadedInstantTrack) {
       const nextTrack = downloadedInstantTrack;
       downloadedInstantTrack = null;
+      const q = resolveEffectiveStreamQuality(get().streamQualityPref);
+      const fmt = getPreferredStreamFormat();
       set({
         currentTrack: { ...nextTrack, isPreview: false },
         duration: (nextTrack.duration_ms || 180000) / 1000,
-        queue: [nextTrack]
+        queue: [nextTrack],
+        activeStreamQuality: q,
       });
       setInternalSrcChange(true);
-      audio.src = `/api/stream/${nextTrack.id}`;
+      audio.src = buildStreamUrl(nextTrack.id, q, fmt);
       const onReady = () => {
         try { audio.currentTime = 29; } catch (_) {}
         audio.play().then(() => { setInternalSrcChange(false); }).catch(() => { setInternalSrcChange(false); });
@@ -1856,27 +2149,25 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
   };
 
-  const isBufferSafeForPrefetch = (): boolean => {
+  const isBufferSafeForPrefetch = (minBufferAheadSec: number): boolean => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
     // If playing from a local blob URL, network bandwidth is 100% free immediately!
     if (audio.src.startsWith('blob:')) return true;
 
     const cur = audio.currentTime;
-    // Wait only the first 2.5 seconds so the active stream starts smoothly
-    if (cur < 2.5) return false;
+    if (cur < 4) return false;
 
     if (!audio.duration || !isFinite(audio.duration) || audio.duration <= 0) {
-      return cur >= 5;
+      return cur >= 10 && audio.readyState >= 3;
     }
 
     for (let i = 0; i < audio.buffered.length; i++) {
       if (audio.buffered.start(i) <= cur && cur <= audio.buffered.end(i)) {
         const bufferedAhead = audio.buffered.end(i) - cur;
-        // Current track only needs 5 seconds buffered ahead (or reached EOF) before prefetching upcoming tracks
-        return bufferedAhead >= 5 || audio.buffered.end(i) >= (audio.duration - 1);
+        return bufferedAhead >= minBufferAheadSec || audio.buffered.end(i) >= (audio.duration - 1);
       }
     }
-    return cur >= 6 && audio.readyState >= 3;
+    return cur >= minBufferAheadSec && audio.readyState >= 3;
   };
 
   let lastPrefetchCheckTime = 0;
@@ -1887,13 +2178,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     if (now - lastPrefetchCheckTime < 1500) return;
     lastPrefetchCheckTime = now;
 
-    const { queue, currentIndex, currentTrack, isPlaying, repeat } = get();
+    const { queue, currentIndex, currentTrack, isPlaying, repeat, streamQualityPref } = get();
     if (!isPlaying || !currentTrack || !queue || queue.length === 0 || currentIndex < 0) return;
 
-    // Collect up to 6 upcoming tracks in the queue to pre-download and pre-buffer
-    const PREFETCH_LOOKAHEAD = 6;
+    const effectiveQuality = resolveEffectiveStreamQuality(streamQualityPref);
+    const format = getPreferredStreamFormat();
+    const profile = getPrefetchProfile(effectiveQuality);
+
+    // Keep server pre-transcoding 1-2 upcoming remote tracks warm
+    schedulePrepareUpcomingOnServer();
+
     const upcomingIndices: number[] = [];
-    for (let offset = 1; offset <= PREFETCH_LOOKAHEAD; offset++) {
+    for (let offset = 1; offset <= profile.lookaheadTracks; offset++) {
       const nextIdx = currentIndex + offset;
       if (nextIdx < queue.length) {
         upcomingIndices.push(nextIdx);
@@ -1907,7 +2203,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     if (upcomingIndices.length === 0) return;
 
-    // Find the first upcoming track in the 6-track window that isn't cached or pre-warmed yet
     let targetTrack: Track | null = null;
     let isImmediateNext = false;
     let targetOffsetIndex = 0;
@@ -1918,7 +2213,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const candidate = queue[idx];
       if (!candidate || candidate.id <= 0) continue;
 
-      const existingBlob = getSynchronousBlobUrl(candidate.id);
+      const existingOfflineBlob = getSynchronousBlobUrl(candidate.id);
+      const existingStreamBlob = getSynchronousStreamBlob(candidate.id);
+      const existingBlob = existingOfflineBlob || existingStreamBlob?.blobUrl;
       if (existingBlob) {
         if (i === 0) {
           preloadNextTrackElement(existingBlob);
@@ -1926,9 +2223,20 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         continue;
       }
 
-      // For tracks 1..3 ahead, ensure they are in synchronous Blob RAM; for tracks 4..6 ahead, ensure they are in CacheStorage
-      if (i >= 3 && isTrackDownloadedLocally(candidate.id)) {
-        continue;
+      if (isTrackDownloadedLocally(candidate.id)) {
+        const offlineUrl = await getCachedTrackUrl(candidate.id).catch(() => null);
+        if (offlineUrl) {
+          if (i === 0) preloadNextTrackElement(offlineUrl);
+          continue;
+        }
+      }
+
+      if (hasTrackInStreamCache(candidate.id)) {
+        const sc = await getStreamCachedTrackUrl(candidate.id, effectiveQuality).catch(() => null);
+        if (sc) {
+          if (i === 0) preloadNextTrackElement(sc.blobUrl);
+          continue;
+        }
       }
 
       if (!targetTrack) {
@@ -1941,26 +2249,28 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
 
     if (!targetTrack) return;
-    if (!isBufferSafeForPrefetch()) return;
+    if (isImmediateNext) {
+      preloadNextTrackElement(buildStreamUrl(targetTrack.id, effectiveQuality, format));
+    }
+    if (getStreamCacheLimitMb() === 0) return;
+    if (!isBufferSafeForPrefetch(profile.minBufferAheadSec)) return;
 
     isPrefetching = true;
     prefetchAbortController = new AbortController();
 
     try {
-      const cached = await isTrackCached(targetTrack.id);
-      if (!cached) {
-        console.log(`[Smart Prefetch] Pre-downloading upcoming track (+${targetOffsetIndex + 1}) into offline cache: "${targetTrack.title}"`);
-        await cacheTrackOffline(targetTrack, 35000, prefetchAbortController.signal);
-      }
+      console.log(`[Smart Prefetch] Pre-caching upcoming track (+${targetOffsetIndex + 1}) at ${effectiveQuality}/${format}: "${targetTrack.title}"`);
+      const ok = await prefetchTrackToStreamCache(
+        targetTrack,
+        effectiveQuality,
+        format,
+        prefetchAbortController.signal
+      );
 
-      // Warm the next 3 tracks into 0ms Blob RAM
-      if (targetOffsetIndex < 3) {
-        const blobUrl = await getCachedTrackUrl(targetTrack.id);
+      if (ok && targetOffsetIndex < 2) {
+        const sc = await getStreamCachedTrackUrl(targetTrack.id, effectiveQuality).catch(() => null);
         if (isImmediateNext) {
-          preloadNextTrackElement(blobUrl || `/api/stream/${targetTrack.id}`);
-        }
-        if (blobUrl) {
-          console.log(`[Smart Prefetch] Track "${targetTrack.title}" ready in RAM as 0ms Blob URL`);
+          preloadNextTrackElement(sc?.blobUrl || buildStreamUrl(targetTrack.id, effectiveQuality, format));
         }
       }
     } catch (err: any) {
@@ -1970,12 +2280,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     } finally {
       isPrefetching = false;
       prefetchAbortController = null;
-      // If more tracks in the 6-track lookahead window still need pre-downloading, chain the next prefetch!
       if (remainingCandidates > 0 && get().isPlaying) {
         if (prefetchTimeout) clearTimeout(prefetchTimeout);
         prefetchTimeout = setTimeout(() => {
           triggerEventDrivenPrefetch();
-        }, 900);
+        }, 1200);
       }
     }
   };
@@ -2034,12 +2343,25 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     setTimeout(async () => {
       try {
         if (audio.src || get().currentTrack?.id !== restoredTrack.id) return;
-        let streamUrl = `/api/stream/${restoredTrack.id}`;
+        const q = resolveEffectiveStreamQuality(get().streamQualityPref);
+        const fmt = getPreferredStreamFormat();
+        let streamUrl = buildStreamUrl(restoredTrack.id, q, fmt);
+        let restoredQuality: 'offline' | 'cache' | ResolvedStreamQuality = q;
         try {
           const cachedUrl = await getCachedTrackUrl(restoredTrack.id);
-          if (cachedUrl) streamUrl = cachedUrl;
+          if (cachedUrl) {
+            streamUrl = cachedUrl;
+            restoredQuality = 'offline';
+          } else {
+            const sc = await getStreamCachedTrackUrl(restoredTrack.id);
+            if (sc) {
+              streamUrl = sc.blobUrl;
+              restoredQuality = 'cache';
+            }
+          }
         } catch (_) {}
         if (audio.src || get().currentTrack?.id !== restoredTrack.id) return;
+        set({ activeStreamQuality: restoredQuality });
         setInternalSrcChange(true);
         audio.src = streamUrl;
         updateMediaSession(restoredTrack);
@@ -2086,6 +2408,39 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     eqPreset: loadSavedEqPreset(),
     isNormalizerEnabled: loadSavedNormalizer(),
     crossfade: loadSavedCrossfade(),
+
+    streamQualityPref: getSavedStreamQualityPref(),
+    activeStreamQuality: null,
+    isBuffering: false,
+    bufferedEnd: 0,
+    setStreamQualityPref: (pref: StreamQualityPreference) => {
+      const normalized = parseStreamQualityPref(pref);
+      saveStreamQualityPref(normalized);
+      resetStreamStalls();
+      set({ streamQualityPref: normalized });
+      apiRequest('/user/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ streamQualityPref: normalized }),
+      }).catch(() => {});
+
+      const { currentTrack, isPlaying, currentTime } = get();
+      if (
+        currentTrack &&
+        currentTrack.id > 0 &&
+        !currentTrack.isPreview &&
+        !currentTrack.streamUrl &&
+        !isTrackDownloadedLocally(currentTrack.id)
+      ) {
+        const pos = audio.currentTime > 0 ? audio.currentTime : currentTime;
+        if (isPlaying && !audio.paused) {
+          recoverAudioStream(pos, true, false, true);
+        } else {
+          pendingRecoveryOnResume = true;
+          pendingRecoveryTime = pos;
+        }
+      }
+      scheduleNextTrackPrefetch();
+    },
 
     updateQueueIfCurrent: (playlistId: number, newTracks: Track[]) => {
       const { currentPlaylistId, currentTrack, queue, originalQueue, shuffle } = get();
@@ -2538,10 +2893,28 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         if (audio.error !== null || audio.networkState === HTMLMediaElement.NETWORK_NO_SOURCE) {
           recoverAudioStream(seconds, get().isPlaying);
         } else {
+          let isUnseekableLiveStream = false;
           try {
-            audio.currentTime = seconds;
-          } catch (_) {
-            recoverAudioStream(seconds, get().isPlaying);
+            if (!audio.src.startsWith('blob:')) {
+              if (audio.seekable.length === 0) {
+                isUnseekableLiveStream = true;
+              } else {
+                const maxSeekable = audio.seekable.end(audio.seekable.length - 1);
+                if (isFinite(maxSeekable) && seconds > maxSeekable + 1) {
+                  isUnseekableLiveStream = true;
+                }
+              }
+            }
+          } catch (_) {}
+
+          if (isUnseekableLiveStream) {
+            recoverAudioStream(seconds, get().isPlaying, false);
+          } else {
+            try {
+              audio.currentTime = seconds;
+            } catch (_) {
+              recoverAudioStream(seconds, get().isPlaying);
+            }
           }
         }
       }
@@ -3045,6 +3418,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         try { localStorage.setItem(STORAGE_KEY_NORMALIZER, isNorm.toString()); } catch (_) {}
       }
 
+      if (settings.streamQualityPref !== undefined) {
+        const parsedQuality = parseStreamQualityPref(settings.streamQualityPref);
+        updates.streamQualityPref = parsedQuality;
+        saveStreamQualityPref(parsedQuality);
+      }
+
       if (Object.keys(updates).length > 0) {
         set(updates);
         // Only update live WebAudio nodes if the graph was already initialized inside a user gesture.
@@ -3153,6 +3532,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 if (typeof window !== 'undefined') {
   window.addEventListener('online', () => {
     console.log('[Player] Network connection restored (online event)');
+    resetStreamStalls();
     const state = usePlayerStore.getState();
     if (state.currentTrack) {
       const isBroken = audio.error !== null ||
@@ -3167,7 +3547,7 @@ if (typeof window !== 'undefined') {
         return;
       }
 
-      if (isBroken || state.isPlaying) {
+      if (isBroken || (state.isPlaying && !audio.src.startsWith('blob:'))) {
         console.log('[Player] Triggering automatic stream recovery on network restore...');
         recoverAudioStream(audio.currentTime > 0 ? audio.currentTime : state.currentTime, true);
       }
@@ -3180,12 +3560,17 @@ if (typeof window !== 'undefined') {
     if (state.currentTrack && !audio.src.startsWith('blob:')) {
       if (!state.isPlaying || audio.paused) {
         getCachedTrackUrl(state.currentTrack.id).catch(() => {});
+        getStreamCachedTrackUrl(state.currentTrack.id).catch(() => {});
         pendingRecoveryOnResume = true;
         pendingRecoveryTime = audio.currentTime > 0 ? audio.currentTime : state.currentTime;
         return;
       }
-      // Seamlessly switch to offline cached blob if available while playing
-      getCachedTrackUrl(state.currentTrack.id).then((blobUrl) => {
+      // Seamlessly switch to offline cached or smart-stream-cached blob if available while playing
+      Promise.all([
+        getCachedTrackUrl(state.currentTrack.id).catch(() => null),
+        getStreamCachedTrackUrl(state.currentTrack.id).catch(() => null),
+      ]).then(([offlineUrl, streamCached]) => {
+        const blobUrl = offlineUrl || streamCached?.blobUrl;
         if (blobUrl) {
           const latest = usePlayerStore.getState();
           if (!latest.isPlaying || audio.paused) {
@@ -3193,7 +3578,7 @@ if (typeof window !== 'undefined') {
             pendingRecoveryTime = audio.currentTime > 0 ? audio.currentTime : latest.currentTime;
             return;
           }
-          console.log('[Player] Switching to local offline blob URL during network loss');
+          console.log('[Player] Switching to local cached blob URL during network loss');
           const curTime = audio.currentTime;
           setInternalSrcChange(true);
           audio.src = blobUrl;

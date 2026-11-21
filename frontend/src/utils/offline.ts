@@ -1,5 +1,7 @@
 import { Playlist, Track } from '../types';
 import { tr, td } from '../store/i18nStore';
+import { evictTrackFromStreamCache, setStreamCachePlayingTrackId } from './streamCache';
+import { isRemoteStreamPriorityActive, shouldAvoidBackgroundOfflineSync } from './networkQuality';
 
 export const CACHE_NAME = 'jellyfin-spotify-audio-cache-v3';
 export const LEGACY_CACHE_NAME = 'jellyfin-spotify-audio-cache';
@@ -24,6 +26,7 @@ let currentlyPlayingTrackId: number | null = null;
 
 export function setCurrentlyPlayingTrackId(trackId: number | null): void {
   currentlyPlayingTrackId = trackId;
+  setStreamCachePlayingTrackId(trackId);
 }
 
 export interface QueuedDownloadJob {
@@ -540,9 +543,58 @@ export async function countCachedTracks(tracks: Track[]): Promise<number> {
   return cachedCount;
 }
 
+const lastEtagRevalidationMs = new Map<number, number>();
+const ETAG_REVALIDATION_TTL_MS = 30 * 60_000;
+
+function revalidateCachedTrackInBackground(trackId: number, match: Response): void {
+  if (typeof navigator === 'undefined' || !navigator.onLine || shouldAvoidBackgroundOfflineSync()) {
+    return;
+  }
+  const now = Date.now();
+  const prev = lastEtagRevalidationMs.get(trackId) || 0;
+  if (now - prev < ETAG_REVALIDATION_TTL_MS) return;
+  if (lastEtagRevalidationMs.size > 500) {
+    lastEtagRevalidationMs.clear();
+  }
+  lastEtagRevalidationMs.set(trackId, now);
+
+  const cachedEtag = match.headers.get('etag');
+  const cachedLen = match.headers.get('content-length');
+  if (!cachedEtag && !cachedLen) return;
+
+  fetch(`/api/stream/${trackId}`, {
+    method: 'HEAD',
+    cache: 'no-store',
+    signal: AbortSignal.timeout(4000),
+  })
+    .then(async (headRes) => {
+      if (!headRes.ok) return;
+      const serverEtag = headRes.headers.get('etag');
+      const serverLen = headRes.headers.get('content-length');
+      if (
+        (serverEtag && cachedEtag && serverEtag !== cachedEtag) ||
+        (serverLen && cachedLen && serverLen !== cachedLen)
+      ) {
+        console.log(`[Offline Cache] Stale audio detected in background for track #${trackId}, invalidating for next play.`);
+        const cache = await caches.open(CACHE_NAME);
+        await cache.delete(`/api/stream/${trackId}`, { ignoreSearch: true }).catch(() => {});
+        removeCachedTrackId(trackId);
+        if (trackId !== currentlyPlayingTrackId) {
+          const oldBlob = activeBlobUrls.get(trackId);
+          if (oldBlob) {
+            try { URL.revokeObjectURL(oldBlob); } catch {}
+            activeBlobUrls.delete(trackId);
+          }
+        }
+      }
+    })
+    .catch(() => {});
+}
+
 /**
  * Returns a local blob URL for instant 0ms playback if track is in offline cache.
  * Returns null if not cached (falling back to remote streaming).
+ * ETag revalidation runs non-blockingly in the background (stale-while-revalidate).
  */
 export async function getCachedTrackUrl(trackId: number): Promise<string | null> {
   if (typeof window === 'undefined' || !('caches' in window) || !trackId || trackId <= 0) return null;
@@ -562,31 +614,7 @@ export async function getCachedTrackUrl(trackId: number): Promise<string | null>
           removeCachedTrackId(trackId);
           return null;
         }
-        // Validate ETag / Content-Length against server when online so replaced Studio Masters are never shadowed by stale cache
-        try {
-          const cachedEtag = match.headers.get('etag');
-          const cachedLen = match.headers.get('content-length');
-          const headRes = await fetch(`/api/stream/${trackId}`, {
-            method: 'HEAD',
-            cache: 'no-store',
-            signal: AbortSignal.timeout(2500),
-          });
-          if (headRes.ok) {
-            const serverEtag = headRes.headers.get('etag');
-            const serverLen = headRes.headers.get('content-length');
-            if (
-              (serverEtag && cachedEtag && serverEtag !== cachedEtag) ||
-              (serverLen && cachedLen && serverLen !== cachedLen)
-            ) {
-              console.log(`[Offline Cache] Stale audio detected for track #${trackId}, evicting local cache to stream fresh Studio Master.`);
-              await cache.delete(`/api/stream/${trackId}`, { ignoreSearch: true }).catch(() => {});
-              removeCachedTrackId(trackId);
-              return null;
-            }
-          }
-        } catch (_) {
-          // Network unreachable or timed out: safely fall back to cached audio
-        }
+        revalidateCachedTrackInBackground(trackId, match);
       }
       addCachedTrackId(trackId);
       const blob = await match.blob();
@@ -841,6 +869,11 @@ export async function syncDownloadedPlaylist(
   }
 
   for (const t of actionableMissing) {
+    let waitedMs = 0;
+    while (isRemoteStreamPriorityActive() && waitedMs < 15000) {
+      await new Promise((r) => setTimeout(r, 1000));
+      waitedMs += 1000;
+    }
     const success = await cacheTrackOffline(t);
     if (success) {
       downloadedCount++;
@@ -875,6 +908,7 @@ export async function evictTrackOfflineCache(trackId: number): Promise<void> {
     activeBlobUrls.delete(trackId);
   }
   removeCachedTrackId(trackId);
+  await evictTrackFromStreamCache(trackId).catch(() => {});
 }
 
 /**

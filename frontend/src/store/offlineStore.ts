@@ -23,6 +23,7 @@ import {
 import { apiRequest } from '../api/client';
 import { toast } from './toastStore';
 import { tr, td } from './i18nStore';
+import { isRemoteStreamPriorityActive } from '../utils/networkQuality';
 
 export interface OfflineJobProgress {
   inProgress: boolean;
@@ -68,6 +69,16 @@ async function runQueueWorker(playlistId: number, tracks: Track[], playlist?: Pl
     useOfflineStore.getState().updateProgress(playlistId, done, total);
 
     for (let i = 0; i < missingTracks.length; i++) {
+      if (abortController.signal.aborted) {
+        break;
+      }
+
+      // Yield bandwidth to active remote playback while it is buffering or starting up (up to 15s max)
+      let waitedMs = 0;
+      while (isRemoteStreamPriorityActive() && !abortController.signal.aborted && waitedMs < 15000) {
+        await new Promise((r) => setTimeout(r, 1000));
+        waitedMs += 1000;
+      }
       if (abortController.signal.aborted) {
         break;
       }

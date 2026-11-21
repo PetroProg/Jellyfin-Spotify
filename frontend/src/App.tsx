@@ -25,6 +25,7 @@ import { DevicePickerModal } from './components/DevicePickerModal';
 import { toast } from './store/toastStore';
 import { useSyncStore } from './store/syncStore';
 import { getAllOfflinePlaylists, getAllPlaylistsCache, saveAllPlaylistsCache } from './utils/offline';
+import { shouldAvoidBackgroundOfflineSync } from './utils/networkQuality';
 import { useI18nStore, tr } from './store/i18nStore';
 
 export const App: React.FC = () => {
@@ -113,9 +114,11 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (isAuthenticated) {
       useSyncStore.getState().initSync();
-      // Auto-sync any tracks added to downloaded playlists in background
+      // Auto-sync any tracks added to downloaded playlists in background (skip on cellular data-saver / 2G)
       setTimeout(() => {
-        useOfflineStore.getState().syncAllDownloadedPlaylists();
+        if (!shouldAvoidBackgroundOfflineSync()) {
+          useOfflineStore.getState().syncAllDownloadedPlaylists();
+        }
       }, 3000);
     } else {
       useSyncStore.getState().disconnectSync();
@@ -225,7 +228,9 @@ export const App: React.FC = () => {
       fetchMe();
       loadPlaylists();
       usePlayerStore.getState().loadLikes();
-      useOfflineStore.getState().syncAllDownloadedPlaylists();
+      if (!shouldAvoidBackgroundOfflineSync()) {
+        useOfflineStore.getState().syncAllDownloadedPlaylists();
+      }
       useOfflineStore.getState().resumePendingDownloads();
       useSyncStore.getState().initSync();
     };

@@ -29,13 +29,25 @@ import {
   Upload,
   Database,
   Sliders,
-  Disc
+  Disc,
+  Wifi
 } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { usePlayerStore } from '../store/playerStore';
 import { useOfflineStore } from '../store/offlineStore';
 import { apiRequest } from '../api/client';
 import { getOfflineStorageUsage, clearAllOfflineCache } from '../utils/offline';
+import {
+  StreamQualityPreference,
+  getNetworkSummary,
+} from '../utils/networkQuality';
+import {
+  StreamCacheLimitMb,
+  getStreamCacheLimitMb,
+  setStreamCacheLimitMb,
+  getStreamCacheStats,
+  clearStreamCache,
+} from '../utils/streamCache';
 import { BlacklistItem, DownloadJob, Playlist } from '../types';
 import { toast, confirmDialog } from '../store/toastStore';
 import { useI18nStore } from '../store/i18nStore';
@@ -103,6 +115,13 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   // Offline Cache
   const [cacheSize, setCacheSize] = useState(() => t('Calculating...', 'Вычисление...'));
   const [clearingCache, setClearingCache] = useState(false);
+
+  // Remote Streaming & Smart Stream Cache (LRU)
+  const streamQualityPref = usePlayerStore((s) => s.streamQualityPref);
+  const setStreamQualityPref = usePlayerStore((s) => s.setStreamQualityPref);
+  const [streamCacheLimitMb, setStreamCacheLimitState] = useState<StreamCacheLimitMb>(() => getStreamCacheLimitMb());
+  const [streamCacheStats, setStreamCacheStats] = useState(() => getStreamCacheStats());
+  const [clearingStreamCache, setClearingStreamCache] = useState(false);
 
   // Blacklist
   const [blacklist, setBlacklist] = useState<BlacklistItem[]>([]);
@@ -336,6 +355,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
 
   useEffect(() => {
     getOfflineStorageUsage().then(setCacheSize);
+    setStreamCacheStats(getStreamCacheStats());
     loadBlacklist();
     loadSpotifyStatus();
     loadMixSchedule();
@@ -459,6 +479,30 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       toast.info(t('Offline cache cleared', 'Оффлайн-кеш успешно очищен'));
     } finally {
       setClearingCache(false);
+    }
+  };
+
+  const handleStreamCacheLimitChange = async (limitMb: StreamCacheLimitMb) => {
+    setStreamCacheLimitState(limitMb);
+    await setStreamCacheLimitMb(limitMb);
+    setStreamCacheStats(getStreamCacheStats());
+    getOfflineStorageUsage().then(setCacheSize);
+    toast.success(
+      limitMb === 0
+        ? t('Smart stream cache disabled', 'Умный кеш стриминга отключён')
+        : t(`Smart stream cache limit set to ${limitMb} MB`, `Лимит кеша стриминга: ${limitMb} МБ`)
+    );
+  };
+
+  const handleClearStreamCache = async () => {
+    setClearingStreamCache(true);
+    try {
+      await clearStreamCache();
+      setStreamCacheStats(getStreamCacheStats());
+      getOfflineStorageUsage().then(setCacheSize);
+      toast.info(t('Smart stream cache cleared', 'Кеш удалённого стриминга очищен'));
+    } finally {
+      setClearingStreamCache(false);
     }
   };
 
@@ -1429,6 +1473,117 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
             </button>
           </form>
         </section>
+
+        {/* 3.5 Remote Streaming & Smart Stream Cache */}
+        {(() => {
+          const netSummary = getNetworkSummary(streamQualityPref, lang);
+          const streamUsedMb = (streamCacheStats.sizeBytes / (1024 * 1024)).toFixed(1);
+          const qualityOptions: Array<{ id: StreamQualityPreference; title: string; sub: string }> = [
+            { id: 'auto', title: t('Auto', 'Авто'), sub: t('160k Opus remote / 320k LAN', '160k Opus удалённо / 320k дома') },
+            { id: 'high', title: 'Opus 160k', sub: t('Transparent (~2x faster)', 'Макс. качество (~2× быстрее)') },
+            { id: 'medium', title: 'Opus 128k', sub: t('Balanced (~2.6x faster)', 'Баланс (~2.6× быстрее)') },
+            { id: 'low', title: 'Opus 96k', sub: t('Data saver (~3.5x faster)', 'Экономия (~3.5× быстрее)') },
+            { id: 'original', title: '320k MP3', sub: t('Original (ID3v2 skipped)', 'Оригинал (без обложки в потоке)') },
+          ];
+
+          return (
+            <section className="bg-cat-mantle p-6 rounded-3xl border border-cat-blue/30 shadow-lg space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-xl bg-cat-blue/20 text-cat-blue">
+                    <Wifi className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h2 className="font-bold text-base text-cat-text">
+                      {t('Remote Streaming & Network', 'Удалённый стриминг и сеть')}
+                    </h2>
+                    <p className="text-xs text-cat-subtext0 mt-0.5">
+                      {t(
+                        'Adaptive Opus delivery & server/client caching for tracks not stored offline',
+                        'Адаптивная подача в Opus и умное кеширование для треков вне оффлайн-хранилища'
+                      )}
+                    </p>
+                  </div>
+                </div>
+
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold bg-cat-surface0 text-cat-blue border border-cat-blue/30 self-start sm:self-center shrink-0">
+                  <Radio className="w-3.5 h-3.5" />
+                  <span>{netSummary.label}</span>
+                </span>
+              </div>
+
+              <div>
+                <p className="text-xs font-bold text-cat-text mb-2">
+                  {t('Streaming Audio Quality', 'Качество удалённого стриминга')}
+                </p>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                  {qualityOptions.map((opt) => {
+                    const active = streamQualityPref === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setStreamQualityPref(opt.id)}
+                        className={`p-2.5 rounded-2xl border text-left transition-all cursor-pointer ${
+                          active
+                            ? 'bg-cat-mauve/15 border-cat-mauve text-cat-text shadow-sm'
+                            : 'bg-cat-surface0/50 border-cat-surface1/40 text-cat-subtext0 hover:bg-cat-surface0 hover:text-cat-text'
+                        }`}
+                      >
+                        <div className={`text-xs font-bold ${active ? 'text-cat-mauve' : 'text-cat-text'}`}>
+                          {opt.title}
+                        </div>
+                        <div className="text-[10px] leading-tight mt-0.5 opacity-80">{opt.sub}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="pt-3 border-t border-cat-surface1/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-xs font-bold text-cat-text">
+                    {t('Smart Stream Cache (LRU)', 'Умный кеш стриминга (LRU)')}
+                  </h4>
+                  <p className="text-[11px] text-cat-subtext0 mt-0.5">
+                    {t(
+                      `Used: ${streamUsedMb} MB (${streamCacheStats.trackCount} tracks) • Separate from offline playlists`,
+                      `Занято: ${streamUsedMb} МБ (${streamCacheStats.trackCount} треков) • Отдельно от оффлайн-плейлистов`
+                    )}
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1 bg-cat-surface0 p-1 rounded-2xl border border-cat-surface1/40">
+                    {([0, 100, 200, 500] as StreamCacheLimitMb[]).map((mb) => (
+                      <button
+                        key={mb}
+                        type="button"
+                        onClick={() => handleStreamCacheLimitChange(mb)}
+                        className={`px-2.5 py-1 rounded-xl text-[11px] font-mono font-bold transition-all cursor-pointer ${
+                          streamCacheLimitMb === mb
+                            ? 'bg-cat-blue text-cat-base shadow-sm'
+                            : 'text-cat-subtext0 hover:text-cat-text'
+                        }`}
+                      >
+                        {mb === 0 ? t('Off', 'Выкл') : `${mb}${t('M', 'М')}`}
+                      </button>
+                    ))}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleClearStreamCache}
+                    disabled={clearingStreamCache || streamCacheStats.trackCount === 0}
+                    className="px-3.5 py-2 rounded-2xl bg-cat-surface0 hover:bg-cat-red/20 hover:text-cat-red text-cat-subtext0 font-semibold text-xs transition-colors disabled:opacity-40 cursor-pointer"
+                  >
+                    {clearingStreamCache ? t('Clearing...', 'Очистка...') : t('Clear Stream Cache', 'Очистить кеш стриминга')}
+                  </button>
+                </div>
+              </div>
+            </section>
+          );
+        })()}
 
         {/* 4. Offline Cache Management */}
         <section className="bg-cat-mantle p-6 rounded-3xl border border-cat-surface0/60 flex flex-col sm:flex-row sm:items-center justify-between gap-4">

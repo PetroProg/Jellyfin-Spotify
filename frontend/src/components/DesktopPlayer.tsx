@@ -2,23 +2,27 @@ import React, { useState, useEffect } from 'react';
 import { 
   Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Repeat1, 
   Volume2, VolumeX, Heart, Music2, Sparkles, ListMusic, FolderPlus,
-  Ban, Radio
+  Ban, Radio, Loader2
 } from 'lucide-react';
 import { usePlayerStore } from '../store/playerStore';
 import { useSyncStore } from '../store/syncStore';
 import { AddToPlaylistModal } from './AddToPlaylistModal';
 import { toast } from '../store/toastStore';
 import { useI18nStore } from '../store/i18nStore';
+import { formatQualityLabel, getPreferredStreamFormat } from '../utils/networkQuality';
 
 interface DesktopPlayerProps {
   onToggleQueue?: () => void;
 }
 
 export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) => {
-  const { t } = useI18nStore();
+  const { lang, t } = useI18nStore();
   const {
     currentTrack,
     isPlaying,
+    isBuffering,
+    bufferedEnd,
+    activeStreamQuality,
     currentTime,
     duration,
     togglePlay,
@@ -105,6 +109,10 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
     trackDurSec,
     currentTime
   );
+  const bufferedPercent = effectiveDuration > 0
+    ? Math.min(100, Math.max(0, (bufferedEnd / effectiveDuration) * 100))
+    : 0;
+  const qualityLabel = formatQualityLabel(activeStreamQuality, getPreferredStreamFormat(), lang);
 
   return (
     <div className="hidden md:flex items-center justify-between h-20 bg-cat-mantle border-t border-cat-surface0/40 px-5 select-none z-30">
@@ -171,7 +179,9 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
             onClick={togglePlay}
             className="w-9 h-9 rounded-full bg-cat-mauve text-cat-base flex items-center justify-center hover:opacity-95 active:scale-95 transition-all shadow-md"
           >
-            {isPlaying ? (
+            {isPlaying && isBuffering ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : isPlaying ? (
               <Pause className="w-4 h-4 fill-current" />
             ) : (
               <Play className="w-4 h-4 fill-current ml-0.5" />
@@ -197,15 +207,28 @@ export const DesktopPlayer: React.FC<DesktopPlayerProps> = ({ onToggleQueue }) =
         {/* Timeline Bar */}
         <div className="flex items-center gap-2 w-full text-xs font-mono text-cat-subtext0">
           <span>{formatTime(currentTime)}</span>
-          <input
-            type="range"
-            min={0}
-            max={effectiveDuration || 100}
-            value={Math.min(currentTime, effectiveDuration || currentTime)}
-            onChange={(e) => seek(Number(e.target.value))}
-            className="flex-1 h-1 bg-cat-surface1 rounded-lg appearance-none cursor-pointer accent-cat-mauve"
-          />
+          <div className="relative flex-1 flex items-center">
+            <div className="absolute inset-x-0 h-1 rounded-lg bg-cat-surface1 overflow-hidden pointer-events-none">
+              <div
+                className="h-full bg-cat-overlay0/50 transition-all duration-300"
+                style={{ width: `${bufferedPercent}%` }}
+              />
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={effectiveDuration || 100}
+              value={Math.min(currentTime, effectiveDuration || currentTime)}
+              onChange={(e) => seek(Number(e.target.value))}
+              className="relative z-10 w-full h-1 bg-transparent rounded-lg appearance-none cursor-pointer accent-cat-mauve"
+            />
+          </div>
           <span>{formatTime(effectiveDuration)}</span>
+          {qualityLabel && (
+            <span className="hidden lg:inline-block px-1.5 py-0.5 rounded-md bg-cat-surface0 text-[10px] font-sans font-semibold text-cat-subtext0 border border-cat-surface1/40 shrink-0">
+              {qualityLabel}
+            </span>
+          )}
         </div>
 
         {/* Remote Playback Device Indicator */}
