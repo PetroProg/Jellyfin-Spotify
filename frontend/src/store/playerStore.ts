@@ -39,6 +39,13 @@ import {
   getStreamCacheLimitMb,
 } from '../utils/streamCache';
 import { diag, diagHeartbeat, initPlaybackDiagnostics } from '../utils/playbackDiag';
+import {
+  onTrackPlaybackStart,
+  onPreviewUpgradedToFull,
+  onPlaybackTimeUpdate,
+  onPlaybackPausedOrStopped,
+  onTrackEndedOrRepeated,
+} from '../utils/listeningTracker';
 
 initPlaybackDiagnostics();
 
@@ -139,7 +146,7 @@ interface PlayerState {
   setCrossfade: (seconds: number) => void;
   applyAccountSettings: (settings: Record<string, string>) => void;
   handleInstantTrackDownloaded: (spotifyId: string, realTrack: Track) => void;
-  reloadCurrentTrackStream: (trackOverride?: Track) => void;
+  reloadCurrentTrackStream: (trackOverride?: Track, resetToStart?: boolean) => void;
 }
 
 const STORAGE_KEY_VOLUME = 'jellyfy_player_volume';
@@ -1122,6 +1129,7 @@ function startPlaybackWatchdog() {
 }
 
 function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
+  onTrackPlaybackStart(track);
   cancelActivePrefetch();
   const reqId = ++currentPlayRequestId;
   stallsOnCurrentTrack = 0;
@@ -1774,6 +1782,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     diagHeartbeat(false, get().currentTrack?.id);
 
     set({ isPlaying: false, isBuffering: false });
+    onPlaybackPausedOrStopped();
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'paused';
     }
@@ -2009,6 +2018,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     const effectiveDur = update.duration || get().duration;
     const isAppVisible = typeof document !== 'undefined' && !document.hidden;
 
+    onPlaybackTimeUpdate(cur, effectiveDur, !audio.paused);
+
     // Crossfade handling at end of track (only active when foreground/visible to avoid background volume drops)
     if (isAppVisible && crossfade > 0 && effectiveDur > 0 && isFinite(effectiveDur) && isFinite(cur) && !isFadingIn) {
       const remaining = effectiveDur - cur;
@@ -2029,6 +2040,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const savedTime = cur;
       const nextTrack = downloadedInstantTrack;
       downloadedInstantTrack = null;
+      onPreviewUpgradedToFull(nextTrack);
       const q = resolveEffectiveStreamQuality(get().streamQualityPref);
       const fmt = getPreferredStreamFormat();
       set({
@@ -2065,6 +2077,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         useSyncStore.setState({ isLocalActive: true });
       }
       const { repeat, nextTrack } = get();
+      onTrackEndedOrRepeated(repeat === 'one', get().currentTrack);
       if (repeat === 'one') {
         audio.currentTime = 0;
         audio.play().catch(() => {});
@@ -2114,6 +2127,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     if (get().currentTrack?.isPreview && downloadedInstantTrack) {
       const nextTrack = downloadedInstantTrack;
       downloadedInstantTrack = null;
+      onPreviewUpgradedToFull(nextTrack);
       const q = resolveEffectiveStreamQuality(get().streamQualityPref);
       const fmt = getPreferredStreamFormat();
       set({
@@ -2135,6 +2149,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
 
     const { repeat, nextTrack } = get();
+    onTrackEndedOrRepeated(repeat === 'one', get().currentTrack);
     if (repeat === 'one') {
       audio.currentTime = 0;
       audio.play().catch(() => {});
@@ -2714,6 +2729,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     stopLocalPlayback: () => {
+      onPlaybackPausedOrStopped();
       clearInterruptionRetries();
       stopPlaybackWatchdog();
       try {
@@ -3619,23 +3635,55 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
     },
 
-    reloadCurrentTrackStream: (trackOverride?: Track) => {
-      const { currentTrack, isPlaying, currentTime } = get();
+    reloadCurrentTrackStream: (trackOverride?: Track, resetToStart: boolean = false) => {
+      const { currentTrack, isPlaying, currentTime, queue, originalQueue } = get();
       const t = trackOverride || currentTrack;
       if (t && t.id > 0) {
         if (trackOverride) {
+          const updatedQueue = queue.map((q) => (q.id === trackOverride.id ? { ...q, ...trackOverride } : q));
+          const updatedOrigQueue = originalQueue.map((q) => (q.id === trackOverride.id ? { ...q, ...trackOverride } : q));
+          if (currentTrack?.id !== trackOverride.id) {
+            set({
+              queue: updatedQueue,
+              originalQueue: updatedOrigQueue,
+            });
+            return;
+          }
+          const nextCurrent = { ...currentTrack, ...trackOverride };
+          const nextDuration = (trackOverride.duration_ms || 180000) / 1000;
+          const shouldReset = resetToStart || currentTime >= nextDuration;
           set({
-            currentTrack: trackOverride,
-            duration: (trackOverride.duration_ms || 180000) / 1000,
+            currentTrack: nextCurrent,
+            duration: nextDuration,
+            queue: updatedQueue,
+            originalQueue: updatedOrigQueue,
+            ...(shouldReset ? { currentTime: 0 } : {}),
           });
-          updateMediaSession(trackOverride);
-        }
-        if (!isPlaying || audio.paused) {
-          pendingRecoveryOnResume = true;
-          pendingRecoveryTime = audio.currentTime > 0 ? audio.currentTime : (currentTime > 0 ? currentTime : 0);
+          updateMediaSession(nextCurrent);
+        } else if (currentTrack?.id !== t.id) {
           return;
         }
-        recoverAudioStream(currentTime > 0 ? currentTime : 0, true);
+        const activeDuration = (t.duration_ms || 180000) / 1000;
+        const shouldReset = resetToStart || currentTime >= activeDuration;
+        const targetTime = shouldReset ? 0 : (currentTime > 0 ? currentTime : 0);
+        if (shouldReset) {
+          set({ currentTime: 0 });
+          try {
+            audio.currentTime = 0;
+          } catch (_) {}
+        }
+        if (!isPlaying || audio.paused) {
+          setInternalSrcChange(true);
+          try {
+            audio.removeAttribute('src');
+            audio.load();
+          } catch (_) {}
+          setInternalSrcChange(false);
+          pendingRecoveryOnResume = true;
+          pendingRecoveryTime = targetTime;
+          return;
+        }
+        recoverAudioStream(targetTime, true, true, true);
       }
     },
   };

@@ -49,6 +49,7 @@ import {
   isPathInsideMusicDir,
   matchesArtistPattern,
   repairVariantTracksIfNeeded,
+  repairMismatchedLiveTracksIfNeeded,
   getSafeArtistDir,
   sanitizeFilename
 } from './downloader';
@@ -57,6 +58,13 @@ import { getJellyfinStatus } from './jellyfin';
 import { setupWebSocketSync, broadcastToUser, terminateUserSessions } from './sync';
 import { getOrGenerateDailyMixes, saveDailyMixAsPlaylist } from './dailyMix';
 import { startNightlyScheduler, getNightlySchedulerStatus, updateNightlySchedule } from './nightlyScheduler';
+import { recordListeningEvent, getListeningReportData } from './listeningStats';
+import {
+  startWeeklyReportScheduler,
+  getWeeklyReportStatus,
+  triggerWeeklyReportNow,
+  getWeeklyReportConfig,
+} from './weeklyReportScheduler';
 import { getOrGenerateJwtSecret } from './authSecret';
 import { resolveAndSavePlaylistCover, initPlaylistCoversBackfill } from './playlistCover';
 import { getCachedMp3Offset, invalidateTrackStreamMeta } from './streamOptimizer';
@@ -323,14 +331,18 @@ server.decorate('authenticate', async (request: any, reply: any) => {
 });
 
 // Admin check helper
-function isAdmin(req: any): boolean {
-  if (!req.user || !req.user.id) return false;
-  if (req.user.id === 1) return true;
+function isAdminUser(user: { id?: number; username?: string } | null | undefined): boolean {
+  if (!user || !user.id) return false;
+  if (user.id === 1) return true;
   const adminUser = process.env.ADMIN_USER;
   if (adminUser) {
-    if (String(req.user.id) === adminUser || req.user.username === adminUser) return true;
+    if (String(user.id) === adminUser || user.username === adminUser) return true;
   }
   return false;
+}
+
+function isAdmin(req: any): boolean {
+  return isAdminUser(req?.user);
 }
 
 // Host header sanitizer to prevent Host injection vulnerabilities
@@ -417,7 +429,13 @@ server.post('/api/auth/register', async (req: any, reply: any) => {
   const token = server.jwt.sign({ id: userId, username: cleanUser }, { expiresIn: '30d' });
   return {
     token,
-    user: { id: userId, username: cleanUser, display_name: cleanDisplayName, email: resolvedEmail }
+    user: {
+      id: userId,
+      username: cleanUser,
+      display_name: cleanDisplayName,
+      email: resolvedEmail,
+      is_admin: isAdminUser({ id: userId, username: cleanUser }),
+    }
   };
 });
 
@@ -459,7 +477,14 @@ server.post('/api/auth/login', async (req: any, reply: any) => {
   const settings = getUserSettings(user.id);
   return {
     token,
-    user: { id: user.id, username: user.username, display_name: user.display_name, email: user.email, settings }
+    user: {
+      id: user.id,
+      username: user.username,
+      display_name: user.display_name,
+      email: user.email,
+      is_admin: isAdminUser({ id: user.id, username: user.username }),
+      settings,
+    }
   };
 });
 
@@ -478,7 +503,7 @@ server.get('/api/auth/me', { preHandler: [(server as any).authenticate] }, async
   const user: any = db.prepare('SELECT id, username, display_name, created_at FROM users WHERE id = ?').get(req.user.id);
   if (!user) return { user: null };
   const settings = getUserSettings(req.user.id);
-  return { user: { ...user, settings } };
+  return { user: { ...user, is_admin: isAdminUser(user), settings } };
 });
 
 server.get('/api/user/settings', { preHandler: [(server as any).authenticate] }, async (req: any) => {
@@ -3184,6 +3209,65 @@ server.post('/api/settings', { preHandler: [(server as any).authenticate] }, asy
   return { success: true };
 });
 
+// ----------------- LISTENING LOGS & WEEKLY EMAIL REPORT -----------------
+server.post('/api/listening/log', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  const limitCheck = consumeRateLimit('listening_log:' + req.user.id, 60, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({
+      error: `Слишком много запросов логирования. Подождите ${limitCheck.retryAfterSec || 60} сек.`
+    });
+  }
+
+  const body = req.body || {};
+  const result = recordListeningEvent(req.user.id, {
+    clientEventId: body.clientEventId,
+    trackId: body.trackId,
+    title: body.title,
+    artist: body.artist,
+    durationSec: body.durationSec,
+    listenedSec: body.listenedSec,
+    playedAt: body.playedAt,
+  });
+
+  if (!result.ok) {
+    return reply.status(400).send({ error: result.error || 'Некорректные данные прослушивания' });
+  }
+
+  return { success: true, listenedSec: result.listenedSec ?? 0 };
+});
+
+server.get('/api/admin/listening-stats', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  if (!isAdmin(req)) {
+    return reply.status(403).send({ error: 'Доступ разрешен только администратору' });
+  }
+
+  const config = getWeeklyReportConfig();
+  const report = getListeningReportData(7, config.timezone);
+  const schedule = getWeeklyReportStatus();
+
+  return { report, schedule };
+});
+
+server.post('/api/admin/weekly-report/send', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
+  if (!isAdmin(req)) {
+    return reply.status(403).send({ error: 'Доступ разрешен только администратору' });
+  }
+
+  const limitCheck = consumeRateLimit('admin_weekly_report_send:' + req.user.id, 2, 60000);
+  if (limitCheck.blocked) {
+    return reply.status(429).send({
+      error: `Слишком частая отправка отчёта. Подождите ${limitCheck.retryAfterSec || 60} сек.`
+    });
+  }
+
+  try {
+    const result = await triggerWeeklyReportNow({ markScheduledSent: false });
+    return result;
+  } catch (err: any) {
+    return reply.status(400).send({ error: err?.message || 'Не удалось отправить отчёт на почту' });
+  }
+});
+
 // SPA Fallback for React PWA routing with in-memory RAM caching
 let cachedIndexHtml: Buffer | null = null;
 let cachedIndexMtime = 0;
@@ -3224,8 +3308,12 @@ server.listen({ port: PORT, host: '0.0.0.0' }, async (err, address) => {
   await resumePendingDownloads();
   // Start automated nightly mix background generator & pre-downloader
   startNightlyScheduler();
+  // Start weekly listening report email scheduler (Sundays 12:00 Europe/Zurich)
+  startWeeklyReportScheduler();
   // Automatically backfill genre/style covers for any playlists without artwork
   initPlaylistCoversBackfill(db);
   // One-time background repair for existing variant tracks (Slowed, Sped Up, Reverb, Instrumental, etc.)
   repairVariantTracksIfNeeded();
+  // One-time background repair for studio tracks accidentally downloaded as Live/Acoustic/Cover
+  repairMismatchedLiveTracksIfNeeded();
 });

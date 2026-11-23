@@ -37,6 +37,7 @@ function isPersistentMutationEndpoint(endpoint: string, method: string): boolean
     ep.startsWith('/likes') ||
     ep.startsWith('/playlists') ||
     ep.startsWith('/blacklist') ||
+    ep.startsWith('/listening') ||
     ep.startsWith('/user/settings') ||
     ep.startsWith('/settings')
   );

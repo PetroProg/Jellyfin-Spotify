@@ -139,6 +139,21 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS listening_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    track_id INTEGER,
+    track_title TEXT NOT NULL,
+    track_artist TEXT NOT NULL,
+    duration_sec INTEGER DEFAULT 0,
+    listened_sec INTEGER DEFAULT 0,
+    client_event_id TEXT NOT NULL,
+    played_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, client_event_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE SET NULL
+  );
 `);
 
 // Safe migrations
@@ -293,6 +308,12 @@ try {
 
           db.prepare('DELETE FROM liked_tracks WHERE track_id = ?').run(removeId);
 
+          db.prepare(`
+            UPDATE listening_logs
+            SET track_id = ?
+            WHERE track_id = ?
+          `).run(keepId, removeId);
+
           db.prepare('DELETE FROM tracks WHERE id = ?').run(removeId);
         }
       }
@@ -344,6 +365,9 @@ try {
     CREATE INDEX IF NOT EXISTS idx_daily_mix_history_user_cat_date ON daily_mix_history(user_id, category, recommended_date);
     CREATE INDEX IF NOT EXISTS idx_daily_mix_history_track_key ON daily_mix_history(track_key);
     CREATE INDEX IF NOT EXISTS idx_daily_mix_history_created ON daily_mix_history(created_at);
+    CREATE INDEX IF NOT EXISTS idx_listening_logs_user_played ON listening_logs(user_id, played_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_listening_logs_played_at ON listening_logs(played_at);
+    CREATE INDEX IF NOT EXISTS idx_listening_logs_user_track ON listening_logs(user_id, LOWER(track_title), LOWER(track_artist));
   `);
 } catch (e: any) {
   console.warn('[DB Index Migration Warning]:', e.message);

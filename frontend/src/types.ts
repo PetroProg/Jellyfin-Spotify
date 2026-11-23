@@ -2,6 +2,7 @@ export interface User {
   id: number;
   username: string;
   display_name: string;
+  is_admin?: boolean;
   created_at?: string;
   settings?: Record<string, string>;
 }
