@@ -1,7 +1,7 @@
 import { Playlist, Track } from '../types';
 import { tr, td } from '../store/i18nStore';
 import { evictTrackFromStreamCache, setStreamCachePlayingTrackId } from './streamCache';
-import { isRemoteStreamPriorityActive, shouldAvoidBackgroundOfflineSync } from './networkQuality';
+import { isRemoteStreamPriorityActive, shouldAvoidBackgroundOfflineSync, bumpTrackStreamVersion } from './networkQuality';
 
 export const CACHE_NAME = 'jellyfin-spotify-audio-cache-v3';
 export const LEGACY_CACHE_NAME = 'jellyfin-spotify-audio-cache';
@@ -908,6 +908,7 @@ export async function evictTrackOfflineCache(trackId: number): Promise<void> {
     activeBlobUrls.delete(trackId);
   }
   removeCachedTrackId(trackId);
+  bumpTrackStreamVersion(trackId);
   await evictTrackFromStreamCache(trackId).catch(() => {});
 }
 

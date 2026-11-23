@@ -40,10 +40,13 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
       const res = await apiRequest(`/tracks/${track.id}/redownload`, { method: 'POST' });
       if (res && res.success) {
         toast.success(t('Studio original successfully installed!', 'Студийный оригинал успешно установлен!'));
+        if (res.track) {
+          window.dispatchEvent(new CustomEvent('jellyfy:track_updated', { detail: res.track }));
+        }
         await evictTrackOfflineCache(track.id);
         const state = usePlayerStore.getState();
         if (state.currentTrack?.id === track.id) {
-          state.reloadCurrentTrackStream(res.track || undefined);
+          state.reloadCurrentTrackStream(res.track || undefined, true);
         }
       } else {
         toast.error(res?.error || t('Could not find better studio version', 'Не удалось найти другую студийную версию'));

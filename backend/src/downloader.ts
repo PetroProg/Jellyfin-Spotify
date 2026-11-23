@@ -430,6 +430,9 @@ export interface AudioProbeResult {
   sampleRate?: number;
   isHighQuality: boolean;
   reason?: string;
+  sourceVideoId?: string;
+  embeddedTitle?: string;
+  embeddedAlbum?: string;
 }
 
 export async function probeAudioFile(filePath: string, expectedDurationMs?: number): Promise<AudioProbeResult> {
@@ -482,6 +485,12 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
         const parsed = JSON.parse(stdout) || {};
         const data = parsed.format || {};
         const stream = parsed.streams?.[0] || {};
+        const tags = data.tags || {};
+        const rawUrl = String(tags.purl || tags.comment || tags.PURL || tags.COMMENT || '').trim();
+        const ytMatch = rawUrl.match(/(?:v=|youtu\.be\/)([a-zA-Z0-9_-]{6,20})/);
+        const sourceVideoId = ytMatch ? ytMatch[1] : undefined;
+        const embeddedTitle = String(tags.title || tags.TITLE || '').trim() || undefined;
+        const embeddedAlbum = String(tags.album || tags.ALBUM || '').trim() || undefined;
         const durationSec = parseFloat(data.duration) || 0;
         const bitrateBps = parseInt(data.bit_rate || stream.bit_rate, 10) || 0;
         const bitrateKbps = Math.round(bitrateBps / 1000);
@@ -514,7 +523,10 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
             bitrateKbps,
             sampleRate,
             isHighQuality: false,
-            reason: reasons.join(', ')
+            reason: reasons.join(', '),
+            sourceVideoId,
+            embeddedTitle,
+            embeddedAlbum
           });
         }
 
@@ -523,7 +535,10 @@ export async function probeAudioFile(filePath: string, expectedDurationMs?: numb
           durationSec,
           bitrateKbps,
           sampleRate,
-          isHighQuality: true
+          isHighQuality: true,
+          sourceVideoId,
+          embeddedTitle,
+          embeddedAlbum
         });
       } catch (err: any) {
         finish({ valid: false, durationSec: 0, bitrateKbps: 0, isHighQuality: false, reason: err.message });
@@ -821,6 +836,11 @@ async function runWorkerLoop() {
   console.log('[Downloader] Background worker loop completed and idle.');
 }
 
+export interface StudioSearchOptions {
+  album?: string;
+  excludeVideoIds?: Set<string>;
+}
+
 interface StudioCandidateCacheEntry {
   url: string;
   cachedAt: number;
@@ -832,7 +852,8 @@ export async function findBestStudioAudioSource(
   artist: string,
   title: string,
   durationMs?: number,
-  bypassCache: boolean = false
+  bypassCache: boolean = false,
+  options?: StudioSearchOptions
 ): Promise<string> {
   const targetSec = durationMs ? Math.round(durationMs / 1000) : 0;
   // Security: strip leading dashes/flags to prevent argument injection, normalize unicode
@@ -849,9 +870,21 @@ export async function findBestStudioAudioSource(
     .replace(/\s+/g, ' ')
     .trim();
   const cleanTitleNoFeat = cleanTitle.replace(/\s*\((feat|ft)\.?\s+[^)]+\)/gi, '').trim();
+  const cleanTitleBase = (cleanTitleNoFeat || cleanTitle)
+    .replace(/\s*[-–—]\s*(?:Remastered(?:\s+\d{4})?|\d{4}\s*[-–—]?\s*Remaster(?:ed)?|Single Version|Album Version|Radio Edit|Original Mix|Explicit|Clean)\b.*$/i, '')
+    .replace(/\s*\((?:Remastered(?:\s+\d{4})?|\d{4}\s+Remaster(?:ed)?|Single Version|Album Version|Radio Edit|Original Mix|Explicit|Clean)\)/gi, '')
+    .trim();
+  const cleanAlbum = (options?.album || '')
+    .replace(/[∅Ø]/g, 'O')
+    .replace(/^[- \t]+/, '')
+    .replace(/[\\/:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const isUsefulAlbum = cleanAlbum.length >= 3 && !/^(любимые треки|liked songs|single|-)$/i.test(cleanAlbum);
 
+  const hasExclusions = Boolean(options?.excludeVideoIds && options.excludeVideoIds.size > 0);
   const cacheKey = `${cleanArtist.toLowerCase()}:::${cleanTitle.toLowerCase()}`;
-  if (!bypassCache) {
+  if (!bypassCache && !hasExclusions) {
     const cached = studioCandidateCache.get(cacheKey);
     if (cached && (Date.now() - cached.cachedAt) < CANDIDATE_CACHE_TTL_MS) {
       console.log(`[Studio Audio Match Cache HIT] "${cleanArtist} - ${cleanTitle}": ${cached.url}`);
@@ -860,7 +893,7 @@ export async function findBestStudioAudioSource(
   }
 
   // Helper to query yt-dlp flat playlist / dump json
-  const fetchCandidates = async (queryOrUrl: string, defaultSearch?: string, timeoutMs: number = 22000): Promise<any[]> => {
+  const fetchCandidates = async (queryOrUrl: string, defaultSearch?: string, timeoutMs: number = 45000): Promise<any[]> => {
     return new Promise<any[]>((resolve) => {
       const isUrl = queryOrUrl.startsWith('http://') || queryOrUrl.startsWith('https://');
       const nodePath = process.execPath || '/usr/local/bin/node';
@@ -904,19 +937,36 @@ export async function findBestStudioAudioSource(
     });
   };
 
+  // Unicode-aware word boundary matcher so ASCII and Cyrillic variant tags match without substring false positives (e.g. "alive")
+  const wordRe = (body: string) => new RegExp(`(?<![\\p{L}\\p{N}])(?:${body})(?![\\p{L}\\p{N}])`, 'iu');
+
   // Variant detection helpers so Slowed / Super Slowed / Ultra Slowed / Sped Up / Nightcore / Reverb / Instrumental / Remix / Live / Acoustic / Cover never collide with normal studio tracks
-  const hasUltraSlowed = (s: string) => /\b(ultra\s*slowed|mega\s*slowed|ультра\s*слоуд|мега\s*слоуд)\b/i.test(s);
-  const hasSuperSlowed = (s: string) => /\b(super\s*slowed|супер\s*слоуд)\b/i.test(s);
-  const hasAnySlowed = (s: string) => /\b(slowed|slow\s*down|слоуд|замедленн\w*)\b/i.test(s);
-  const hasReverb = (s: string) => /\b(reverb|reverbed|реверб\w*)\b/i.test(s);
-  const hasSpedUp = (s: string) => /\b(sped\s*up|speed\s*up|nightcore|ускоренн\w*|fast\s*version)\b/i.test(s);
-  const hasInstrumental = (s: string) => /\b(instrumental|инструментал|караоке|karaoke|минусовка|минус|off\s*vocal)\b/i.test(s);
-  const has8d = (s: string) => /\b8d\b/i.test(s);
-  const hasBassBoost = (s: string) => /\b(bass\s*boosted|bassboost|басс\s*буст\w*)\b/i.test(s);
-  const hasRemix = (s: string) => /\b(remix|ремикс|bootleg|flip)\b/i.test(s);
-  const hasLive = (s: string) => /\b(live|лайв|концерт|concert|unplugged|выступление|live\s*at|live\s*session|живой\s*звук|вживую)\b/i.test(s);
-  const hasAcoustic = (s: string) => /\b(acoustic|акустика|под\s*гитару)\b/i.test(s);
-  const hasCover = (s: string) => /\b(cover|кавер)\b/i.test(s);
+  const reUltraSlowed = wordRe('ultra\\s*slowed|mega\\s*slowed|ультра\\s*слоуд|мега\\s*слоуд');
+  const reSuperSlowed = wordRe('super\\s*slowed|супер\\s*слоуд');
+  const reAnySlowed = wordRe('slowed|slow\\s*down|слоуд|замедленн\\p{L}*');
+  const reReverb = wordRe('reverb|reverbed|реверб\\p{L}*');
+  const reSpedUp = wordRe('sped\\s*up|speed\\s*up|nightcore|ускоренн\\p{L}*|fast\\s*version');
+  const reInstrumental = wordRe('instrumental|инструментал|караоке|karaoke|минусовка|минус|off\\s*vocal');
+  const re8d = wordRe('8d');
+  const reBassBoost = wordRe('bass\\s*boosted|bassboost|басс\\s*буст\\p{L}*');
+  const reRemix = wordRe('remix|ремикс|bootleg|flip');
+  const reLive = wordRe('live|лайв|концерт|concert|unplugged|выступление|шоу|live\\s+at|live\\s+session|live\\s+in|live\\s+from|живой\\s+звук|вживую|festival|фестиваль');
+  const reLiveInDesc = wordRe('live\\s+at|recorded\\s+live|live\\s+from|live\\s+in|live\\s+performance|концерт\\s+в');
+  const reAcoustic = wordRe('acoustic|акустика|акустическ\\p{L}*|под\\s+гитару');
+  const reCover = wordRe('cover|кавер');
+
+  const hasUltraSlowed = (s: string) => reUltraSlowed.test(s);
+  const hasSuperSlowed = (s: string) => reSuperSlowed.test(s);
+  const hasAnySlowed = (s: string) => reAnySlowed.test(s);
+  const hasReverb = (s: string) => reReverb.test(s);
+  const hasSpedUp = (s: string) => reSpedUp.test(s);
+  const hasInstrumental = (s: string) => reInstrumental.test(s);
+  const has8d = (s: string) => re8d.test(s);
+  const hasBassBoost = (s: string) => reBassBoost.test(s);
+  const hasRemix = (s: string) => reRemix.test(s);
+  const hasLive = (s: string) => reLive.test(s);
+  const hasAcoustic = (s: string) => reAcoustic.test(s);
+  const hasCover = (s: string) => reCover.test(s);
 
   const targetWantsUltraSlowed = hasUltraSlowed(cleanTitle);
   const targetWantsSuperSlowed = !targetWantsUltraSlowed && hasSuperSlowed(cleanTitle);
@@ -944,6 +994,102 @@ export async function findBestStudioAudioSource(
     targetWantsAcoustic ||
     targetWantsCover;
 
+  // Normalize strings for artist/title/album matching
+  const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const compactNorm = (s: string) => norm(s).replace(/\s+/g, '');
+
+  const targetTitleLower = cleanTitle.toLowerCase();
+  const artistLower = cleanArtist.toLowerCase();
+  const artistNorm = norm(cleanArtist);
+  const artistCompact = compactNorm(cleanArtist);
+  const primaryArtistRaw = cleanArtist.split(/[,&/;]|\s+(?:feat\.?|ft\.?|with)\s+/i)[0] || cleanArtist;
+  const primaryArtistNorm = norm(primaryArtistRaw);
+  const primaryArtistCompact = compactNorm(primaryArtistRaw);
+  const primaryArtistWords = primaryArtistNorm.split(' ').filter(w => w.length >= 2);
+  const albumNorm = isUsefulAlbum ? norm(cleanAlbum) : '';
+  const albumCompact = isUsefulAlbum ? compactNorm(cleanAlbum) : '';
+
+  const targetCleanNorm = norm(cleanTitleBase || cleanTitleNoFeat || cleanTitle);
+  const targetWords = targetCleanNorm.split(' ').filter(w => w.length > 1);
+  const queryTitle = cleanTitleBase || cleanTitleNoFeat || cleanTitle;
+
+  const analyzeCandidateMeta = (item: any) => {
+    const tl = (item.title || '').toLowerCase();
+    const cl = (item.channel || item.uploader || '').toLowerCase();
+    const dl = (item.description || '').toLowerCase();
+    const dlHeader = dl.split('\n').slice(0, 4).join(' ').slice(0, 260);
+    const dur = Number(item.duration) || 0;
+    const diff = targetSec > 0 && dur > 0 ? Math.abs(dur - targetSec) : 0;
+
+    const candidateTitleNorm = norm(item.title || '');
+    const matchingWords = targetWords.filter(w => candidateTitleNorm.includes(w));
+    const wordMatchRatio = targetWords.length > 0 ? (matchingWords.length / targetWords.length) : 1;
+
+    const clNorm = norm(cl);
+    const clCompact = compactNorm(cl);
+    const tlNorm = norm(tl);
+    const dlNorm = norm(dl);
+    const tlCompact = compactNorm(tl);
+    const dlCompact = compactNorm(dl);
+
+    const isArtistChannel = Boolean(
+      (artistLower && cl.includes(artistLower)) ||
+      (artistLower.length > 4 && cl.startsWith(artistLower)) ||
+      (artistCompact.length >= 4 && clCompact.includes(artistCompact)) ||
+      (primaryArtistCompact.length >= 4 && clCompact.includes(primaryArtistCompact)) ||
+      (primaryArtistWords.length >= 2 && primaryArtistWords.every(w => clNorm.includes(w)))
+    );
+
+    const hasArtistMention = Boolean(
+      isArtistChannel ||
+      (artistNorm && (tlNorm.includes(artistNorm) || dlNorm.includes(artistNorm))) ||
+      (primaryArtistNorm.length >= 3 && (tlNorm.includes(primaryArtistNorm) || dlNorm.includes(primaryArtistNorm))) ||
+      (primaryArtistCompact.length >= 4 && (tlCompact.includes(primaryArtistCompact) || dlCompact.includes(primaryArtistCompact))) ||
+      (primaryArtistWords.length >= 2 && (
+        primaryArtistWords.every(w => tlNorm.includes(w)) ||
+        primaryArtistWords.every(w => dlNorm.includes(w))
+      ))
+    );
+
+    const isTopic = cl.includes('topic');
+    const isProvidedToYouTube = dl.includes('provided to youtube') || dl.includes('auto-generated by youtube');
+
+    const candUltraSlowed = hasUltraSlowed(tl);
+    const candSuperSlowed = !candUltraSlowed && hasSuperSlowed(tl);
+    const candAnySlowed = hasAnySlowed(tl);
+    const candReverb = hasReverb(tl);
+    const candSpedUp = hasSpedUp(tl);
+    const candInstrumental = hasInstrumental(tl);
+    const cand8d = has8d(tl);
+    const candBassBoost = hasBassBoost(tl);
+    const candRemix = hasRemix(tl);
+    const candLive = hasLive(tl) || hasLive(dlHeader) || reLiveInDesc.test(dl);
+    const candAcoustic = hasAcoustic(tl) || hasAcoustic(dlHeader);
+    const candCover = hasCover(tl) || hasCover(dlHeader);
+
+    const hasUnwantedVariant =
+      (!targetWantsLive && candLive) ||
+      (!targetWantsAcoustic && candAcoustic) ||
+      (!targetWantsCover && candCover) ||
+      (!targetWantsRemix && candRemix) ||
+      (!targetWantsInstrumental && candInstrumental) ||
+      (!targetWantsAnySlowed && candAnySlowed) ||
+      (!targetWantsSpedUp && candSpedUp) ||
+      (!targetWantsReverb && candReverb) ||
+      (!targetWants8d && cand8d) ||
+      (!targetWantsBassBoost && candBassBoost);
+
+    return {
+      tl, cl, dl, dur, diff,
+      candidateTitleNorm, wordMatchRatio,
+      tlNorm, dlNorm, tlCompact, dlCompact,
+      isArtistChannel, hasArtistMention, isTopic, isProvidedToYouTube,
+      candUltraSlowed, candSuperSlowed, candAnySlowed, candReverb, candSpedUp,
+      candInstrumental, cand8d, candBassBoost, candRemix, candLive, candAcoustic, candCover,
+      hasUnwantedVariant
+    };
+  };
+
   try {
     const rawItems: any[] = [];
 
@@ -959,26 +1105,38 @@ export async function findBestStudioAudioSource(
       rawItems.push(...resV2);
     } else {
       // Stage 1: Explicit Topic query (direct targets for Warner, Sony, Believe, Universal, Symphonic, etc.)
-      const tq1 = `ytsearch6:${cleanArtist} ${cleanTitleNoFeat || cleanTitle} Topic`;
+      const tq1 = `ytsearch6:${cleanArtist} ${queryTitle} Topic`;
       const res1 = await fetchCandidates(tq1);
       rawItems.push(...res1);
 
-      // Check if we found an indisputable studio match from the Topic query
+      // Check if we found an indisputable clean studio match from the Topic query
       const hasDistributorStudioMatch = res1.some(it => {
-        const cl = (it.channel || it.uploader || '').toLowerCase();
-        const dl = (it.description || '').toLowerCase();
-        return cl.includes('topic') || dl.includes('provided to youtube') || dl.includes('auto-generated by youtube');
+        if (!it?.id || options?.excludeVideoIds?.has(String(it.id))) return false;
+        const m = analyzeCandidateMeta(it);
+        const isVerified = m.isTopic || m.isProvidedToYouTube || (m.isArtistChannel && (m.tl.includes('audio') || m.tl.includes('visualizer')));
+        if (!isVerified) return false;
+        if (m.hasUnwantedVariant || m.wordMatchRatio < 0.6 || !m.hasArtistMention) return false;
+        if (targetSec > 0 && m.dur > 0 && m.diff > 25) return false;
+        return true;
       });
 
-      // Stage 2: If no distributor master found yet, query Official Audio
+      // Stage 2: If no clean studio master found yet, query Official Audio
       if (!hasDistributorStudioMatch) {
-        const tq2 = `ytsearch6:${cleanArtist} ${cleanTitleNoFeat || cleanTitle} (Official Audio)`;
+        const tq2 = `ytsearch6:${cleanArtist} ${queryTitle} (Official Audio)`;
         const res2 = await fetchCandidates(tq2);
         rawItems.push(...res2);
       }
 
-      // Stage 3: Fallback Audio search if still nothing found
-      if (rawItems.length === 0) {
+      // Stage 2b: Album-targeted query when album is known and no clean studio match was found
+      if (isUsefulAlbum && !hasDistributorStudioMatch) {
+        const tqAlbum = `ytsearch5:${cleanArtist} ${queryTitle} ${cleanAlbum}`;
+        const resAlbum = await fetchCandidates(tqAlbum);
+        rawItems.push(...resAlbum);
+      }
+
+      // Stage 3: Fallback Audio search if nothing found or all candidates are excluded
+      const hasNonExcluded = rawItems.some(it => it?.id && !options?.excludeVideoIds?.has(String(it.id)));
+      if (rawItems.length === 0 || !hasNonExcluded) {
         const aq1 = `ytsearch6:${cleanArtist} - ${cleanTitle} audio`;
         const res3 = await fetchCandidates(aq1);
         rawItems.push(...res3);
@@ -1003,59 +1161,76 @@ export async function findBestStudioAudioSource(
         'video clip', 'short film', 'фильм', 'cinematic', '2.0'
       ];
 
-      const LIVE_KEYWORDS = [
-        'лайв', 'live', 'акустика', 'acoustic', 'под гитару', 'гитара',
-        'концерт', 'concert', 'unplugged', 'выступление', 'шоу', 'live at',
-        'festival', 'фестиваль', 'live session', 'живой звук', 'вживую'
-      ];
-
       const JUNK_KEYWORDS = [
         'remake', 'сниппет', 'snippet', 'отрывок', 'тизер', 'teaser',
         'реакция', 'reaction', 'parody', 'пародия'
       ];
 
+      const stripArtistAndTags = (raw: string): string => {
+        let s = raw.toLowerCase()
+          .replace(/\s*[\(\[]\s*(?:official\s*(?:audio|music\s*video|video|lyric\s*video|visualizer)|audio|аудио|visualizer|hq|hd|4k|lyrics?|текст|remaster(?:ed)?(?:\s*\d{4})?|\d{4}\s*remaster(?:ed)?)\s*[\)\]]/gi, ' ')
+          .replace(/\s*[-–—]\s*(?:official\s*audio|audio|remaster(?:ed)?(?:\s*\d{4})?)\s*$/gi, ' ')
+          .trim();
+        const n = norm(s);
+        if (artistNorm && n.startsWith(artistNorm + ' ')) {
+          return n.slice(artistNorm.length).trim();
+        }
+        if (primaryArtistNorm && n.startsWith(primaryArtistNorm + ' ')) {
+          return n.slice(primaryArtistNorm.length).trim();
+        }
+        return n;
+      };
+
       let bestItem: any = null;
       let bestScore = -99999;
 
-      const targetTitleLower = cleanTitle.toLowerCase();
-      const artistLower = cleanArtist.toLowerCase();
-
-      // Normalize strings for matching
-      const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-      const targetCleanNorm = norm(cleanTitleNoFeat || cleanTitle);
-      const targetWords = targetCleanNorm.split(' ').filter(w => w.length > 1);
-
       for (const item of items) {
-        const dur = Number(item.duration) || 0;
-        const diff = targetSec > 0 && dur > 0 ? Math.abs(dur - targetSec) : 0;
+        const m = analyzeCandidateMeta(item);
+        const {
+          tl, cl, dl, dur, diff,
+          candidateTitleNorm, wordMatchRatio,
+          tlNorm, dlNorm, tlCompact, dlCompact,
+          isArtistChannel, hasArtistMention, isTopic, isProvidedToYouTube,
+          candUltraSlowed, candSuperSlowed, candAnySlowed, candReverb, candSpedUp,
+          candInstrumental, cand8d, candBassBoost, candRemix, candLive, candAcoustic, candCover,
+          hasUnwantedVariant
+        } = m;
+
         let score = 0;
 
-        const tl = (item.title || '').toLowerCase();
-        const cl = (item.channel || item.uploader || '').toLowerCase();
-        const dl = (item.description || '').toLowerCase();
-        const candidateTitleNorm = norm(item.title || '');
+        // Hard exclusion for explicitly rejected video IDs (e.g. previous bad download on Replace with Studio Master)
+        if (options?.excludeVideoIds?.has(String(item.id))) {
+          score -= 5000;
+        }
 
         // MANDATORY: Track Title Matching
         // Prevents picking a completely different track by the same artist (e.g. "Down" instead of "10 Seconds from Panic")
-        const matchingWords = targetWords.filter(w => candidateTitleNorm.includes(w));
-        const wordMatchRatio = targetWords.length > 0 ? (matchingWords.length / targetWords.length) : 1;
+        const strippedTitleNorm = stripArtistAndTags(item.title || '');
         if (wordMatchRatio < 0.6) {
           score -= 1500;
-        } else if (candidateTitleNorm === targetCleanNorm) {
-          // Exact title match (classic sign of a Topic track: "Слово пацана", "10 Seconds from Panic")
+        } else if (candidateTitleNorm === targetCleanNorm || strippedTitleNorm === targetCleanNorm) {
+          // Exact title match (Topic track or "<Artist> - <Title> (Official Audio)")
           score += 300;
         } else {
           score += 150;
         }
 
         // 1. YouTube Topic / Label Distributor Studio Master: +500 to +650 points
-        const isTopic = cl.includes('topic');
-        const isProvidedToYouTube = dl.includes('provided to youtube') || dl.includes('auto-generated by youtube');
-        if (isProvidedToYouTube) score += 650;
-        else if (isTopic) score += 500;
+        // Guarded: NEVER award studio master bonus to unwanted Live/Acoustic/Cover/Remix releases or mismatched artists!
+        const isGenericTopicChannel = /^(?:release|various artists)\s*-\s*topic$/i.test(cl);
+        const hasConflictingArtistMeta = !hasArtistMention && (dl.length > 20 || (isTopic && !isGenericTopicChannel));
+        if (!hasUnwantedVariant) {
+          if (hasArtistMention) {
+            if (isProvidedToYouTube) score += 650;
+            else if (isTopic) score += 500;
+          } else if (hasConflictingArtistMeta) {
+            score -= 700;
+          } else if (isProvidedToYouTube) {
+            score += 150;
+          }
+        }
 
         // 2. Official Artist channel: +250 points
-        const isArtistChannel = cl.includes(artistLower) || (artistLower.length > 4 && cl.startsWith(artistLower));
         if (isArtistChannel) score += 250;
 
         // 3. Audio & Visualizer markers
@@ -1063,25 +1238,20 @@ export async function findBestStudioAudioSource(
         else if (tl.includes('audio') || tl.includes('аудио')) score += 100;
         else if (tl.includes('official visualizer') || tl.includes('visualizer')) score += 80;
 
+        // 3b. Album match bonus (helps pick original album studio version over compilation/live releases)
+        if (isUsefulAlbum && (
+          (albumNorm && (dlNorm.includes(albumNorm) || tlNorm.includes(albumNorm))) ||
+          (albumCompact.length >= 4 && (dlCompact.includes(albumCompact) || tlCompact.includes(albumCompact)))
+        )) {
+          score += 180;
+        }
+
         // 4. Music video penalty (dialogue, ambient noises, intro cutscenes)
         if (CLIP_KEYWORDS.some(k => tl.includes(k))) {
           score -= 300;
         }
 
         // 5. Bidirectional Variant Matching (Slowed, Super Slowed, Ultra Slowed, Reverb, Sped Up, Instrumental, 8D, Bass, Remix, Live, Acoustic, Cover)
-        const candUltraSlowed = hasUltraSlowed(tl);
-        const candSuperSlowed = !candUltraSlowed && hasSuperSlowed(tl);
-        const candAnySlowed = hasAnySlowed(tl);
-        const candReverb = hasReverb(tl);
-        const candSpedUp = hasSpedUp(tl);
-        const candInstrumental = hasInstrumental(tl);
-        const cand8d = has8d(tl);
-        const candBassBoost = hasBassBoost(tl);
-        const candRemix = hasRemix(tl);
-        const candLive = hasLive(tl) || LIVE_KEYWORDS.some(k => tl.includes(k));
-        const candAcoustic = hasAcoustic(tl);
-        const candCover = hasCover(tl);
-
         // Slowed hierarchy: Ultra/Mega Slowed vs Super Slowed vs Slowed vs Normal
         if (targetWantsUltraSlowed) {
           if (candUltraSlowed) score += 600;
@@ -1138,7 +1308,7 @@ export async function findBestStudioAudioSource(
         if (targetWantsRemix) {
           score += candRemix ? 400 : -700;
         } else if (candRemix) {
-          score -= 450;
+          score -= 650;
         }
 
         // Live / Acoustic / Cover
@@ -1147,13 +1317,13 @@ export async function findBestStudioAudioSource(
         } else if (targetWantsAcoustic) {
           score += candAcoustic ? 400 : -650;
         } else if (candLive || candAcoustic) {
-          score -= 400;
+          score -= 850;
         }
 
         if (targetWantsCover) {
           score += candCover ? 400 : -650;
         } else if (candCover) {
-          score -= 400;
+          score -= 850;
         }
 
         // Junk / Snippet / TikTok edits (unless explicitly in target title)
@@ -1171,17 +1341,24 @@ export async function findBestStudioAudioSource(
 
         // 8. Duration alignment:
         // Verified studio tracks (Topic, Provided to YouTube, or official artist audio) get wide tolerance for streaming outro silence differences
-        const isVerifiedStudio = isTopic || isProvidedToYouTube || (isArtistChannel && (tl.includes('audio') || tl.includes('visualizer')));
+        const isVerifiedStudio = !hasUnwantedVariant && hasArtistMention && (
+          isTopic || isProvidedToYouTube || (isArtistChannel && (tl.includes('audio') || tl.includes('visualizer')))
+        );
         if (targetSec > 0 && dur > 0) {
           if (isVerifiedStudio) {
             if (diff <= 5) score += 60;
             else if (diff <= 15) score += 40;
             else if (diff <= 25) score += 10;
-            else score -= 60;
+            else if (diff > 120) score -= 450;
+            else if (diff > 60) score -= 250;
+            else score -= 100;
           } else {
             if (diff <= 2) score += 40;
             else if (diff <= 5) score += 20;
             else if (diff <= 10) score += 5;
+            else if (diff > 120) score -= 450;
+            else if (diff > 60) score -= 250;
+            else if (diff > 25) score -= 120;
             else score -= 80;
           }
         }
@@ -1194,6 +1371,10 @@ export async function findBestStudioAudioSource(
 
       const selected = bestItem || items[0];
       if (selected?.id && /^[a-zA-Z0-9_-]{6,20}$/.test(String(selected.id))) {
+        if (options?.excludeVideoIds?.has(String(selected.id))) {
+          console.warn(`[Studio Audio Match] "${cleanArtist} - ${cleanTitle}": only excluded candidate ${selected.id} matched; falling back to search query.`);
+          return `ytsearch1:${cleanArtist} - ${queryTitle} studio audio`;
+        }
         console.log(`[Studio Audio Match] "${cleanArtist} - ${cleanTitle}": selected ${selected.id} ("${selected.title}", channel="${selected.channel || selected.uploader}", diff=${targetSec > 0 && selected.duration ? Math.abs(selected.duration - targetSec) : 0}s, score=${bestScore})`);
         const resultUrl = `https://www.youtube.com/watch?v=${selected.id}`;
         if (studioCandidateCache.size > 2000) {
@@ -1317,9 +1498,10 @@ async function downloadAudioWithFallback(
   safeTitle: string,
   timeoutMs: number,
   lowCpuPriority: boolean,
-  bypassCache: boolean = false
+  bypassCache: boolean = false,
+  searchOptions?: StudioSearchOptions
 ): Promise<boolean> {
-  const primaryUrl = await findBestStudioAudioSource(artist, title, durationMs, bypassCache);
+  const primaryUrl = await findBestStudioAudioSource(artist, title, durationMs, bypassCache, searchOptions);
   const firstAttempt = await executeYtDlpMp3Download(
     primaryUrl,
     outputTemplate,
@@ -1333,7 +1515,9 @@ async function downloadAudioWithFallback(
   // If primary source failed (and didn't hard-timeout), retry once via clean ytsearch fallback
   const cleanArtist = (artist || '').replace(/[∅Ø]/g, 'O').replace(/^[- \t]+/, '').replace(/[\\/:*?"<>|]/g, ' ').trim();
   const cleanTitle = (title || '').replace(/[∅Ø]/g, 'O').replace(/^[- \t]+/, '').replace(/[\\/:*?"<>|]/g, ' ').trim();
-  const fallbackQuery = `ytsearch1:${cleanArtist} - ${cleanTitle}`;
+  const fallbackQuery = searchOptions?.excludeVideoIds?.size
+    ? `ytsearch1:${cleanArtist} - ${cleanTitle} studio audio`
+    : `ytsearch1:${cleanArtist} - ${cleanTitle}`;
 
   if (!firstAttempt.timedOut && primaryUrl !== fallbackQuery) {
     console.warn(`[yt-dlp retry] Primary source ${primaryUrl} failed for "${artist} - ${title}". Retrying with search fallback...`);
@@ -1544,7 +1728,9 @@ async function downloadSingleTrack(item: QueueItem): Promise<void> {
           targetDir,
           safeTitle,
           120000,
-          true
+          true,
+          false,
+          { album: track.album }
         );
       }
     );
@@ -1865,7 +2051,9 @@ async function downloadSingleSpotifyTrackDirectInternal(
                 targetDir,
                 safeTitle,
                 150000,
-                false
+                false,
+                false,
+                { album: track.album }
               );
             }
           );
@@ -2016,7 +2204,8 @@ export async function upgradeSingleTrackFile(tr: any): Promise<boolean> {
         tempPrefix,
         120000,
         true,
-        true
+        true,
+        { album: tr.album }
       );
     }
   );
@@ -2275,6 +2464,7 @@ export function sanitizeTrackRecord(tr: any) {
 }
 
 const inFlightRedownloads = new Map<number, Promise<{ success: boolean; track?: any; error?: string }>>();
+const rejectedVideoIdsByTrack = new Map<number, Set<string>>();
 
 export async function redownloadTrackStudioMaster(trackId: number): Promise<{ success: boolean; track?: any; error?: string }> {
   if (inFlightRedownloads.has(trackId)) {
@@ -2297,6 +2487,61 @@ async function redownloadTrackStudioMasterInternal(trackId: number): Promise<{ s
     }
 
     console.log(`[Redownload Studio Master] Starting replacement for #${track.id}: "${track.artist} - ${track.title}"`);
+
+    // 1. Inspect currently installed file (if any) so we exclude its YouTube video ID from re-selection
+    let currentProbe: AudioProbeResult | null = null;
+    if (track.file_path && fs.existsSync(track.file_path) && isPathInsideMusicDir(track.file_path)) {
+      currentProbe = await probeAudioFile(track.file_path);
+    }
+    let rejectedSet = rejectedVideoIdsByTrack.get(track.id);
+    if (!rejectedSet) {
+      rejectedSet = new Set<string>();
+      if (rejectedVideoIdsByTrack.size > 500) {
+        const firstKey = rejectedVideoIdsByTrack.keys().next().value;
+        if (firstKey !== undefined) rejectedVideoIdsByTrack.delete(firstKey);
+      }
+      rejectedVideoIdsByTrack.set(track.id, rejectedSet);
+    }
+    if (currentProbe?.sourceVideoId) {
+      rejectedSet.add(currentProbe.sourceVideoId);
+    }
+
+    // 2. Resolve canonical studio duration and album metadata (never rely on potentially polluted DB duration)
+    let resolvedCanonicalDurationMs: number | undefined;
+    let canonicalAlbum: string | undefined = track.album || undefined;
+    let canonicalCoverUrl: string | undefined = track.cover_url || undefined;
+
+    if (track.spotify_id) {
+      try {
+        const details = await resolveSpotifyTrackDetails(track.spotify_id);
+        if (details.duration_ms && details.duration_ms > 0) {
+          resolvedCanonicalDurationMs = details.duration_ms;
+        }
+        if (details.album && (!canonicalAlbum || canonicalAlbum === 'Любимые треки' || canonicalAlbum === '-')) {
+          canonicalAlbum = String(details.album).slice(0, 200);
+        }
+        if (details.cover_url && (!canonicalCoverUrl || canonicalCoverUrl.includes('mosaic.scdn.co'))) {
+          canonicalCoverUrl = String(details.cover_url).slice(0, 2048);
+        }
+      } catch (_) {}
+    }
+
+    if (!resolvedCanonicalDurationMs || !canonicalAlbum || canonicalAlbum === 'Любимые треки' || canonicalAlbum === '-') {
+      try {
+        const dz = await resolveDeezerTrackInfo(track.artist, track.title);
+        if (!resolvedCanonicalDurationMs && dz.duration && dz.duration > 0) {
+          resolvedCanonicalDurationMs = dz.duration * 1000;
+        }
+        if (dz.album && (!canonicalAlbum || canonicalAlbum === 'Любимые треки' || canonicalAlbum === '-')) {
+          canonicalAlbum = String(dz.album).slice(0, 200);
+        }
+        if (dz.cover_url && (!canonicalCoverUrl || canonicalCoverUrl.includes('mosaic.scdn.co'))) {
+          canonicalCoverUrl = String(dz.cover_url).slice(0, 2048);
+        }
+      } catch (_) {}
+    }
+
+    const canonicalDurationMs = resolvedCanonicalDurationMs || (track.duration_ms > 0 ? track.duration_ms : undefined);
 
     const targetDir = getSafeArtistDir(track.artist || 'Unknown Artist');
     if (!fs.existsSync(targetDir)) {
@@ -2322,13 +2567,17 @@ async function redownloadTrackStudioMasterInternal(trackId: number): Promise<{ s
         return await downloadAudioWithFallback(
           track.artist,
           track.title,
-          track.duration_ms,
+          canonicalDurationMs,
           tempOutputTemplate,
           targetDir,
           tempSafeTitle,
-          180000,
+          300000,
           false,
-          true
+          true,
+          {
+            album: canonicalAlbum,
+            excludeVideoIds: rejectedSet
+          }
         );
       }
     );
@@ -2344,10 +2593,15 @@ async function redownloadTrackStudioMasterInternal(trackId: number): Promise<{ s
       return { success: false, error: 'Скачанный файл не найден на диске' };
     }
 
-    const probe = await probeAudioFile(tempFile, track.duration_ms);
+    const probe = await probeAudioFile(tempFile, canonicalDurationMs);
     if (!probe.valid) {
       cleanupPartialFiles(targetDir, tempSafeTitle);
       return { success: false, error: `Скачанный файл поврежден: ${probe.reason || 'неизвестная ошибка'}` };
+    }
+
+    if (probe.sourceVideoId && rejectedSet.has(probe.sourceVideoId)) {
+      cleanupPartialFiles(targetDir, tempSafeTitle);
+      return { success: false, error: 'Не удалось найти другую студийную версию трека' };
     }
 
     // Now safely replace the old file with the verified new studio master
@@ -2363,10 +2617,15 @@ async function redownloadTrackStudioMasterInternal(trackId: number): Promise<{ s
 
     const actualDurationMs = (probe.valid && probe.durationSec > 0)
       ? Math.round(probe.durationSec * 1000)
-      : track.duration_ms;
+      : (canonicalDurationMs || track.duration_ms);
 
-    db.prepare('UPDATE tracks SET file_path = ?, duration_ms = ?, bitrate = ? WHERE id = ?')
-      .run(finalFile, actualDurationMs, probe.bitrateKbps || 320, track.id);
+    db.prepare(`
+      UPDATE tracks
+      SET file_path = ?, duration_ms = ?, bitrate = ?,
+          album = CASE WHEN album IS NULL OR album = '' OR album = '-' OR album = 'Любимые треки' THEN ? ELSE album END,
+          cover_url = CASE WHEN cover_url IS NULL OR cover_url = '' OR cover_url LIKE '%mosaic.scdn.co%' THEN ? ELSE cover_url END
+      WHERE id = ?
+    `).run(finalFile, actualDurationMs, probe.bitrateKbps || 320, canonicalAlbum || '', canonicalCoverUrl || '', track.id);
     invalidateTrackStreamMeta(track.id);
     invalidateTranscodeCacheForTrack(track.id).catch(() => {});
 
@@ -2375,11 +2634,12 @@ async function redownloadTrackStudioMasterInternal(trackId: number): Promise<{ s
 
     broadcastToAll({
       type: 'TRACK_UPDATED',
-      track: safeTrack
+      track: safeTrack,
+      resetToStart: true
     });
 
     await refreshJellyfinLibrary();
-    console.log(`[Redownload Studio Master] Successfully replaced #${track.id}: "${track.artist} - ${track.title}" (${probe.bitrateKbps || 320}kbps, ${Math.round(actualDurationMs / 1000)}s)`);
+    console.log(`[Redownload Studio Master] Successfully replaced #${track.id}: "${track.artist} - ${track.title}" (${probe.bitrateKbps || 320}kbps, ${Math.round(actualDurationMs / 1000)}s, video=${probe.sourceVideoId || 'unknown'})`);
 
     return { success: true, track: safeTrack };
   } catch (err: any) {
@@ -2444,6 +2704,93 @@ export function repairVariantTracksIfNeeded(): void {
     })().catch(err => console.error('[Variant Repair] Fatal loop error:', err));
   } catch (err: any) {
     console.warn('[Variant Repair] Startup check failed:', err.message);
+  }
+}
+
+/**
+ * One-time background migration to detect and replace tracks whose downloaded MP3
+ * contains an unwanted Live / Acoustic / Unplugged / Concert / Cover recording
+ * despite the Spotify/DB track title being a normal studio release.
+ */
+export function repairMismatchedLiveTracksIfNeeded(): void {
+  const markerPath = path.join(process.cwd(), 'data', '.live_mismatch_repaired_v1');
+  if (fs.existsSync(markerPath)) return;
+
+  try {
+    const allTracks = db.prepare(`
+      SELECT t.id, t.title, t.artist, t.file_path
+      FROM tracks t
+      WHERE t.file_path IS NOT NULL AND t.file_path != ''
+      ORDER BY
+        COALESCE(
+          (SELECT MAX(pt.added_at) FROM playlist_tracks pt WHERE pt.track_id = t.id),
+          (SELECT MAX(lt.created_at) FROM liked_tracks lt WHERE lt.track_id = t.id),
+          t.created_at
+        ) DESC,
+        t.id DESC
+    `).all() as Array<{ id: number; title: string; artist: string; file_path: string }>;
+
+    if (!allTracks || allTracks.length === 0) {
+      fs.writeFileSync(markerPath, new Date().toISOString(), 'utf8');
+      return;
+    }
+
+    const unwantedTitleRe = /(?<![\p{L}\p{N}])(?:live|лайв|концерт|concert|unplugged|acoustic|акустика|акустическ\p{L}*|под\s+гитару|cover|кавер)(?![\p{L}\p{N}])/iu;
+
+    (async () => {
+      const candidates = allTracks.filter((tr) =>
+        Boolean(
+          tr.title &&
+          !unwantedTitleRe.test(tr.title) &&
+          !unwantedTitleRe.test(tr.artist || '') &&
+          tr.file_path &&
+          isPathInsideMusicDir(tr.file_path) &&
+          fs.existsSync(tr.file_path)
+        )
+      );
+
+      const BATCH_SIZE = 6;
+      let foundCount = 0;
+      let fixed = 0;
+
+      for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+        const batch = candidates.slice(i, i + BATCH_SIZE);
+        const probes = await Promise.all(
+          batch.map(async (tr) => {
+            try {
+              const probe = await probeAudioFile(tr.file_path);
+              return { tr, probe };
+            } catch (_) {
+              return { tr, probe: null };
+            }
+          })
+        );
+
+        for (const { tr, probe } of probes) {
+          if (probe?.valid && probe.embeddedTitle && unwantedTitleRe.test(probe.embeddedTitle)) {
+            foundCount++;
+            console.log(`[Live Mismatch Repair] Repairing #${tr.id} "${tr.artist} - ${tr.title}" (was "${probe.embeddedTitle}")`);
+            try {
+              const res = await redownloadTrackStudioMaster(tr.id);
+              if (res.success) fixed++;
+            } catch (err: any) {
+              console.warn(`[Live Mismatch Repair] Failed for #${tr.id} ("${tr.artist} - ${tr.title}"):`, err.message);
+            }
+            await new Promise(r => setTimeout(r, 400));
+          }
+        }
+      }
+
+      if (foundCount > 0) {
+        console.log(`[Live Mismatch Repair] Completed! Repaired ${fixed}/${foundCount} track(s).`);
+      }
+
+      try {
+        fs.writeFileSync(markerPath, new Date().toISOString(), 'utf8');
+      } catch (_) {}
+    })().catch(err => console.error('[Live Mismatch Repair] Fatal loop error:', err));
+  } catch (err: any) {
+    console.warn('[Live Mismatch Repair] Startup check failed:', err.message);
   }
 }
 

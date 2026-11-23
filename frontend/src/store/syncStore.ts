@@ -364,9 +364,7 @@ export const useSyncStore = create<SyncState>((set, get) => {
                   window.dispatchEvent(new CustomEvent('jellyfy:track_updated', { detail: data.track }));
                   evictTrackOfflineCache(data.track.id).then(() => {
                     const pState = usePlayerStore.getState();
-                    if (pState.currentTrack?.id === data.track.id) {
-                      pState.reloadCurrentTrackStream(data.track);
-                    }
+                    pState.reloadCurrentTrackStream(data.track, Boolean(data.resetToStart));
                   });
                 }
                 break;

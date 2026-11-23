@@ -184,6 +184,14 @@ export function resolveEffectiveStreamQuality(pref: StreamQualityPreference): Re
   return QUALITY_ORDER[nextIdx];
 }
 
+const trackStreamVersionMap = new Map<number, number>();
+
+export function bumpTrackStreamVersion(trackId: number): void {
+  if (trackId > 0) {
+    trackStreamVersionMap.set(trackId, Date.now());
+  }
+}
+
 export function buildStreamUrl(
   trackId: number,
   quality: ResolvedStreamQuality,
@@ -196,6 +204,12 @@ export function buildStreamUrl(
     base = strip ? `/api/stream/${trackId}?stripId3=1` : `/api/stream/${trackId}`;
   } else {
     base = `/api/stream/${trackId}?q=${quality}&fmt=${format}`;
+  }
+
+  const ver = trackStreamVersionMap.get(trackId);
+  if (ver) {
+    const sep = base.includes('?') ? '&' : '?';
+    base = `${base}${sep}v=${ver}`;
   }
 
   if (options?.reconnectTs) {
