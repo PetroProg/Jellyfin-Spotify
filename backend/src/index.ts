@@ -59,12 +59,6 @@ import { setupWebSocketSync, broadcastToUser, terminateUserSessions } from './sy
 import { getOrGenerateDailyMixes, saveDailyMixAsPlaylist } from './dailyMix';
 import { startNightlyScheduler, getNightlySchedulerStatus, updateNightlySchedule } from './nightlyScheduler';
 import { recordListeningEvent, getListeningReportData } from './listeningStats';
-import {
-  startWeeklyReportScheduler,
-  getWeeklyReportStatus,
-  triggerWeeklyReportNow,
-  getWeeklyReportConfig,
-} from './weeklyReportScheduler';
 import { getOrGenerateJwtSecret } from './authSecret';
 import { resolveAndSavePlaylistCover, initPlaylistCoversBackfill } from './playlistCover';
 import { getCachedMp3Offset, invalidateTrackStreamMeta } from './streamOptimizer';
@@ -2730,10 +2724,10 @@ server.get('/api/search', { preHandler: [(server as any).authenticate] }, async 
     LIMIT 5
   `).all(`%${escapedQuery}%`, `%${escapedQuery}%`, `%${escapedQuery}%`, query, `${escapedQuery}%`);
 
-  // 2. Search External Music APIs (Spotify OAuth / Deezer / iTunes, up to 8 tracks)
+  // 2. Search External Music APIs (Spotify OAuth / Deezer + iTunes in parallel, up to 12 tracks)
   let spotifyRaw: any[] = [];
   try {
-    spotifyRaw = await searchSpotifyTracks(query, 8, req.user?.id);
+    spotifyRaw = await searchSpotifyTracks(query, 12, req.user?.id);
   } catch (err: any) {
     console.warn('[Search External Error]', err.message);
   }
@@ -3209,7 +3203,7 @@ server.post('/api/settings', { preHandler: [(server as any).authenticate] }, asy
   return { success: true };
 });
 
-// ----------------- LISTENING LOGS & WEEKLY EMAIL REPORT -----------------
+// ----------------- LISTENING LOGS & ANALYTICS -----------------
 server.post('/api/listening/log', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
   const limitCheck = consumeRateLimit('listening_log:' + req.user.id, 60, 60000);
   if (limitCheck.blocked) {
@@ -3241,31 +3235,8 @@ server.get('/api/admin/listening-stats', { preHandler: [(server as any).authenti
     return reply.status(403).send({ error: 'Доступ разрешен только администратору' });
   }
 
-  const config = getWeeklyReportConfig();
-  const report = getListeningReportData(7, config.timezone);
-  const schedule = getWeeklyReportStatus();
-
-  return { report, schedule };
-});
-
-server.post('/api/admin/weekly-report/send', { preHandler: [(server as any).authenticate] }, async (req: any, reply: any) => {
-  if (!isAdmin(req)) {
-    return reply.status(403).send({ error: 'Доступ разрешен только администратору' });
-  }
-
-  const limitCheck = consumeRateLimit('admin_weekly_report_send:' + req.user.id, 2, 60000);
-  if (limitCheck.blocked) {
-    return reply.status(429).send({
-      error: `Слишком частая отправка отчёта. Подождите ${limitCheck.retryAfterSec || 60} сек.`
-    });
-  }
-
-  try {
-    const result = await triggerWeeklyReportNow({ markScheduledSent: false });
-    return result;
-  } catch (err: any) {
-    return reply.status(400).send({ error: err?.message || 'Не удалось отправить отчёт на почту' });
-  }
+  const report = getListeningReportData(7);
+  return { report };
 });
 
 // SPA Fallback for React PWA routing with in-memory RAM caching
@@ -3308,8 +3279,6 @@ server.listen({ port: PORT, host: '0.0.0.0' }, async (err, address) => {
   await resumePendingDownloads();
   // Start automated nightly mix background generator & pre-downloader
   startNightlyScheduler();
-  // Start weekly listening report email scheduler (Sundays 12:00 Europe/Zurich)
-  startWeeklyReportScheduler();
   // Automatically backfill genre/style covers for any playlists without artwork
   initPlaylistCoversBackfill(db);
   // One-time background repair for existing variant tracks (Slowed, Sped Up, Reverb, Instrumental, etc.)

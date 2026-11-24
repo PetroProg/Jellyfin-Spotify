@@ -31,9 +31,7 @@ import {
   Sliders,
   Disc,
   Wifi,
-  Mail,
-  BarChart3,
-  Send
+  BarChart3
 } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { usePlayerStore } from '../store/playerStore';
@@ -131,16 +129,6 @@ interface AdminListeningStatsResponse {
       }>;
     }>;
   };
-  schedule: {
-    enabled: boolean;
-    smtpConfigured: boolean;
-    recipientMasked: string;
-    timezone: string;
-    scheduleLabel: string;
-    lastSentDate: string | null;
-    lastSentAt: string | null;
-    lastError: string | null;
-  };
 }
 
 function formatListeningDuration(totalSec: number, isRu: boolean): string {
@@ -208,11 +196,10 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const [startingUpgrade, setStartingUpgrade] = useState(false);
   const [stoppingUpgrade, setStoppingUpgrade] = useState(false);
 
-  // Admin Listening Stats & Weekly Report State
+  // Admin Listening Analytics State
   const isAdminAccount = Boolean(user?.is_admin || user?.id === 1);
   const [adminListeningData, setAdminListeningData] = useState<AdminListeningStatsResponse | null>(null);
   const [loadingListeningStats, setLoadingListeningStats] = useState(false);
-  const [sendingWeeklyReport, setSendingWeeklyReport] = useState(false);
 
   const loadAdminListeningStats = async () => {
     if (!isAdminAccount) return;
@@ -224,22 +211,6 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       console.warn('Could not fetch admin listening stats:', e);
     } finally {
       setLoadingListeningStats(false);
-    }
-  };
-
-  const handleSendWeeklyReportNow = async () => {
-    try {
-      setSendingWeeklyReport(true);
-      await apiRequest('/admin/weekly-report/send', { method: 'POST' });
-      toast.success(
-        t('Weekly listening report sent to your email!', 'Еженедельный отчёт успешно отправлен на почту!')
-      );
-      await loadAdminListeningStats();
-    } catch (err: any) {
-      toast.error(err.message || t('Failed to send report email', 'Не удалось отправить отчёт на почту'));
-      await loadAdminListeningStats();
-    } finally {
-      setSendingWeeklyReport(false);
     }
   };
 
@@ -1849,85 +1820,37 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           )}
         </section>
 
-        {/* 5.5 Admin: Listening Analytics & Weekly Email Report */}
+        {/* 5.5 Admin: Listening Analytics */}
         {isAdminAccount && (
           <section className="bg-cat-mantle p-6 rounded-3xl border border-cat-mauve/30 shadow-lg space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <div className="p-2.5 rounded-xl bg-cat-mauve/20 text-cat-mauve">
                   <BarChart3 className="w-5 h-5" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="font-bold text-base text-cat-text">
-                      {t('Listening Analytics & Weekly Report', 'Статистика прослушиваний и еженедельный отчёт')}
-                    </h2>
-                    {adminListeningData?.schedule.smtpConfigured ? (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-cat-green/20 text-cat-green border border-cat-green/30">
-                        <CheckCircle2 className="w-3 h-3" /> SMTP OK
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-cat-yellow/20 text-cat-yellow border border-cat-yellow/30">
-                        <Mail className="w-3 h-3" /> {t('SMTP not configured', 'SMTP не настроен')}
-                      </span>
-                    )}
-                  </div>
+                  <h2 className="font-bold text-base text-cat-text">
+                    {t('Listening Analytics', 'Статистика прослушиваний')}
+                  </h2>
                   <p className="text-xs text-cat-subtext0 mt-0.5">
-                    {adminListeningData?.schedule.scheduleLabel || 'Воскресенье, 12:00 (Europe/Zurich)'}
-                    {adminListeningData?.schedule.recipientMasked ? ` · ${adminListeningData.schedule.recipientMasked}` : ''}
+                    {t(
+                      'All-time and last 7 days listening stats per user',
+                      'Статистика прослушиваний по пользователям за всё время и за 7 дней'
+                    )}
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 flex-wrap">
-                <button
-                  type="button"
-                  onClick={loadAdminListeningStats}
-                  disabled={loadingListeningStats}
-                  className="p-2.5 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-text transition-colors cursor-pointer disabled:opacity-50"
-                  title={t('Refresh statistics', 'Обновить статистику')}
-                >
-                  <RefreshCw className={`w-4 h-4 ${loadingListeningStats ? 'animate-spin' : ''}`} />
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSendWeeklyReportNow}
-                  disabled={sendingWeeklyReport || !adminListeningData?.schedule.smtpConfigured}
-                  className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-cat-mauve text-cat-base font-bold text-xs hover:opacity-95 active:scale-95 transition-all disabled:opacity-40 cursor-pointer"
-                >
-                  {sendingWeeklyReport ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Send className="w-3.5 h-3.5" />
-                  )}
-                  <span>{t('Send Report Now', 'Отправить отчёт сейчас')}</span>
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={loadAdminListeningStats}
+                disabled={loadingListeningStats}
+                className="p-2.5 rounded-2xl bg-cat-surface0 hover:bg-cat-surface1 text-cat-text transition-colors cursor-pointer disabled:opacity-50"
+                title={t('Refresh statistics', 'Обновить статистику')}
+              >
+                <RefreshCw className={`w-4 h-4 ${loadingListeningStats ? 'animate-spin' : ''}`} />
+              </button>
             </div>
-
-            {!adminListeningData?.schedule.smtpConfigured && (
-              <div className="p-3 rounded-2xl bg-cat-surface0/60 border border-cat-yellow/30 text-xs text-cat-subtext1">
-                {t(
-                  'Add SMTP_USER, SMTP_PASS (Gmail App Password), and WEEKLY_REPORT_TO to your .env file and restart the container to enable automatic Sunday emails.',
-                  'Чтобы включить автоматическую отправку писем по воскресеньям, добавьте SMTP_USER, SMTP_PASS (Пароль приложения Google) и WEEKLY_REPORT_TO в локальный файл .env и перезапустите контейнер.'
-                )}
-              </div>
-            )}
-
-            {adminListeningData?.schedule.lastSentAt && (
-              <p className="text-[11px] text-cat-subtext0">
-                {t('Last report sent:', 'Последняя отправка:')}{' '}
-                <span className="text-cat-text font-medium">
-                  {new Date(adminListeningData.schedule.lastSentAt).toLocaleString(lang === 'ru' ? 'ru-RU' : 'en-US')}
-                </span>
-              </p>
-            )}
-
-            {adminListeningData?.schedule.lastError && (
-              <p className="text-[11px] text-cat-red bg-cat-red/10 px-3 py-2 rounded-xl border border-cat-red/30">
-                {t('Last SMTP error:', 'Последняя ошибка SMTP:')} {adminListeningData.schedule.lastError}
-              </p>
-            )}
 
             {adminListeningData && (
               <>
