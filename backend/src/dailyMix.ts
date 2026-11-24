@@ -946,17 +946,40 @@ export function getUserTimezone(userId: number): string {
   return process.env.TIMEZONE || 'Europe/Kyiv';
 }
 
-export function getTodayDateKey(timeZone?: string): string {
+export function getLocalTimeParts(timeZone?: string): { dateKey: string; hour: number; minute: number } {
+  const tz = timeZone || process.env.TIMEZONE || 'Europe/Kyiv';
+  const now = new Date();
   try {
-    const tz = timeZone || process.env.TIMEZONE || 'Europe/Kyiv';
-    return new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
+    const dateKey = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(now);
+    const hourRaw = parseInt(
+      new Intl.DateTimeFormat('en-US', { hour: 'numeric', hourCycle: 'h23', timeZone: tz }).format(now),
+      10
+    );
+    const minRaw = parseInt(
+      new Intl.DateTimeFormat('en-US', { minute: 'numeric', timeZone: tz }).format(now),
+      10
+    );
+    return {
+      dateKey,
+      hour: Number.isFinite(hourRaw) ? (hourRaw % 24) : now.getUTCHours(),
+      minute: Number.isFinite(minRaw) ? minRaw : now.getUTCMinutes()
+    };
   } catch (_) {
-    return new Date().toISOString().slice(0, 10);
+    return {
+      dateKey: now.toISOString().slice(0, 10),
+      hour: now.getUTCHours(),
+      minute: now.getUTCMinutes()
+    };
   }
+}
+
+export function getTodayDateKey(timeZone?: string): string {
+  return getLocalTimeParts(timeZone).dateKey;
 }
 
 /**
  * Returns existing Daily Mixes for today, or generates new ones if none exist for today (or if forceRefresh = true).
+ * Respects nightly_mix_hour: between 00:00 and targetHour, serves existing previous-day mixes instead of regenerating at midnight.
  */
 export async function getOrGenerateDailyMixes(userId: number, forceRefresh = false, timeZone?: string): Promise<any[]> {
   // Prevent concurrent duplicate generation for the same user upfront
@@ -965,7 +988,7 @@ export async function getOrGenerateDailyMixes(userId: number, forceRefresh = fal
   }
 
   const resolvedTz = timeZone || getUserTimezone(userId);
-  const today = getTodayDateKey(resolvedTz);
+  const { dateKey: today, hour: localHour } = getLocalTimeParts(resolvedTz);
 
   if (!forceRefresh) {
     const existingMixes: any[] = db.prepare(`
@@ -978,6 +1001,33 @@ export async function getOrGenerateDailyMixes(userId: number, forceRefresh = fal
 
     if (existingMixes.length > 0) {
       return existingMixes.map(enrichDailyMixRow);
+    }
+
+    // Check if nightly auto-update is enabled and we haven't reached the scheduled hour yet (e.g. 00:00–02:59 when scheduled for 03:00).
+    // In that case, keep serving yesterday's/latest mixes instead of regenerating at midnight on app open.
+    const sched = db.prepare(`
+      SELECT COALESCE(nightly_mix_enabled, 1) as nightly_mix_enabled,
+             COALESCE(nightly_mix_hour, 3) as nightly_mix_hour
+      FROM users WHERE id = ?
+    `).get(userId) as { nightly_mix_enabled: number; nightly_mix_hour: number } | undefined;
+
+    const nightlyEnabled = sched ? Boolean(sched.nightly_mix_enabled) : true;
+    const targetHour = Math.max(0, Math.min(23, Number(sched?.nightly_mix_hour ?? 3)));
+
+    if (nightlyEnabled && localHour < targetHour) {
+      const previousMixes: any[] = db.prepare(`
+        SELECT p.*,
+          (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) as track_count
+        FROM playlists p
+        WHERE p.user_id = ? AND p.is_daily_mix = 1
+        ORDER BY p.daily_mix_date DESC, p.daily_mix_number ASC
+      `).all(userId);
+
+      if (previousMixes.length > 0) {
+        const latestDate = previousMixes[0].daily_mix_date;
+        const latestMixes = previousMixes.filter(m => m.daily_mix_date === latestDate);
+        return latestMixes.map(enrichDailyMixRow);
+      }
     }
   }
 
@@ -1526,6 +1576,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       .sort((a, b) => (b.recCount + Math.random() * 0.8) - (a.recCount + Math.random() * 0.8))
       .slice(0, 30);
 
+    const relatedTrackLists: SpotifyTrack[][] = [];
     for (let rIdx = 0; rIdx < sortedRelated.length; rIdx += 5) {
       if (freshCandidates.length >= TARGET_FRESH_COUNT) break;
       const rBatch = sortedRelated.slice(rIdx, rIdx + 5);
@@ -1558,6 +1609,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       );
 
       for (const trackList of batchResults) {
+        if (trackList.length > 0) relatedTrackLists.push(trackList);
         const shuffled = shuffleCandidatesWithVariety(trackList);
         for (const cand of shuffled) {
           if (freshCandidates.length >= TARGET_FRESH_COUNT) break;
@@ -1572,7 +1624,7 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     // Stage C: If still below TARGET_FRESH_COUNT, expand artist cap to 2 tracks
     if (freshCandidates.length < TARGET_FRESH_COUNT) {
       maxTracksPerArtist = 2;
-      for (const trackList of seedTrackLists) {
+      for (const trackList of [...seedTrackLists, ...relatedTrackLists]) {
         const shuffled = shuffleCandidatesWithVariety(trackList);
         for (const cand of shuffled) {
           if (freshCandidates.length >= TARGET_FRESH_COUNT) break;
@@ -1584,10 +1636,11 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     }
 
     // Stage D: If STILL below TARGET_FRESH_COUNT, fetch genre fallback tracks
+    let fallbackTracks: SpotifyTrack[] = [];
     if (freshCandidates.length < TARGET_FRESH_COUNT) {
       maxTracksPerArtist = 3;
-      const fallbackTracks = await fetchGenreFallbackTracks(catKey);
-      const shuffled = fallbackTracks.sort(() => Math.random() - 0.5);
+      fallbackTracks = await fetchGenreFallbackTracks(catKey);
+      const shuffled = [...fallbackTracks].sort(() => Math.random() - 0.5);
       for (const cand of shuffled) {
         if (freshCandidates.length >= TARGET_FRESH_COUNT) break;
         if (canAddCandidate(cand)) {
@@ -1598,54 +1651,127 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
 
     const finalNewTracks = freshCandidates.slice(0, TARGET_FRESH_COUNT);
 
-    // 4. Assemble the final 25 tracks with balanced slots
+    // 4. Assemble the final 25 unique, non-blacklisted tracks with balanced slots
     // Position 0 is ALWAYS familiar (0 ms instant play)
     // Familiar: 2-3 tracks (pos 0, pos 12, pos 24)
     // Recurrent: 5-8 tracks spaced across the playlist
     // Fresh discoveries: fill all remaining positions!
-    const mixSlots: { type: 'familiar' | 'recurrent' | 'new'; track: any }[] = new Array(TARGET_MIX_SIZE).fill(null);
+    const mixSlots: ({ type: 'familiar' | 'recurrent' | 'new'; track: any } | null)[] = new Array(TARGET_MIX_SIZE).fill(null);
+    const placedTrackKeys = new Set<string>();
 
-    if (familiarTracks.length > 0) mixSlots[0] = { type: 'familiar', track: familiarTracks[0] };
-    if (familiarTracks.length > 1) mixSlots[12] = { type: 'familiar', track: familiarTracks[1] };
-    if (familiarTracks.length > 2) mixSlots[24] = { type: 'familiar', track: familiarTracks[2] };
+    const tryPlaceSlot = (pos: number, type: 'familiar' | 'recurrent' | 'new', track: any): boolean => {
+      if (pos < 0 || pos >= TARGET_MIX_SIZE || mixSlots[pos]) return false;
+      if (!track || !track.title || !track.artist) return false;
+      if (isBlacklisted(track.artist, track.title, track.id)) return false;
+      const key = normalizeTrackKey(track.artist, track.title);
+      if (placedTrackKeys.has(key)) return false;
+      placedTrackKeys.add(key);
+      mixSlots[pos] = { type, track };
+      return true;
+    };
+
+    if (familiarTracks.length > 0) tryPlaceSlot(0, 'familiar', familiarTracks[0]);
+    if (familiarTracks.length > 1) tryPlaceSlot(12, 'familiar', familiarTracks[1]);
+    if (familiarTracks.length > 2) tryPlaceSlot(24, 'familiar', familiarTracks[2]);
 
     const recurrentSlots = [3, 7, 10, 15, 18, 21, 5, 23];
     let rI = 0;
     for (const pos of recurrentSlots) {
-      if (rI < recurrentTracks.length && !mixSlots[pos]) {
-        mixSlots[pos] = { type: 'recurrent', track: recurrentTracks[rI++] };
+      while (rI < recurrentTracks.length && !tryPlaceSlot(pos, 'recurrent', recurrentTracks[rI])) {
+        rI++;
       }
+      if (mixSlots[pos]) rI++;
     }
     while (rI < recurrentTracks.length) {
       const emptyPos = mixSlots.findIndex(s => s === null);
       if (emptyPos === -1) break;
-      mixSlots[emptyPos] = { type: 'recurrent', track: recurrentTracks[rI++] };
+      tryPlaceSlot(emptyPos, 'recurrent', recurrentTracks[rI++]);
     }
+
+    // Build deduplicated extra pool (unused recurrents -> leftover related/seed/fallback tracks -> extra user tracks)
+    // Used both to fill any remaining empty slots up to 25 AND as reserve tracks if any download fails.
+    const extraPool: { type: 'familiar' | 'recurrent' | 'new'; track: any }[] = [];
+    const extraSeenKeys = new Set<string>(placedTrackKeys);
+
+    const pushExtra = (type: 'familiar' | 'recurrent' | 'new', cand: any) => {
+      if (!cand || !cand.title || !cand.artist) return;
+      if (isBlacklisted(cand.artist, cand.title, cand.id)) return;
+      const key = normalizeTrackKey(cand.artist, cand.title);
+      if (extraSeenKeys.has(key)) return;
+      extraSeenKeys.add(key);
+      extraPool.push({ type, track: cand });
+    };
 
     let nI = 0;
     for (let pos = 0; pos < TARGET_MIX_SIZE; pos++) {
       if (!mixSlots[pos]) {
-        if (nI < finalNewTracks.length) {
-          mixSlots[pos] = { type: 'new', track: finalNewTracks[nI++] };
-        } else if (rI < recurrentPool.length) {
-          mixSlots[pos] = { type: 'recurrent', track: recurrentPool[rI++] };
+        while (nI < finalNewTracks.length) {
+          const placed = tryPlaceSlot(pos, 'new', finalNewTracks[nI++]);
+          if (placed) break;
         }
       }
     }
+
+    // Populate extraPool from already-fetched candidates (no extra network calls)
+    for (const rec of recurrentPool) {
+      pushExtra('recurrent', rec);
+    }
+    for (const list of [...relatedTrackLists, ...seedTrackLists]) {
+      for (const cand of shuffleCandidatesWithVariety(list)) {
+        const pa = extractPrimaryArtist(cand.artist).toLowerCase();
+        if (catKey === 'rock' && CLASSIC_ROCK_ANCHORS.has(pa)) continue;
+        if (catKey === 'classic_rock' && MODERN_ROCK_ANCHORS.has(pa)) continue;
+        if (/\b(cover|rock cover|metal cover|acoustic cover|tribute|караоке|кавер|remake)\b/i.test(cand.title)) continue;
+        if (ownedTrackKeys.has(normalizeTrackKey(cand.artist, cand.title))) continue;
+        pushExtra('new', cand);
+        if (extraPool.length >= 25) break;
+      }
+      if (extraPool.length >= 25) break;
+    }
+    for (const cand of fallbackTracks) {
+      if (ownedTrackKeys.has(normalizeTrackKey(cand.artist, cand.title))) continue;
+      pushExtra('new', cand);
+      if (extraPool.length >= 30) break;
+    }
+    for (const ut of shuffledUserTracks) {
+      pushExtra('familiar', ut);
+      if (extraPool.length >= 35) break;
+    }
+
+    // Fill any remaining empty slots (if finalNewTracks was short) from extraPool without duplicates
+    let eI = 0;
+    for (let pos = 0; pos < TARGET_MIX_SIZE; pos++) {
+      if (!mixSlots[pos]) {
+        while (eI < extraPool.length) {
+          const item = extraPool[eI++];
+          if (tryPlaceSlot(pos, item.type, item.track)) break;
+        }
+      }
+    }
+
+    // Remaining items in extraPool become reserve tracks for downloader backfill (up to 10 tracks)
+    const reserveTracks: SpotifyTrack[] = extraPool
+      .slice(eI, eI + 10)
+      .map(e => ({
+        id: e.track.spotify_id || e.track.id || `res_${Math.abs(hashCode(normalizeTrackKey(e.track.artist, e.track.title)))}`,
+        title: e.track.title,
+        artist: e.track.artist,
+        album: e.track.album || '',
+        duration_ms: e.track.duration_ms || 180000,
+        cover_url: e.track.cover_url || ''
+      }));
 
     let finalMixItems: { type: 'familiar' | 'recurrent' | 'new'; track: any; position: number }[] = [];
     let currentPos = 0;
     for (let i = 0; i < TARGET_MIX_SIZE; i++) {
       if (mixSlots[i]) {
         finalMixItems.push({
-          type: mixSlots[i].type,
-          track: mixSlots[i].track,
+          type: mixSlots[i]!.type,
+          track: mixSlots[i]!.track,
           position: currentPos++
         });
       }
     }
-
-    finalMixItems = finalMixItems.filter(item => !isTrackBlacklistedForUser(userId, item.track.title, item.track.artist, item.track.id));
 
     // Record newly selected discovery tracks (recurrent + new) into daily_mix_history
     const discoveryTracksToRecord = finalMixItems
@@ -1690,14 +1816,27 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     const mixPlaylistId = Number(insertRes.lastInsertRowid);
     const tracksToDownload: SpotifyTrack[] = [];
     const localTracksToInsert: { trackId: number; position: number }[] = [];
+    const insertedLocalTrackIds = new Set<number>();
 
     for (const item of finalMixItems) {
       if (item.type === 'familiar') {
-        localTracksToInsert.push({ trackId: item.track.id, position: item.position });
+        if (!insertedLocalTrackIds.has(item.track.id)) {
+          insertedLocalTrackIds.add(item.track.id);
+          localTracksToInsert.push({ trackId: item.track.id, position: item.position });
+        } else if (reserveTracks.length > 0) {
+          const replacement = reserveTracks.shift()!;
+          tracksToDownload.push({ ...replacement, position: item.position } as any);
+        }
       } else {
         const local = findLocalTrackByInfo(item.track.title, item.track.artist, item.track.id);
         if (local && local.id) {
-          localTracksToInsert.push({ trackId: local.id, position: item.position });
+          if (!insertedLocalTrackIds.has(local.id)) {
+            insertedLocalTrackIds.add(local.id);
+            localTracksToInsert.push({ trackId: local.id, position: item.position });
+          } else if (reserveTracks.length > 0) {
+            const replacement = reserveTracks.shift()!;
+            tracksToDownload.push({ ...replacement, position: item.position } as any);
+          }
         } else {
           tracksToDownload.push({
             ...item.track,
@@ -1730,11 +1869,11 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
         userId,
         mixPlaylistId,
         mixName,
-        finalMixItems.length,
-        familiarTracks.length
+        localTracksToInsert.length + tracksToDownload.length,
+        localTracksToInsert.length
       );
 
-      enqueuePlaylistDownload(jobId, userId, mixPlaylistId, tracksToDownload);
+      enqueuePlaylistDownload(jobId, userId, mixPlaylistId, tracksToDownload, undefined, false, reserveTracks);
     }
 
     const createdRow = db.prepare(`

@@ -1,5 +1,5 @@
 import { db } from './db';
-import { getOrGenerateDailyMixes, getTodayDateKey, getUserTimezone } from './dailyMix';
+import { getOrGenerateDailyMixes, getTodayDateKey, getLocalTimeParts } from './dailyMix';
 import { isUserOnline, isUserPlayingMusic, isAnyUserPlayingMusic } from './sync';
 import { upgradeSingleTrackFile, getUpgradeProgress } from './downloader';
 
@@ -55,21 +55,7 @@ export async function checkAndRunNightlyMixes(): Promise<void> {
       }
 
       const tz = user.timezone || 'Europe/Kyiv';
-      let localDateStr: string;
-      let localHour: number;
-      let localMinute: number;
-
-      try {
-        localDateStr = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
-        const hourStr = new Intl.DateTimeFormat('en-US', { hour: 'numeric', hourCycle: 'h23', timeZone: tz }).format(new Date());
-        const minStr = new Intl.DateTimeFormat('en-US', { minute: 'numeric', timeZone: tz }).format(new Date());
-        localHour = parseInt(hourStr, 10);
-        localMinute = parseInt(minStr, 10);
-      } catch (_) {
-        localDateStr = getTodayDateKey(tz);
-        localHour = new Date().getUTCHours();
-        localMinute = new Date().getUTCMinutes();
-      }
+      const { dateKey: localDateStr, hour: localHour, minute: localMinute } = getLocalTimeParts(tz);
 
       // Check if mixes for this user have already been generated for today's date
       const existingToday = db.prepare(`
@@ -82,10 +68,11 @@ export async function checkAndRunNightlyMixes(): Promise<void> {
         continue;
       }
 
-      // Nightly target window: 02:00 to 05:00 AM local time
-      // Default preferred hour is 03:00, but anywhere between 02:00 and 05:00 is acceptable
-      const targetHour = user.nightly_mix_hour || 3;
-      const isNightTime = localHour >= 2 && localHour <= 5;
+      // Respect user's preferred nightly_mix_hour (default 03:00 local time).
+      // Run within [targetHour, deadlineHour], postponing while user is online/listening until deadlineHour.
+      const targetHour = Math.max(0, Math.min(23, Number(user.nightly_mix_hour ?? 3)));
+      const deadlineHour = Math.min(23, Math.max(5, targetHour + 2));
+      const isNightTime = localHour >= targetHour && localHour <= deadlineHour;
 
       if (!isNightTime) {
         continue;
@@ -95,9 +82,9 @@ export async function checkAndRunNightlyMixes(): Promise<void> {
       const online = isUserOnline(user.id);
       const playing = isUserPlayingMusic(user.id);
 
-      // If user is currently online or listening to music, and we haven't reached the late deadline (05:00),
+      // If user is currently online or listening to music, and we haven't reached the deadline hour,
       // postpone generation so we don't disrupt their active session or compete for bandwidth.
-      if ((online || playing) && localHour < 5) {
+      if ((online || playing) && localHour < deadlineHour) {
         console.log(`[Nightly Scheduler] User ${user.username} is currently online/listening at ${localHour}:${String(localMinute).padStart(2, '0')} (${tz}). Postponing mix generation until offline.`);
         continue;
       }
