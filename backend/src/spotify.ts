@@ -1300,74 +1300,222 @@ function pruneSearchCache() {
   }
 }
 
-export async function searchExternalTracks(query: string, limit: number = 8, userId?: number): Promise<SpotifyTrack[]> {
+export async function searchExternalTracks(query: string, limit: number = 12, userId?: number): Promise<SpotifyTrack[]> {
   const cleanQ = (query || '').trim();
   if (!cleanQ) return [];
 
-  const cacheKey = `${userId || 0}:::${limit}:::${cleanQ.toLowerCase()}`;
+  const cacheKey = `v2:::${userId || 0}:::${limit}:::${cleanQ.toLowerCase()}`;
   const cached = searchCache.get(cacheKey);
   if (cached && Date.now() < cached.expires) {
     return cached.results.map(t => ({ ...t }));
   }
 
-  const results: SpotifyTrack[] = [];
-  const seenKeys = new Set<string>();
+  const fetchLimit = Math.max(limit * 2, 20);
 
-  const addUnique = (list: SpotifyTrack[]) => {
-    for (const t of list) {
-      if (!t.title || !t.artist) continue;
-      const key = `${t.title.toLowerCase().trim()} - ${t.artist.toLowerCase().trim()}`;
-      if (!seenKeys.has(key)) {
-        seenKeys.add(key);
-        results.push(t);
-        if (results.length >= limit) break;
-      }
-    }
-  };
+  interface RawCandidate {
+    track: SpotifyTrack;
+    source: 'spotify' | 'deezer' | 'itunes';
+    rankIndex: number;
+  }
+
+  const rawCandidates: RawCandidate[] = [];
 
   // 1. Try Spotify if user has connected token or client credentials
+  let spotifyCount = 0;
   try {
     let token = userId ? await getUserSpotifyToken(userId) : null;
     if (!token) {
       token = await getAccessToken();
     }
     if (token) {
-      const res = await fetch(`https://api.spotify.com/v1/search?type=track&limit=${limit}&q=${encodeURIComponent(cleanQ)}`, {
+      const res = await fetch(`https://api.spotify.com/v1/search?type=track&limit=${Math.min(fetchLimit, 25)}&q=${encodeURIComponent(cleanQ)}`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(4000)
       });
       if (res.ok) {
         const data: any = await res.json();
-        const spotifyList: SpotifyTrack[] = [];
-        for (const t of data.tracks?.items || []) {
-          if (!t) continue;
-          spotifyList.push({
-            id: t.id,
-            title: t.name,
-            artist: t.artists?.map((a: any) => a.name).join(', ') || 'Unknown Artist',
-            album: t.album?.name || '',
-            duration_ms: t.duration_ms || 180000,
-            cover_url: t.album?.images?.[0]?.url || ''
+        const items = data.tracks?.items || [];
+        items.forEach((t: any, idx: number) => {
+          if (!t || !t.name) return;
+          spotifyCount++;
+          rawCandidates.push({
+            source: 'spotify',
+            rankIndex: idx,
+            track: {
+              id: t.id,
+              title: t.name,
+              artist: t.artists?.map((a: any) => a.name).join(', ') || 'Unknown Artist',
+              album: t.album?.name || '',
+              duration_ms: t.duration_ms || 180000,
+              cover_url: t.album?.images?.[0]?.url || ''
+            }
           });
-        }
-        addUnique(spotifyList);
+        });
       }
     }
   } catch (_) {}
 
-  // 2. If Spotify returned insufficient results (or 403 Forbidden), query Deezer API (open, no auth, 100M+ tracks)
-  if (results.length < limit) {
-    const dzList = await searchDeezerTracks(cleanQ, limit);
-    addUnique(dzList);
+  // 2. Always query BOTH Deezer AND iTunes in parallel whenever Spotify didn't fill the pool
+  // (Prevents Deezer covers/remixes from blocking originals that are licensed on Apple Music/iTunes, e.g. NCS releases)
+  if (spotifyCount < limit) {
+    const [dzRes, itRes] = await Promise.allSettled([
+      searchDeezerTracks(cleanQ, fetchLimit),
+      searchItunesTracks(cleanQ, fetchLimit)
+    ]);
+
+    if (dzRes.status === 'fulfilled') {
+      dzRes.value.forEach((t, idx) => {
+        rawCandidates.push({ source: 'deezer', rankIndex: idx, track: t });
+      });
+    }
+    if (itRes.status === 'fulfilled') {
+      itRes.value.forEach((t, idx) => {
+        rawCandidates.push({ source: 'itunes', rankIndex: idx, track: t });
+      });
+    }
   }
 
-  // 3. If still below limit, query Apple Music / iTunes API
-  if (results.length < limit) {
-    const itunesList = await searchItunesTracks(cleanQ, limit);
-    addUnique(itunesList);
+  // Query intent detection so we only surface Nightcore / Slowed / Sped Up / Remix / Hardstyle / Cover / Live
+  // at the top when the user actually asked for them in the search query
+  const wordRe = (body: string) => new RegExp(`(?<![\\p{L}\\p{N}])(?:${body})(?![\\p{L}\\p{N}])`, 'iu');
+  const reNightcoreSped = wordRe('nightcore|sped\\s*up|speed\\s*up|ускоренн\\p{L}*');
+  const reSlowed = wordRe('slowed|slow\\s*down|reverb|слоуд|замедленн\\p{L}*');
+  const reRemix = wordRe('remix|rmx|ремикс|bootleg|flip|mashup|hardstyle|techno\\s+version|phonk\\s+version|vip\\s+mix|dubstep\\s+mix');
+  const reCoverKaraoke = wordRe('cover|кавер|karaoke|караоке|instrumental|инструментал|tribute|lullaby|8-?bit|8d|bass\\s*boost(?:ed)?|piano\\s+version|минусовка');
+  const reLiveAcoustic = wordRe('live|лайв|концерт|concert|unplugged|acoustic|акустика|акустическ\\p{L}*');
+
+  const qWantsNightcoreSped = reNightcoreSped.test(cleanQ);
+  const qWantsSlowed = reSlowed.test(cleanQ);
+  const qWantsRemix = reRemix.test(cleanQ);
+  const qWantsCoverKaraoke = reCoverKaraoke.test(cleanQ);
+  const qWantsLiveAcoustic = reLiveAcoustic.test(cleanQ);
+
+  const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const stripFeat = (s: string) => s.replace(/\s*[\(\[]\s*(?:feat|ft|with)\.?\s+[^\)\]]+[\)\]]/gi, '').trim();
+  const primaryArtistNorm = (artist: string) =>
+    norm(artist.split(/[,&/;]|\s+(?:feat\.?|ft\.?|with|x)\s+/i)[0] || artist);
+
+  const qNorm = norm(cleanQ);
+  const qWords = qNorm.split(' ').filter(w => w.length > 1);
+
+  const isVariantAlbum = (album: string) =>
+    reNightcoreSped.test(album) || reSlowed.test(album) || reRemix.test(album);
+
+  interface MergedCandidate {
+    track: SpotifyTrack;
+    sources: Set<'spotify' | 'deezer' | 'itunes'>;
+    occurrences: number;
+    bestRankIndex: number;
+    hasSpotify: boolean;
   }
 
-  const finalResults = results.slice(0, limit);
+  const mergedMap = new Map<string, MergedCandidate>();
+
+  for (const cand of rawCandidates) {
+    const t = cand.track;
+    if (!t.title || !t.artist) continue;
+
+    const titleKey = norm(stripFeat(t.title));
+    const artistKey = primaryArtistNorm(t.artist);
+    if (!titleKey || !artistKey) continue;
+    const dedupKey = `${titleKey}:::${artistKey}`;
+
+    const existing = mergedMap.get(dedupKey);
+    if (!existing) {
+      mergedMap.set(dedupKey, {
+        track: t,
+        sources: new Set([cand.source]),
+        occurrences: 1,
+        bestRankIndex: cand.rankIndex,
+        hasSpotify: cand.source === 'spotify'
+      });
+    } else {
+      existing.sources.add(cand.source);
+      existing.occurrences++;
+      if (cand.rankIndex < existing.bestRankIndex) {
+        existing.bestRankIndex = cand.rankIndex;
+      }
+      if (cand.source === 'spotify') {
+        existing.hasSpotify = true;
+      }
+
+      // Prefer cleaner studio album metadata when collapsing duplicates (e.g. "Heroes Tonight - Single" over "Heroes Tonight (Sped up / Slowed) - Single")
+      const curAlbumVariant = isVariantAlbum(existing.track.album || '');
+      const newAlbumVariant = isVariantAlbum(t.album || '');
+      const shouldReplaceTrack =
+        (cand.source === 'spotify' && !existing.track.id.match(/^[a-zA-Z0-9]{15,30}$/)) ||
+        (curAlbumVariant && !newAlbumVariant) ||
+        (!existing.track.cover_url && Boolean(t.cover_url));
+
+      if (shouldReplaceTrack) {
+        existing.track = t;
+      }
+    }
+  }
+
+  const scored = Array.from(mergedMap.values()).map((entry) => {
+    const t = entry.track;
+    const combined = `${t.title} ${t.artist}`;
+    const titleNorm = norm(stripFeat(t.title));
+    const fullNorm = norm(combined);
+
+    let score = 0;
+
+    // 1. Source & position score
+    if (entry.hasSpotify) score += 160;
+    score += Math.max(0, 140 - entry.bestRankIndex * 8);
+
+    // 2. Cross-source & multi-release popularity consensus (e.g. original appearing on Single + Best of NCS + Top 50 NCS, or on both Deezer & iTunes)
+    if (entry.sources.size >= 2) score += 120;
+    if (entry.occurrences > 1) {
+      score += Math.min(120, (entry.occurrences - 1) * 40);
+    }
+
+    // 3. Query relevance
+    if (titleNorm === qNorm) {
+      score += 150;
+    } else if (qWords.length > 0) {
+      const matchedWords = qWords.filter(w => fullNorm.includes(w));
+      const ratio = matchedWords.length / qWords.length;
+      if (ratio === 1) score += 100;
+      else if (ratio >= 0.7) score += 50;
+      else score -= 120;
+    }
+
+    // 4. Variant matching / demotion (checked against BOTH title and artist so "Nightcore - Heroes Tonight" is caught!)
+    const hasNightcoreSped = reNightcoreSped.test(combined);
+    const hasSlowed = reSlowed.test(combined);
+    const hasRemix = reRemix.test(combined);
+    const hasCoverKaraoke = reCoverKaraoke.test(combined);
+    const hasLiveAcoustic = reLiveAcoustic.test(combined);
+
+    if (hasNightcoreSped) {
+      score += qWantsNightcoreSped ? 180 : -450;
+    }
+    if (hasSlowed) {
+      score += qWantsSlowed ? 180 : -420;
+    }
+    if (hasRemix) {
+      score += qWantsRemix ? 150 : -350;
+    }
+    if (hasCoverKaraoke) {
+      score += qWantsCoverKaraoke ? 150 : -400;
+    }
+    if (hasLiveAcoustic) {
+      score += qWantsLiveAcoustic ? 120 : -220;
+    }
+
+    // Slight penalty if album itself is still a Sped Up / Slowed pack when query didn't ask for it
+    if (!qWantsNightcoreSped && !qWantsSlowed && isVariantAlbum(t.album || '')) {
+      score -= 40;
+    }
+
+    return { track: t, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+
+  const finalResults = scored.slice(0, limit).map(s => s.track);
   if (finalResults.length > 0) {
     pruneSearchCache();
     searchCache.set(cacheKey, {
@@ -1379,7 +1527,7 @@ export async function searchExternalTracks(query: string, limit: number = 8, use
   return finalResults;
 }
 
-export async function searchSpotifyTracks(query: string, limit: number = 8, userId?: number): Promise<SpotifyTrack[]> {
+export async function searchSpotifyTracks(query: string, limit: number = 12, userId?: number): Promise<SpotifyTrack[]> {
   return await searchExternalTracks(query, limit, userId);
 }
 
