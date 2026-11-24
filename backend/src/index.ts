@@ -2786,9 +2786,10 @@ server.post('/api/tracks/download-single', { preHandler: [(server as any).authen
   if (!result.success) {
     return reply.status(500).send({ error: result.error || 'Ошибка скачивания трека' });
   }
+  const { downloadPromise: _dp, ...publicResult } = result;
   return {
-    ...result,
-    track: result.track ? sanitizeTrackForClient(result.track) : undefined
+    ...publicResult,
+    track: publicResult.track ? sanitizeTrackForClient(publicResult.track) : undefined
   };
 });
 
@@ -2833,12 +2834,18 @@ server.post('/api/tracks/play-instant', { preHandler: [(server as any).authentic
   }
 
   // 2. Start background download asynchronously with deduplication
-  const bgPromise = downloadSingleSpotifyTrackDirect(track, req.user.id);
+  // Resolves only when actual yt-dlp download completes (not when pending DB row is created)
+  const bgPromise = downloadSingleSpotifyTrackDirect(track, req.user.id).then(async (res) => {
+    if (res.downloading && res.downloadPromise) {
+      return await res.downloadPromise;
+    }
+    return res;
+  });
   bgPromise.then((res) => {
     if (res.success && res.track && !res.downloading) {
       broadcastToUser(req.user.id, {
         type: 'INSTANT_TRACK_DOWNLOADED',
-        spotifyId: track.id,
+        spotifyId: track.id || res.track.spotify_id || '',
         track: sanitizeTrackForClient(res.track)
       });
     }

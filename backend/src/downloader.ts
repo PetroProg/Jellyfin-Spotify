@@ -593,6 +593,29 @@ export function cancelUserDownloads(userId: number) {
 
 const MAX_PLAYLIST_QUEUE_SIZE = 2000;
 
+function finalizeDownloadJob(jobId: string, userId: number, playlistId: number | null): void {
+  jobReserveTracks.delete(jobId);
+  let count = 0;
+  if (playlistId) {
+    const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
+    count = countRow?.cnt || 0;
+  } else {
+    const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(userId);
+    count = countRow?.cnt || 0;
+  }
+
+  const jobRow: any = db.prepare('SELECT total_tracks FROM download_jobs WHERE id = ?').get(jobId);
+  if (!jobRow) return;
+  const totalTracks = jobRow.total_tracks || 0;
+  const finalStatus = (count === 0 && totalTracks > 0) ? 'failed' : 'completed';
+
+  db.prepare(`
+    UPDATE download_jobs
+    SET status = ?, downloaded_tracks = ?, current_track = NULL
+    WHERE id = ?
+  `).run(finalStatus, count, jobId);
+}
+
 export function enqueuePlaylistDownload(
   jobId: string,
   userId: number,
@@ -613,6 +636,7 @@ export function enqueuePlaylistDownload(
     pos = 0;
   }
 
+  let pushedCount = 0;
   for (let i = 0; i < tracks.length; i++) {
     if (queue.length >= MAX_PLAYLIST_QUEUE_SIZE) {
       console.warn(`[Downloader] Queue reached maximum capacity (${MAX_PLAYLIST_QUEUE_SIZE}). Dropping excess tracks.`);
@@ -635,6 +659,18 @@ export function enqueuePlaylistDownload(
       position: typeof customPos === 'number' ? customPos : pos + i,
       isLikedOnly
     });
+    pushedCount++;
+  }
+
+  // If all tracks were skipped/blacklisted and nothing for this job is queued, finalize the job so it never stays stuck in 'downloading'
+  if (pushedCount === 0 && !queue.some(q => q.jobId === jobId)) {
+    try {
+      finalizeDownloadJob(jobId, userId, playlistId);
+      broadcastToUser(userId, { type: 'PLAYLISTS_UPDATED' });
+    } catch (err: any) {
+      console.warn(`[Downloader] Failed to finalize empty job ${jobId}:`, err?.message || err);
+    }
+    return;
   }
 
   if (!isWorkerRunning) {
@@ -804,87 +840,89 @@ async function runWorkerLoop() {
 
   console.log('[Downloader] Background worker loop started. Total in queue:', queue.length);
 
-  while (queue.length > 0) {
-    const item = queue.shift()!;
-    let linkedNewTrack = false;
-    try {
-      linkedNewTrack = await downloadSingleTrack(item);
-    } catch (err: any) {
-      console.error(`[Downloader] Error downloading ${item.track.artist} - ${item.track.title}:`, err.message);
-    }
+  try {
+    while (queue.length > 0) {
+      const item = queue.shift()!;
+      let linkedNewTrack = false;
+      try {
+        linkedNewTrack = await downloadSingleTrack(item);
+      } catch (err: any) {
+        console.error(`[Downloader] Error downloading ${item.track.artist} - ${item.track.title}:`, err?.message || err);
+      }
 
-    // If a track failed, was truncated, or collided as a duplicate in a playlist with reserve tracks (e.g. Daily Mix),
-    // pull the next reserve track into the same position so the mix still reaches its full target count (e.g. 25/25).
-    if (!linkedNewTrack && item.playlistId) {
-      const reserves = jobReserveTracks.get(item.jobId);
-      if (reserves && reserves.length > 0) {
-        const plExists = db.prepare('SELECT 1 FROM playlists WHERE id = ?').get(item.playlistId);
-        if (plExists) {
-          while (reserves.length > 0) {
-            const nextReserve = reserves.shift()!;
-            if (isTrackBlacklistedForUser(item.userId, nextReserve.title, nextReserve.artist, nextReserve.id)) {
-              continue;
+      // If a track failed, was truncated, or collided as a duplicate in a playlist with reserve tracks (e.g. Daily Mix),
+      // pull the next reserve track into the same position so the mix still reaches its full target count (e.g. 25/25).
+      try {
+        if (!linkedNewTrack && item.playlistId) {
+          const reserves = jobReserveTracks.get(item.jobId);
+          if (reserves && reserves.length > 0) {
+            const plExists = db.prepare('SELECT 1 FROM playlists WHERE id = ?').get(item.playlistId);
+            if (plExists) {
+              while (reserves.length > 0) {
+                const nextReserve = reserves.shift()!;
+                if (isTrackBlacklistedForUser(item.userId, nextReserve.title, nextReserve.artist, nextReserve.id)) {
+                  continue;
+                }
+                const alreadyInQueue = queue.some(q =>
+                  q.playlistId === item.playlistId && (
+                    (nextReserve.id && q.track.id === nextReserve.id) ||
+                    (q.track.title.toLowerCase() === nextReserve.title.toLowerCase() &&
+                     q.track.artist.toLowerCase() === nextReserve.artist.toLowerCase())
+                  )
+                );
+                if (alreadyInQueue) continue;
+
+                console.log(`[Downloader] Backfilling "${item.track.artist} - ${item.track.title}" in playlist ${item.playlistId} with reserve "${nextReserve.artist} - ${nextReserve.title}" (pos ${item.position})`);
+                queue.push({
+                  jobId: item.jobId,
+                  userId: item.userId,
+                  playlistId: item.playlistId,
+                  track: nextReserve,
+                  position: item.position,
+                  isLikedOnly: item.isLikedOnly
+                });
+                break;
+              }
+            } else {
+              jobReserveTracks.delete(item.jobId);
             }
-            const alreadyInQueue = queue.some(q =>
-              q.playlistId === item.playlistId && (
-                (nextReserve.id && q.track.id === nextReserve.id) ||
-                (q.track.title.toLowerCase() === nextReserve.title.toLowerCase() &&
-                 q.track.artist.toLowerCase() === nextReserve.artist.toLowerCase())
-              )
-            );
-            if (alreadyInQueue) continue;
-
-            console.log(`[Downloader] Backfilling "${item.track.artist} - ${item.track.title}" in playlist ${item.playlistId} with reserve "${nextReserve.artist} - ${nextReserve.title}" (pos ${item.position})`);
-            queue.push({
-              jobId: item.jobId,
-              userId: item.userId,
-              playlistId: item.playlistId,
-              track: nextReserve,
-              position: item.position,
-              isLikedOnly: item.isLikedOnly
-            });
-            break;
           }
-        } else {
-          jobReserveTracks.delete(item.jobId);
         }
+      } catch (backfillErr: any) {
+        console.error(`[Downloader] Reserve backfill error for job ${item.jobId}:`, backfillErr?.message || backfillErr);
+      }
+
+      // Check if remaining tracks for this job
+      try {
+        const remainingForJob = queue.filter(q => q.jobId === item.jobId).length;
+        if (remainingForJob === 0) {
+          finalizeDownloadJob(item.jobId, item.userId, item.playlistId);
+
+          // Trigger Jellyfin library refresh
+          await refreshJellyfinLibrary().catch(() => {});
+
+          // Broadcast real-time updates to user's connected devices
+          try {
+            broadcastToUser(item.userId, { type: 'LIKES_UPDATED' });
+            broadcastToUser(item.userId, { type: 'PLAYLISTS_UPDATED' });
+          } catch (_) {}
+        }
+      } catch (finalizeErr: any) {
+        console.error(`[Downloader] Job finalize error for job ${item.jobId}:`, finalizeErr?.message || finalizeErr);
       }
     }
-
-    // Check if remaining tracks for this job
-    const remainingForJob = queue.filter(q => q.jobId === item.jobId).length;
-    if (remainingForJob === 0) {
-      jobReserveTracks.delete(item.jobId);
-      let count = 0;
-      if (item.playlistId) {
-        const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM playlist_tracks WHERE playlist_id = ?').get(item.playlistId);
-        count = countRow?.cnt || 0;
-      } else {
-        const countRow: any = db.prepare('SELECT COUNT(*) as cnt FROM liked_tracks WHERE user_id = ?').get(item.userId);
-        count = countRow?.cnt || 0;
-      }
-
-      const jobRow: any = db.prepare('SELECT total_tracks FROM download_jobs WHERE id = ?').get(item.jobId);
-      const totalTracks = jobRow?.total_tracks || 0;
-      const finalStatus = (count === 0 && totalTracks > 0) ? 'failed' : 'completed';
-
-      db.prepare(`
-        UPDATE download_jobs
-        SET status = ?, downloaded_tracks = ?, current_track = NULL
-        WHERE id = ?
-      `).run(finalStatus, count, item.jobId);
-
-      // Trigger Jellyfin library refresh
-      await refreshJellyfinLibrary();
-
-      // Broadcast real-time updates to user's connected devices
-      broadcastToUser(item.userId, { type: 'LIKES_UPDATED' });
-      broadcastToUser(item.userId, { type: 'PLAYLISTS_UPDATED' });
+  } finally {
+    isWorkerRunning = false;
+    console.log('[Downloader] Background worker loop completed and idle.');
+    // Safety re-trigger if new items arrived right as the loop exited
+    if (queue.length > 0) {
+      setImmediate(() => {
+        if (!isWorkerRunning && queue.length > 0) {
+          runWorkerLoop().catch(err => console.error('[Downloader Worker Restart Error]', err));
+        }
+      });
     }
   }
-
-  isWorkerRunning = false;
-  console.log('[Downloader] Background worker loop completed and idle.');
 }
 
 export interface StudioSearchOptions {
@@ -1586,16 +1624,86 @@ async function downloadAudioWithFallback(
   return false;
 }
 
-interface SingleDownloadResult {
+export interface SingleDownloadResult {
   success: boolean;
   track?: any;
   error?: string;
   addedToPlaylist?: boolean;
   liked?: boolean;
   downloading?: boolean;
+  /** Internal promise that resolves when background yt-dlp + probe + DB update finishes. Strip before HTTP JSON response. */
+  downloadPromise?: Promise<SingleDownloadResult>;
 }
 
 const inFlightSingleDownloads = new Map<string, Promise<SingleDownloadResult>>();
+const inFlightTrackIdDownloads = new Map<number, Promise<SingleDownloadResult>>();
+const pendingTrackNotifyUsers = new Map<number, Set<number>>();
+
+function getTrackDownloadKeys(track: { id?: string; artist?: string; title?: string }): string[] {
+  const keys: string[] = [];
+  const nameKey = `ta:${(track.artist || '').toLowerCase().trim()}:::${(track.title || '').toLowerCase().trim()}`;
+  if (track.id && String(track.id).trim()) {
+    keys.push(`id:${String(track.id).toLowerCase().trim()}`);
+  }
+  keys.push(nameKey);
+  return keys;
+}
+
+function getExistingInFlightDownload(track: { id?: string; artist?: string; title?: string }, trackId?: number): Promise<SingleDownloadResult> | undefined {
+  if (trackId && inFlightTrackIdDownloads.has(trackId)) {
+    return inFlightTrackIdDownloads.get(trackId);
+  }
+  for (const key of getTrackDownloadKeys(track)) {
+    const p = inFlightSingleDownloads.get(key);
+    if (p) return p;
+  }
+  return undefined;
+}
+
+function registerInFlightDownload(keys: string[], promise: Promise<SingleDownloadResult>, trackId?: number): void {
+  for (const k of keys) {
+    inFlightSingleDownloads.set(k, promise);
+  }
+  if (trackId) {
+    inFlightTrackIdDownloads.set(trackId, promise);
+  }
+}
+
+function unregisterInFlightDownload(keys: string[], promise: Promise<SingleDownloadResult>, trackId?: number): void {
+  for (const k of keys) {
+    if (inFlightSingleDownloads.get(k) === promise) {
+      inFlightSingleDownloads.delete(k);
+    }
+  }
+  if (trackId && inFlightTrackIdDownloads.get(trackId) === promise) {
+    inFlightTrackIdDownloads.delete(trackId);
+  }
+}
+
+function cleanupFailedPendingTrack(pendingTrackId: number, playlistId?: number): void {
+  try {
+    const row: any = db.prepare('SELECT id, file_path FROM tracks WHERE id = ?').get(pendingTrackId);
+    if (row && (!row.file_path || String(row.file_path).trim() === '')) {
+      // ON DELETE CASCADE cleans up playlist_tracks and liked_tracks automatically
+      db.prepare('DELETE FROM tracks WHERE id = ?').run(pendingTrackId);
+      console.warn(`[Downloader] Cleaned up failed pending track #${pendingTrackId} (empty file_path)`);
+      const recipients = pendingTrackNotifyUsers.get(pendingTrackId);
+      if (recipients) {
+        for (const uid of recipients) {
+          try {
+            broadcastToUser(uid, { type: 'LIKES_UPDATED' });
+            broadcastToUser(uid, { type: 'PLAYLISTS_UPDATED' });
+            if (playlistId && playlistId !== -1) {
+              broadcastToUser(uid, { type: 'PLAYLIST_UPDATED', playlistId });
+            }
+          } catch (_) {}
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[Downloader] Failed to clean up pending track #${pendingTrackId}:`, err?.message || err);
+  }
+}
 
 async function downloadSingleTrack(item: QueueItem): Promise<boolean> {
   const { jobId, playlistId, track, position } = item;
@@ -1690,13 +1798,14 @@ async function downloadSingleTrack(item: QueueItem): Promise<boolean> {
     return linked;
   }
 
-  const downloadKey = (track.id || `${track.artist}:::${track.title}`).toLowerCase();
+  const downloadKeys = getTrackDownloadKeys(track);
 
   // If another process (direct download or worker) is already downloading this track, wait for it!
-  if (inFlightSingleDownloads.has(downloadKey)) {
+  const existingInFlight = getExistingInFlightDownload(track, existing?.id);
+  if (existingInFlight) {
     console.log(`[Downloader Worker] In-flight download detected for "${track.artist} - ${track.title}", waiting...`);
     try {
-      await inFlightSingleDownloads.get(downloadKey);
+      await existingInFlight;
     } catch (_) {}
 
     const reExisting: any = db.prepare(`
@@ -1746,7 +1855,7 @@ async function downloadSingleTrack(item: QueueItem): Promise<boolean> {
   const workerDownloadPromise = new Promise<SingleDownloadResult>((resolve) => {
     workerResolve = resolve;
   });
-  inFlightSingleDownloads.set(downloadKey, workerDownloadPromise);
+  registerInFlightDownload(downloadKeys, workerDownloadPromise, existing?.id);
 
   try {
     // Update status in DB
@@ -1894,7 +2003,7 @@ async function downloadSingleTrack(item: QueueItem): Promise<boolean> {
     workerResolve({ success: false, error: err.message });
     return false;
   } finally {
-    inFlightSingleDownloads.delete(downloadKey);
+    unregisterInFlightDownload(downloadKeys, workerDownloadPromise, existing?.id);
   }
 }
 
@@ -1904,9 +2013,91 @@ export async function downloadSingleSpotifyTrackDirect(
   playlistId?: number,
   isLikedOnly?: boolean
 ): Promise<SingleDownloadResult> {
-  const downloadKey = (track.id || `${track.artist}:::${track.title}`).toLowerCase();
-  if (inFlightSingleDownloads.has(downloadKey)) {
-    const result = await inFlightSingleDownloads.get(downloadKey)!;
+  const existingInFlight = getExistingInFlightDownload(track);
+  if (existingInFlight) {
+    // Check if a pending DB record already exists so we can attach immediately without blocking the HTTP request
+    const pendingRow: any = db.prepare(`
+      SELECT * FROM tracks 
+      WHERE (spotify_id IS NOT NULL AND spotify_id = ?) 
+         OR (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+      LIMIT 1
+    `).get(track.id || null, track.title, track.artist);
+
+    if (pendingRow) {
+      if (userId && isTrackBlacklistedForUser(userId, pendingRow.title, pendingRow.artist, pendingRow.spotify_id || track.id)) {
+        return {
+          success: true,
+          track: sanitizeTrackRecord(pendingRow),
+          addedToPlaylist: false,
+          liked: false,
+          downloading: !pendingRow.file_path,
+          downloadPromise: existingInFlight
+        };
+      }
+
+      if (userId) {
+        let recipients = pendingTrackNotifyUsers.get(Number(pendingRow.id));
+        if (!recipients) {
+          recipients = new Set<number>();
+          pendingTrackNotifyUsers.set(Number(pendingRow.id), recipients);
+        }
+        recipients.add(userId);
+      }
+
+      if (isLikedOnly || playlistId === -1) {
+        if (userId) {
+          const userExists = db.prepare('SELECT 1 FROM users WHERE id = ?').get(userId);
+          if (userExists) {
+            db.prepare('INSERT OR IGNORE INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, pendingRow.id);
+            broadcastToUser(userId, { type: 'LIKES_UPDATED', trackId: pendingRow.id, liked: true });
+          }
+        }
+        return {
+          success: true,
+          track: sanitizeTrackRecord(pendingRow),
+          liked: true,
+          downloading: !pendingRow.file_path,
+          downloadPromise: existingInFlight
+        };
+      }
+
+      if (playlistId) {
+        let canAttach = false;
+        if (userId) {
+          canAttach = Boolean(db.prepare('SELECT 1 FROM playlists WHERE id = ? AND user_id = ? AND COALESCE(is_daily_mix, 0) = 0').get(playlistId, userId));
+        } else {
+          canAttach = Boolean(db.prepare('SELECT 1 FROM playlists WHERE id = ?').get(playlistId));
+        }
+        if (canAttach) {
+          const inPl: any = db.prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').get(playlistId, pendingRow.id);
+          if (!inPl) {
+            const maxPosRow: any = db.prepare('SELECT MAX(position) as maxPos FROM playlist_tracks WHERE playlist_id = ?').get(playlistId);
+            const nextPos = (maxPosRow?.maxPos !== null && maxPosRow?.maxPos !== undefined) ? maxPosRow.maxPos + 1 : 0;
+            db.prepare('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)').run(playlistId, pendingRow.id, nextPos);
+          }
+          if (userId) {
+            broadcastToUser(userId, { type: 'PLAYLIST_UPDATED', playlistId });
+          }
+          return {
+            success: true,
+            track: sanitizeTrackRecord(pendingRow),
+            addedToPlaylist: true,
+            downloading: !pendingRow.file_path,
+            downloadPromise: existingInFlight
+          };
+        }
+      }
+
+      return {
+        success: true,
+        track: sanitizeTrackRecord(pendingRow),
+        downloading: !pendingRow.file_path,
+        downloadPromise: existingInFlight
+      };
+    }
+
+    // Started by worker without a DB row yet: await completion and then attach
+    const result = await existingInFlight;
     if (result.success && result.track) {
       if (userId && isTrackBlacklistedForUser(userId, result.track.title, result.track.artist, result.track.spotify_id || track.id)) {
         return { ...result, track: sanitizeTrackRecord(result.track), addedToPlaylist: false, liked: false };
@@ -1941,24 +2132,15 @@ export async function downloadSingleSpotifyTrackDirect(
     return result;
   }
 
-  const promise = downloadSingleSpotifyTrackDirectInternal(track, userId, playlistId, isLikedOnly);
-  inFlightSingleDownloads.set(downloadKey, promise);
-  try {
-    return await promise;
-  } finally {
-    inFlightSingleDownloads.delete(downloadKey);
-  }
+  return await downloadSingleSpotifyTrackDirectInternal(track, userId, playlistId, isLikedOnly);
 }
-
-const inFlightTrackIdDownloads = new Set<number>();
-const pendingTrackNotifyUsers = new Map<number, Set<number>>();
 
 async function downloadSingleSpotifyTrackDirectInternal(
   track: SpotifyTrack,
   userId?: number,
   playlistId?: number,
   isLikedOnly?: boolean
-): Promise<{ success: boolean; track?: any; error?: string; addedToPlaylist?: boolean; liked?: boolean; downloading?: boolean }> {
+): Promise<SingleDownloadResult> {
   try {
     // Helper to attach to playlist or liked tracks
     const attachToPlaylist = (trackRecord: any) => {
@@ -2053,10 +2235,12 @@ async function downloadSingleSpotifyTrackDirectInternal(
       recipients.add(userId);
     }
 
-    // 3. Run metadata resolution + yt-dlp download asynchronously in background
-    if (!inFlightTrackIdDownloads.has(pendingTrackId)) {
-      inFlightTrackIdDownloads.add(pendingTrackId);
-      (async () => {
+    // 3. Run metadata resolution + yt-dlp download asynchronously in background, tracked in inFlight maps until completion
+    const downloadKeys = getTrackDownloadKeys(track);
+    let bgDownloadPromise = inFlightTrackIdDownloads.get(pendingTrackId);
+
+    if (!bgDownloadPromise) {
+      bgDownloadPromise = (async (): Promise<SingleDownloadResult> => {
         try {
           if (track.id) {
             const details = await resolveSpotifyTrackDetails(track.id);
@@ -2123,15 +2307,17 @@ async function downloadSingleSpotifyTrackDirectInternal(
 
           if (!success) {
             console.warn(`[Download Single Track Background Failed] "${track.artist} - ${track.title}"`);
-            return;
+            cleanupFailedPendingTrack(pendingTrackId, playlistId);
+            return { success: false, error: 'Не удалось скачать аудиофайл' };
           }
 
           const finalFile = resolveAudioFilePath(targetDir, safeTitle) || path.join(targetDir, `${safeTitle}.mp3`);
           const probe = await probeAudioFile(finalFile, track.duration_ms);
-          if (track.duration_ms > 30000 && probe.valid && !probe.isHighQuality && probe.reason?.includes('Обрезан')) {
-            console.warn(`[yt-dlp single direct] Truncated audio detected for "${track.artist} - ${track.title}". Discarding.`);
-            try { fs.unlinkSync(finalFile); } catch (_) {}
-            return;
+          if (!probe.valid || (track.duration_ms > 30000 && !probe.isHighQuality && probe.reason?.includes('Обрезан'))) {
+            console.warn(`[yt-dlp single direct] Invalid or truncated audio detected for "${track.artist} - ${track.title}" (${probe.reason || 'invalid'}). Discarding.`);
+            try { if (fs.existsSync(finalFile)) fs.unlinkSync(finalFile); } catch (_) {}
+            cleanupFailedPendingTrack(pendingTrackId, playlistId);
+            return { success: false, error: 'Скачанный файл повреждён или обрезан' };
           }
 
           const actualDurationMs = (probe.valid && probe.durationSec > 0)
@@ -2149,34 +2335,43 @@ async function downloadSingleSpotifyTrackDirectInternal(
           const updatedTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(pendingTrackId);
           invalidateTrackStreamMeta(pendingTrackId);
           invalidateTranscodeCacheForTrack(pendingTrackId).catch(() => {});
-          await refreshJellyfinLibrary();
+          await refreshJellyfinLibrary().catch(() => {});
 
           const safeUpdated = sanitizeTrackRecord(updatedTrack);
           broadcastToAll({ type: 'TRACK_UPDATED', track: safeUpdated });
-          const spotifyIdToNotify = (updatedTrack as any)?.spotify_id || track.id;
-          if (spotifyIdToNotify) {
-            const recipients = pendingTrackNotifyUsers.get(pendingTrackId);
-            if (recipients) {
-              for (const uid of recipients) {
-                broadcastToUser(uid, {
-                  type: 'INSTANT_TRACK_DOWNLOADED',
-                  spotifyId: spotifyIdToNotify,
-                  track: safeUpdated,
-                });
-              }
+          const spotifyIdToNotify = (updatedTrack as any)?.spotify_id || track.id || '';
+          const recipients = pendingTrackNotifyUsers.get(pendingTrackId);
+          if (recipients) {
+            for (const uid of recipients) {
+              broadcastToUser(uid, {
+                type: 'INSTANT_TRACK_DOWNLOADED',
+                spotifyId: spotifyIdToNotify,
+                track: safeUpdated,
+              });
             }
           }
           if (userId && playlistId && playlistId !== -1) {
             broadcastToUser(userId, { type: 'PLAYLIST_UPDATED', playlistId });
           }
           console.log(`[Download Single Track] Background download completed for #${pendingTrackId}: "${track.artist} - ${track.title}"`);
+          return {
+            success: true,
+            track: safeUpdated,
+            addedToPlaylist: !!playlistId && playlistId !== -1,
+            liked: Boolean(isLikedOnly || playlistId === -1),
+            downloading: false,
+          };
         } catch (bgErr: any) {
-          console.error(`[Download Single Track Background Error] #${pendingTrackId}:`, bgErr.message);
+          console.error(`[Download Single Track Background Error] #${pendingTrackId}:`, bgErr?.message || bgErr);
+          cleanupFailedPendingTrack(pendingTrackId, playlistId);
+          return { success: false, error: bgErr?.message || 'Ошибка фонового скачивания' };
         } finally {
-          inFlightTrackIdDownloads.delete(pendingTrackId);
+          unregisterInFlightDownload(downloadKeys, bgDownloadPromise!, pendingTrackId);
           pendingTrackNotifyUsers.delete(pendingTrackId);
         }
       })();
+
+      registerInFlightDownload(downloadKeys, bgDownloadPromise, pendingTrackId);
     }
 
     return {
@@ -2185,6 +2380,7 @@ async function downloadSingleSpotifyTrackDirectInternal(
       addedToPlaylist: !!playlistId && playlistId !== -1,
       liked: Boolean(isLikedOnly || playlistId === -1),
       downloading: true,
+      downloadPromise: bgDownloadPromise,
     };
   } catch (err: any) {
     console.error('[Download Single Track Error]', err);
