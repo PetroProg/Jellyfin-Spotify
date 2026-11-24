@@ -3074,16 +3074,32 @@ server.post('/api/blacklist', { preHandler: [(server as any).authenticate] }, as
   // 2. Immediately cancel in-flight / queued downloads for this track/artist in downloader
   cancelBlacklistedDownloads(req.user.id, title, artist, spotify_id);
 
-  // 3. Remove this track from ALL playlists owned by this user
+  // 3. Remove banned track (or all tracks by artist ONLY if title === '*') from playlists & likes owned by this user
   const targetTrackIds: number[] = [];
-  if (track_id) {
-    targetTrackIds.push(Number(track_id));
+  if (track_id !== undefined && track_id !== null) {
+    const parsedTrackId = Number(track_id);
+    if (Number.isInteger(parsedTrackId) && parsedTrackId > 0) {
+      targetTrackIds.push(parsedTrackId);
+    }
   }
-  const matchingTracks: any[] = db.prepare(`
-    SELECT id FROM tracks 
-    WHERE (LOWER(title) = LOWER(?) AND (LOWER(artist) = LOWER(?) OR ? = '*'))
-       OR (? != '' AND spotify_id = ?)
-  `).all(title, artist, title, spotify_id || '', spotify_id || '');
+
+  let matchingTracks: any[] = [];
+  if (title === '*') {
+    // Explicit artist-wide ban: find all tracks matching this artist pattern
+    const escapedArtist = artist.toLowerCase().replace(/([%_\\])/g, '\\$1');
+    const candidates: any[] = db.prepare(`
+      SELECT id, artist FROM tracks
+      WHERE LOWER(artist) LIKE ? ESCAPE '\\'
+    `).all(`%${escapedArtist}%`);
+    matchingTracks = candidates.filter((c) => matchesArtistPattern(c.artist || '', artist));
+  } else {
+    // Single-track ban: remove ONLY this specific track, never other tracks by the same artist
+    matchingTracks = db.prepare(`
+      SELECT id FROM tracks 
+      WHERE (LOWER(title) = LOWER(?) AND LOWER(artist) = LOWER(?))
+         OR (? != '' AND spotify_id = ?)
+    `).all(title, artist, spotify_id || '', spotify_id || '');
+  }
 
   for (const mt of matchingTracks) {
     if (!targetTrackIds.includes(mt.id)) {

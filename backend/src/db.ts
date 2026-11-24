@@ -53,6 +53,7 @@ db.exec(`
     file_path TEXT NOT NULL DEFAULT '',
     cover_url TEXT,
     spotify_id TEXT,
+    bitrate INTEGER DEFAULT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -254,6 +255,11 @@ try {
   `);
 } catch (_) {}
 
+// Audio bitrate tracking column (must exist BEFORE automatic track deduplication below)
+try {
+  db.exec('ALTER TABLE tracks ADD COLUMN bitrate INTEGER DEFAULT NULL;');
+} catch (_) {}
+
 // Automatic deduplication of tracks: merge any duplicate (title + artist) tracks in playlist_tracks and liked_tracks
 try {
   const duplicates = db.prepare(`
@@ -338,11 +344,6 @@ try {
 } catch (e: any) {
   console.warn('[DB Migration Warning]:', e.message);
 }
-
-// Audio bitrate tracking column
-try {
-  db.exec('ALTER TABLE tracks ADD COLUMN bitrate INTEGER DEFAULT NULL;');
-} catch (_) {}
 
 // High-performance query & search indexes
 try {

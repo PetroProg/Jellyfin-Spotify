@@ -707,6 +707,7 @@ async function fetchGenreFallbackTracks(categoryKey: string): Promise<SpotifyTra
  */
 export function cleanupOrphanDailyMixTracks() {
   try {
+    // Only clean up tracks that have been unlinked for >= 24h AND were not played recently (protects play-instant tracks)
     const unlinkedTracks: any[] = db.prepare(`
       SELECT t.id, t.file_path, t.artist, t.title, t.spotify_id
       FROM tracks t
@@ -714,7 +715,11 @@ export function cleanupOrphanDailyMixTracks() {
       LEFT JOIN liked_tracks lt ON lt.track_id = t.id
       WHERE pt.track_id IS NULL
         AND lt.track_id IS NULL
-        AND t.created_at < datetime('now', '-15 minutes')
+        AND t.created_at < datetime('now', '-24 hours')
+        AND NOT EXISTS (
+          SELECT 1 FROM listening_logs ll
+          WHERE ll.track_id = t.id AND ll.played_at >= datetime('now', '-7 days')
+        )
     `).all();
 
     if (unlinkedTracks.length === 0) return;
@@ -1359,20 +1364,19 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     validClusters = [Array.from(rawClusters.entries())[0]];
   }
 
-  // Remove old Daily Mixes for this user before creating new ones
-  const oldMixes: any[] = db.prepare(`
-    SELECT id FROM playlists WHERE user_id = ? AND is_daily_mix = 1
-  `).all(userId);
-
-  if (oldMixes.length > 0) {
-    const oldIds = oldMixes.map(m => m.id);
-    cancelPlaylistDownloads(oldIds);
-    const placeholders = oldIds.map(() => '?').join(',');
-    db.prepare(`DELETE FROM playlists WHERE id IN (${placeholders})`).run(...oldIds);
-    cleanupOrphanDailyMixTracks();
-  }
-
-  const createdMixes: any[] = [];
+  // Prepare all new Daily Mixes in memory (network calls to Deezer/iTunes) BEFORE deleting old mixes
+  // so a network failure or restart never leaves the user with 0 Daily Mixes or deleted audio files.
+  const preparedMixes: Array<{
+    catKey: string;
+    mixNumber: number;
+    mixName: string;
+    mixDesc: string;
+    mixCover: string;
+    seedNames: string[];
+    finalMixItems: { type: 'familiar' | 'recurrent' | 'new'; track: any; position: number }[];
+    reserveTracks: SpotifyTrack[];
+    discoveryTracksToRecord: any[];
+  }> = [];
   const TARGET_MIX_SIZE = 25; // EXACTLY 25 tracks in every Daily Mix
 
   for (let idx = 0; idx < validClusters.length; idx++) {
@@ -1773,11 +1777,10 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       }
     }
 
-    // Record newly selected discovery tracks (recurrent + new) into daily_mix_history
+    // Prepare discovery tracks for daily_mix_history
     const discoveryTracksToRecord = finalMixItems
       .filter(item => item.type === 'recurrent' || item.type === 'new')
       .map(item => item.track);
-    recordDailyMixHistory(userId, catKey, today, discoveryTracksToRecord);
 
     const seedNames = seedArtistsPool.slice(0, 4).map(a => a.displayName);
     const mixName = `Микс дня #${mixNumber} • ${catDef.title}`;
@@ -1788,12 +1791,53 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       finalNewTracks.find(t => t.cover_url)?.cover_url ||
       '';
 
-    const insertPt = db.prepare(`
-      INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
-      VALUES (?, ?, ?)
-    `);
+    if (finalMixItems.length > 0) {
+      preparedMixes.push({
+        catKey,
+        mixNumber,
+        mixName,
+        mixDesc,
+        mixCover,
+        seedNames,
+        finalMixItems,
+        reserveTracks,
+        discoveryTracksToRecord,
+      });
+    }
+  }
 
-    // Create Daily Mix playlist row first to obtain ID
+  // If preparation produced no mixes (e.g. external API outage), preserve existing Daily Mixes!
+  if (preparedMixes.length === 0) {
+    const existingFallback: any[] = db.prepare(`
+      SELECT p.*,
+        (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) as track_count
+      FROM playlists p
+      WHERE p.user_id = ? AND p.is_daily_mix = 1
+      ORDER BY p.daily_mix_date DESC, p.daily_mix_number ASC
+    `).all(userId);
+    return existingFallback.map(enrichDailyMixRow);
+  }
+
+  // Now that all new mixes are prepared, atomically replace old Daily Mixes in DB
+  const oldMixes: any[] = db.prepare(`
+    SELECT id FROM playlists WHERE user_id = ? AND is_daily_mix = 1
+  `).all(userId);
+  if (oldMixes.length > 0) {
+    const oldIds = oldMixes.map(m => m.id);
+    cancelPlaylistDownloads(oldIds);
+    const placeholders = oldIds.map(() => '?').join(',');
+    db.prepare(`DELETE FROM playlists WHERE id IN (${placeholders})`).run(...oldIds);
+  }
+
+  const createdMixes: any[] = [];
+  const insertPt = db.prepare(`
+    INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position)
+    VALUES (?, ?, ?)
+  `);
+
+  for (const pm of preparedMixes) {
+    recordDailyMixHistory(userId, pm.catKey, today, pm.discoveryTracksToRecord);
+
     const insertRes = db.prepare(`
       INSERT INTO playlists (
         user_id, name, description, cover_url,
@@ -1803,13 +1847,13 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
     `).run(
       userId,
-      mixName,
-      mixDesc,
-      mixCover,
-      catKey,
-      mixNumber,
+      pm.mixName,
+      pm.mixDesc,
+      pm.mixCover,
+      pm.catKey,
+      pm.mixNumber,
       today,
-      JSON.stringify(seedNames),
+      JSON.stringify(pm.seedNames),
       JSON.stringify([]) // will be updated with tracksToDownload
     );
 
@@ -1818,13 +1862,13 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     const localTracksToInsert: { trackId: number; position: number }[] = [];
     const insertedLocalTrackIds = new Set<number>();
 
-    for (const item of finalMixItems) {
+    for (const item of pm.finalMixItems) {
       if (item.type === 'familiar') {
         if (!insertedLocalTrackIds.has(item.track.id)) {
           insertedLocalTrackIds.add(item.track.id);
           localTracksToInsert.push({ trackId: item.track.id, position: item.position });
-        } else if (reserveTracks.length > 0) {
-          const replacement = reserveTracks.shift()!;
+        } else if (pm.reserveTracks.length > 0) {
+          const replacement = pm.reserveTracks.shift()!;
           tracksToDownload.push({ ...replacement, position: item.position } as any);
         }
       } else {
@@ -1833,8 +1877,8 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
           if (!insertedLocalTrackIds.has(local.id)) {
             insertedLocalTrackIds.add(local.id);
             localTracksToInsert.push({ trackId: local.id, position: item.position });
-          } else if (reserveTracks.length > 0) {
-            const replacement = reserveTracks.shift()!;
+          } else if (pm.reserveTracks.length > 0) {
+            const replacement = pm.reserveTracks.shift()!;
             tracksToDownload.push({ ...replacement, position: item.position } as any);
           }
         } else {
@@ -1868,12 +1912,12 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
         jobId,
         userId,
         mixPlaylistId,
-        mixName,
+        pm.mixName,
         localTracksToInsert.length + tracksToDownload.length,
         localTracksToInsert.length
       );
 
-      enqueuePlaylistDownload(jobId, userId, mixPlaylistId, tracksToDownload, undefined, false, reserveTracks);
+      enqueuePlaylistDownload(jobId, userId, mixPlaylistId, tracksToDownload, undefined, false, pm.reserveTracks);
     }
 
     const createdRow = db.prepare(`
@@ -1886,6 +1930,11 @@ async function generateDailyMixesInternal(userId: number, today: string): Promis
     if (createdRow) {
       createdMixes.push(enrichDailyMixRow(createdRow));
     }
+  }
+
+  // Clean up orphan tracks from old mixes ONLY AFTER new mixes are created and linked
+  if (oldMixes.length > 0) {
+    cleanupOrphanDailyMixTracks();
   }
 
   return createdMixes;
