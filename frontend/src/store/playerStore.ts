@@ -653,6 +653,87 @@ let isInternalSrcChange = false;
 let internalSrcChangeTimeout: any = null;
 let pendingRecoveryOnResume = false;
 let pendingRecoveryTime = 0;
+let isPageFrozen = false;
+let lastUnfreezeWallTime = 0;
+let needsPostFreezeAudioCtxBounce = false;
+let isCheckingAudioCtxAlive = false;
+
+async function ensureWebAudioOutputAlive(reason: string): Promise<void> {
+  if (
+    typeof window === 'undefined' ||
+    isPageFrozen ||
+    !isAudioGraphAttached ||
+    !audioCtx ||
+    audio.paused ||
+    isCheckingAudioCtxAlive
+  ) {
+    return;
+  }
+
+  isCheckingAudioCtxAlive = true;
+  try {
+    // Consume any active transient user activation synchronously before awaiting
+    if (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted') {
+      audioCtx.resume().catch(() => {});
+    }
+
+    if (Date.now() - lastUnfreezeWallTime < 80) {
+      await new Promise((r) => setTimeout(r, 80));
+      if (audio.paused || !audioCtx || isPageFrozen) return;
+      if (audioCtx.state !== 'running') {
+        audioCtx.resume().catch(() => {});
+      }
+    }
+
+    const t0 = audioCtx.currentTime;
+    await new Promise((r) => setTimeout(r, 140));
+    if (audio.paused || !audioCtx || isPageFrozen) return;
+
+    if (audioCtx.state === 'running' && audioCtx.currentTime > t0 + 0.01) {
+      if (needsPostFreezeAudioCtxBounce) {
+        needsPostFreezeAudioCtxBounce = false;
+        diag(`[audioCtx] alive (${reason}) state=${audioCtx.state}`);
+      }
+      activateSilentAnchor();
+      if (!isFadingIn && !isFadingOut) {
+        restoreTargetVolume();
+      }
+      return;
+    }
+
+    // Delayed retry + suspend/resume bounce for wedged post-freeze Android AudioRendererSink
+    await new Promise((r) => setTimeout(r, 180));
+    if (audio.paused || !audioCtx || isPageFrozen) return;
+
+    if (audioCtx.state === 'running') {
+      await audioCtx.suspend().catch(() => {});
+    }
+    await audioCtx.resume().catch(() => {});
+
+    const t1 = audioCtx.currentTime;
+    await new Promise((r) => setTimeout(r, 160));
+    if (audio.paused || !audioCtx || isPageFrozen) return;
+
+    if (audioCtx.state === 'running' && audioCtx.currentTime > t1 + 0.01) {
+      needsPostFreezeAudioCtxBounce = false;
+      activateSilentAnchor();
+      if (!isFadingIn && !isFadingOut) {
+        restoreTargetVolume();
+      }
+      diag(`[audioCtx] revived via bounce (${reason})`, true);
+      return;
+    }
+
+    // Last-resort anti-silent-playback fallback: pause cleanly so UI shows Play ▶ at exact position
+    if (!audio.paused && !isTransitioningTrack && !isRecoveringStream && !isInternalSrcChange) {
+      needsPostFreezeAudioCtxBounce = true;
+      diag(`[audioCtx] stalled/blocked (${reason}, state=${audioCtx.state}) → pausing cleanly for user tap`, true);
+      audio.pause();
+    }
+  } finally {
+    isCheckingAudioCtxAlive = false;
+  }
+}
 
 function setInternalSrcChange(active: boolean) {
   isInternalSrcChange = active;
@@ -717,6 +798,9 @@ function applyFadeVolume(volFraction: number) {
   if (audioCtx && fadeGainNode) {
     try {
       fadeGainNode.gain.cancelScheduledValues(audioCtx.currentTime);
+      if (clampedFraction >= 0.99) {
+        fadeGainNode.gain.value = 1.0;
+      }
       fadeGainNode.gain.setTargetAtTime(clampedFraction, audioCtx.currentTime, 0.03);
     } catch (_) {}
     audio.volume = effectiveTarget;
@@ -1036,6 +1120,7 @@ let playbackWatchdogTimer: any = null;
 let lastWatchdogMediaTime = -1;
 let lastWatchdogBufferedEnd = 0;
 let lastWatchdogWallTime = 0;
+let lastWatchdogAudioCtxTime = -1;
 let lastBufferProgressWallTime = 0;
 let stallsOnCurrentTrack = 0;
 
@@ -1047,6 +1132,7 @@ function stopPlaybackWatchdog() {
   lastWatchdogMediaTime = -1;
   lastWatchdogBufferedEnd = 0;
   lastWatchdogWallTime = 0;
+  lastWatchdogAudioCtxTime = -1;
 }
 
 function startPlaybackWatchdog() {
@@ -1054,6 +1140,7 @@ function startPlaybackWatchdog() {
   lastWatchdogMediaTime = audio.currentTime || 0;
   lastWatchdogBufferedEnd = getBufferedEndAtCurrentTime();
   lastWatchdogWallTime = Date.now();
+  lastWatchdogAudioCtxTime = audioCtx ? audioCtx.currentTime : -1;
 
   playbackWatchdogTimer = setInterval(() => {
     const store = usePlayerStore.getState();
@@ -1080,6 +1167,7 @@ function startPlaybackWatchdog() {
       lastWatchdogMediaTime = audio.currentTime || 0;
       lastWatchdogBufferedEnd = getBufferedEndAtCurrentTime();
       lastWatchdogWallTime = Date.now();
+      lastWatchdogAudioCtxTime = audioCtx ? audioCtx.currentTime : -1;
       return;
     }
 
@@ -1099,6 +1187,7 @@ function startPlaybackWatchdog() {
       lastWatchdogMediaTime = 0;
       lastWatchdogBufferedEnd = 0;
       lastWatchdogWallTime = Date.now();
+      lastWatchdogAudioCtxTime = audioCtx ? audioCtx.currentTime : -1;
       return;
     }
 
@@ -1107,12 +1196,21 @@ function startPlaybackWatchdog() {
       return;
     }
 
-    // 3. Check for frozen playhead: if buffer is actively growing over WAN, do NOT abort the stream!
+    // 3. Check for frozen playhead or silent WebAudio clock: if buffer is actively growing over WAN, do NOT abort the stream!
     const bufEnd = getBufferedEndAtCurrentTime();
     if (Math.abs(cur - lastWatchdogMediaTime) >= 0.05) {
       lastWatchdogMediaTime = cur;
       lastWatchdogBufferedEnd = bufEnd;
       lastWatchdogWallTime = Date.now();
+
+      if (isAudioGraphAttached && audioCtx) {
+        const ctxNow = audioCtx.currentTime;
+        if (lastWatchdogAudioCtxTime >= 0 && (audioCtx.state !== 'running' || Math.abs(ctxNow - lastWatchdogAudioCtxTime) < 0.01)) {
+          diag(`[watchdog] silent WebAudio detected (state=${audioCtx.state}, media=${cur.toFixed(1)}s) → reviving`, true);
+          ensureWebAudioOutputAlive('watchdog-silent-ctx');
+        }
+        lastWatchdogAudioCtxTime = ctxNow;
+      }
     } else if (
       audio.networkState === HTMLMediaElement.NETWORK_LOADING &&
       bufEnd > lastWatchdogBufferedEnd + 0.25
@@ -1414,12 +1512,19 @@ if (typeof window !== 'undefined') {
       (store.isPlaying || !audio.paused);
 
     if (isActiveLocalPlay) {
+      if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
+        audioCtx.resume().catch(() => {});
+      }
       activateSilentAnchor();
+      if (needsPostFreezeAudioCtxBounce) {
+        ensureWebAudioOutputAlive('user-gesture');
+      }
     }
   };
-  window.addEventListener('click', unlockAudio, { passive: true });
-  window.addEventListener('touchstart', unlockAudio, { passive: true });
-  window.addEventListener('keydown', unlockAudio, { passive: true });
+  window.addEventListener('click', unlockAudio, { capture: true, passive: true });
+  window.addEventListener('touchend', unlockAudio, { capture: true, passive: true });
+  window.addEventListener('touchstart', unlockAudio, { capture: true, passive: true });
+  window.addEventListener('keydown', unlockAudio, { capture: true, passive: true });
 }
 
 // MediaSession position sync helper
@@ -1570,7 +1675,37 @@ async function recoverAudioStream(
       } catch (_) {}
     }
 
-    // 2. If not in cache, use canonical remote stream URL (with adaptive quality step-down on repeated stalls)
+    // 2. If not in cache, handle temporary negative instant-track IDs before falling back to /api/stream/:id
+    if (!targetSrc && track.id <= 0) {
+      try {
+        const res = await apiRequest<{ streamUrl?: string; track?: Track }>('/tracks/play-instant', {
+          method: 'POST',
+          body: JSON.stringify({ track }),
+          timeoutMs: 6000,
+        });
+        if (res?.track && res.track.id > 0) {
+          usePlayerStore.setState({ currentTrack: res.track });
+        }
+        if (res?.streamUrl) {
+          targetSrc = res.streamUrl;
+          recoveredQuality = res.streamUrl.startsWith('/api/stream/')
+            ? resolveEffectiveStreamQuality(store.streamQualityPref)
+            : 'original';
+        }
+      } catch (_) {}
+
+      if (!targetSrc) {
+        if (track.streamUrl) {
+          targetSrc = track.streamUrl;
+          recoveredQuality = 'original';
+        } else {
+          skipUnavailableTrack(track, 'expired instant preview');
+          return;
+        }
+      }
+    }
+
+    // 2b. Otherwise use canonical remote stream URL (with adaptive quality step-down on repeated stalls)
     if (!targetSrc) {
       const q = resolveEffectiveStreamQuality(store.streamQualityPref);
       const fmt = getPreferredStreamFormat();
@@ -1650,6 +1785,7 @@ async function recoverAudioStream(
         usePlayerStore.setState({ isPlaying: true, isBuffering: false });
         activateSilentAnchor();
         startPlaybackWatchdog();
+        ensureWebAudioOutputAlive('user-resume');
         if ('mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'playing';
         }
@@ -1884,6 +2020,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   };
 
   audio.onplaying = () => {
+    if (audio.paused) return;
+    isUserInitiatedPause = false;
+    wasInterruptedByExternalApp = false;
     clearInterruptionRetries();
     setInternalSrcChange(false);
     markTrackTransitionEnd();
@@ -1907,8 +2046,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     if (isTransitionBridgeActive) {
       stopTransitionBridge('main playing');
     }
-    diag(`[playing] #${get().currentTrack?.id} at ${(audio.currentTime || 0).toFixed(1)}s src=${audio.src.startsWith('blob:') ? 'blob' : 'net'}`);
+    diag(`[playing] #${get().currentTrack?.id} at ${(audio.currentTime || 0).toFixed(1)}s src=${audio.src.startsWith('blob:') ? 'blob' : 'net'} ctx=${audioCtx ? audioCtx.state : 'none'}`);
     diagHeartbeat(true, get().currentTrack?.id);
+    ensureWebAudioOutputAlive('onplaying');
     // Restart prefetch schedule once playback is actively flowing (after any initial onwaiting event)
     scheduleNextTrackPrefetch();
   };
@@ -2162,13 +2302,34 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     }
   };
 
-  // Re-sync UI & MediaSession state when app becomes visible (never auto-resume onto speakers)
+  // Re-sync UI & MediaSession state when app becomes visible or unfreezes (never auto-resume onto speakers)
   if (typeof window !== 'undefined') {
+    const reconcilePlaybackAfterForeground = (reason: string) => {
+      const store = get();
+      const isLocal = useSyncStore.getState().isLocalActive;
+      if (!store.currentTrack || !isLocal) return;
+
+      const actuallyPaused = audio.paused;
+      if (store.isPlaying !== !actuallyPaused) {
+        set({ isPlaying: !actuallyPaused });
+      }
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = actuallyPaused ? 'paused' : 'playing';
+      }
+      if (!actuallyPaused) {
+        isUserInitiatedPause = false;
+        wasInterruptedByExternalApp = false;
+        startPlaybackWatchdog();
+        ensureWebAudioOutputAlive(reason);
+      }
+      updateMediaPositionState();
+    };
+
     const handleAppVisibility = () => {
       if (document.visibilityState === 'visible') {
         const store = get();
         const isLocal = useSyncStore.getState().isLocalActive;
-        const isActiveLocalPlay = store.isPlaying && isLocal && !isUserInitiatedPause;
+        const isActiveLocalPlay = (store.isPlaying || !audio.paused) && isLocal && !isUserInitiatedPause;
         if (
           audioCtx &&
           (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted') &&
@@ -2176,21 +2337,31 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         ) {
           audioCtx.resume().catch(() => {});
         }
-
-        if (store.currentTrack && isLocal) {
-          const actuallyPaused = audio.paused;
-          if (store.isPlaying !== !actuallyPaused) {
-            set({ isPlaying: !actuallyPaused });
-          }
-          if ('mediaSession' in navigator) {
-            navigator.mediaSession.playbackState = actuallyPaused ? 'paused' : 'playing';
-          }
-          updateMediaPositionState();
-        }
+        reconcilePlaybackAfterForeground('visibility-visible');
       }
     };
+
+    const handlePageFreeze = () => {
+      isPageFrozen = true;
+      if (isAudioGraphAttached && audioCtx) {
+        needsPostFreezeAudioCtxBounce = true;
+      }
+    };
+
+    const handlePageResume = () => {
+      isPageFrozen = false;
+      lastUnfreezeWallTime = Date.now();
+      if (isAudioGraphAttached && audioCtx) {
+        needsPostFreezeAudioCtxBounce = true;
+      }
+      setTimeout(() => reconcilePlaybackAfterForeground('lifecycle-resume'), 80);
+      setTimeout(() => reconcilePlaybackAfterForeground('lifecycle-resume'), 350);
+    };
+
     document.addEventListener('visibilitychange', handleAppVisibility);
     window.addEventListener('focus', handleAppVisibility);
+    document.addEventListener('freeze', handlePageFreeze);
+    document.addEventListener('resume', handlePageResume);
   }
 
   // MediaSession Helper
@@ -2470,6 +2641,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     setTimeout(async () => {
       try {
         if (audio.src || get().currentTrack?.id !== restoredTrack.id) return;
+        if (restoredTrack.id <= 0) {
+          pendingRecoveryOnResume = true;
+          pendingRecoveryTime = restoredTime;
+          updateMediaSession(restoredTrack);
+          return;
+        }
         const q = resolveEffectiveStreamQuality(get().streamQualityPref);
         const fmt = getPreferredStreamFormat();
         let streamUrl = buildStreamUrl(restoredTrack.id, q, fmt);
@@ -2895,6 +3072,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           }
           updateMediaPositionState();
           useSyncStore.getState().sendPlaybackState({ isPlaying: true });
+          ensureWebAudioOutputAlive('user-resume');
         }).catch((err) => {
           diag(`[resume] audio.play() failed: ${err?.name || err}`, true);
           console.warn('[resume play failed, attempting recovery]:', err);
