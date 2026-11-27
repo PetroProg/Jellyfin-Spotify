@@ -657,6 +657,15 @@ let isPageFrozen = false;
 let lastUnfreezeWallTime = 0;
 let needsPostFreezeAudioCtxBounce = false;
 let isCheckingAudioCtxAlive = false;
+let wasFrozenSinceLastPlay = false;
+let wasPausedBeforeFreeze = false;
+let blockUnsolicitedPostFreezePlayUntil = 0;
+let isBouncingAudioCtx = false;
+
+function clearPostFreezeAutoPlayBlock() {
+  wasPausedBeforeFreeze = false;
+  blockUnsolicitedPostFreezePlayUntil = 0;
+}
 
 async function ensureWebAudioOutputAlive(reason: string): Promise<void> {
   if (
@@ -677,6 +686,48 @@ async function ensureWebAudioOutputAlive(reason: string): Promise<void> {
       audioCtx.resume().catch(() => {});
     }
 
+    if (needsPostFreezeAudioCtxBounce) {
+      if (Date.now() - lastUnfreezeWallTime < 100) {
+        await new Promise((r) => setTimeout(r, 60));
+        if (audio.paused || !audioCtx || isPageFrozen) return;
+      }
+
+      isBouncingAudioCtx = true;
+      try {
+        if (audioCtx.state === 'running') {
+          await audioCtx.suspend().catch(() => {});
+          await new Promise((r) => setTimeout(r, 45));
+        }
+      } finally {
+        isBouncingAudioCtx = false;
+      }
+
+      if (audio.paused || !audioCtx || isPageFrozen) return;
+      await audioCtx.resume().catch(() => {});
+
+      const t1 = audioCtx.currentTime;
+      await new Promise((r) => setTimeout(r, 150));
+      if (audio.paused || !audioCtx || isPageFrozen) return;
+
+      if (audioCtx.state === 'running' && audioCtx.currentTime > t1 + 0.01) {
+        needsPostFreezeAudioCtxBounce = false;
+        activateSilentAnchor();
+        if (!isFadingIn && !isFadingOut) {
+          restoreTargetVolume();
+        }
+        diag(`[audioCtx] revived via post-freeze bounce (${reason}) state=${audioCtx.state}`, true);
+        return;
+      }
+
+      // Last-resort anti-silent-playback fallback: pause cleanly so UI shows Play ▶ at exact position
+      if (!audio.paused && !isTransitioningTrack && !isRecoveringStream && !isInternalSrcChange) {
+        needsPostFreezeAudioCtxBounce = true;
+        diag(`[audioCtx] stalled/blocked (${reason}, state=${audioCtx.state}) → pausing cleanly for user tap`, true);
+        audio.pause();
+      }
+      return;
+    }
+
     if (Date.now() - lastUnfreezeWallTime < 80) {
       await new Promise((r) => setTimeout(r, 80));
       if (audio.paused || !audioCtx || isPageFrozen) return;
@@ -690,10 +741,6 @@ async function ensureWebAudioOutputAlive(reason: string): Promise<void> {
     if (audio.paused || !audioCtx || isPageFrozen) return;
 
     if (audioCtx.state === 'running' && audioCtx.currentTime > t0 + 0.01) {
-      if (needsPostFreezeAudioCtxBounce) {
-        needsPostFreezeAudioCtxBounce = false;
-        diag(`[audioCtx] alive (${reason}) state=${audioCtx.state}`);
-      }
       activateSilentAnchor();
       if (!isFadingIn && !isFadingOut) {
         restoreTargetVolume();
@@ -701,13 +748,20 @@ async function ensureWebAudioOutputAlive(reason: string): Promise<void> {
       return;
     }
 
-    // Delayed retry + suspend/resume bounce for wedged post-freeze Android AudioRendererSink
+    // Delayed retry + suspend/resume bounce for wedged Android AudioRendererSink
     await new Promise((r) => setTimeout(r, 180));
     if (audio.paused || !audioCtx || isPageFrozen) return;
 
-    if (audioCtx.state === 'running') {
-      await audioCtx.suspend().catch(() => {});
+    isBouncingAudioCtx = true;
+    try {
+      if (audioCtx.state === 'running') {
+        await audioCtx.suspend().catch(() => {});
+        await new Promise((r) => setTimeout(r, 45));
+      }
+    } finally {
+      isBouncingAudioCtx = false;
     }
+    if (audio.paused || !audioCtx || isPageFrozen) return;
     await audioCtx.resume().catch(() => {});
 
     const t1 = audioCtx.currentTime;
@@ -1071,6 +1125,7 @@ function ensureAudioGraph() {
     ensureAudioContextKeepAlive();
 
     audioCtx.onstatechange = () => {
+      if (isBouncingAudioCtx) return;
       const isActiveLocalPlay =
         usePlayerStore.getState().isPlaying &&
         useSyncStore.getState().isLocalActive &&
@@ -1239,6 +1294,8 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
   // Ensure WebAudio C++-thread keep-alive is running BEFORE mutating audio.src
   // so Chromium keeps the renderer audible and at high importance during track handover.
   if (autoPlay) {
+    clearPostFreezeAutoPlayBlock();
+    wasFrozenSinceLastPlay = false;
     activateSilentAnchor();
     // Hold the Android MediaSession / media notification while audio.src is swapped in background
     if (typeof document !== 'undefined' && document.hidden) {
@@ -1342,6 +1399,7 @@ function startPlaybackForTrack(track: Track, startTime = 0, autoPlay = true) {
 
     if (autoPlay) {
       clearInterruptionRetries();
+      clearPostFreezeAutoPlayBlock();
       isUserInitiatedPause = false;
       wasInterruptedByExternalApp = false;
       requestScreenWakeLock();
@@ -1554,6 +1612,8 @@ let errorRecoveryTimeout: any = null;
 let stallTimeout: any = null;
 let waitingTimeout: any = null;
 let downloadedInstantTrack: Track | null = null;
+let lastStudioReloadTrackId = 0;
+let lastStudioReloadAt = 0;
 
 async function isTrackMissingOnServer(trackId: number): Promise<boolean> {
   if (!trackId || trackId <= 0) return false;
@@ -1626,6 +1686,14 @@ async function recoverAudioStream(
     const track = store.currentTrack;
     if (!track) return;
 
+    const bypassAllCaches = forceCacheBust && skipStreamCache;
+    if (bypassAllCaches && !audio.paused) {
+      setInternalSrcChange(true);
+      try {
+        audio.pause();
+      } catch (_) {}
+    }
+
     let targetTime = 0;
     if (resumeTime !== undefined && resumeTime >= 0 && isFinite(resumeTime)) {
       targetTime = resumeTime;
@@ -1650,22 +1718,22 @@ async function recoverAudioStream(
     }
 
     // 1. Check local offline cache & Smart Stream Cache first for instant 0ms playback without internet
-    let targetSrc: string | null = getSynchronousBlobUrl(track.id);
+    let targetSrc: string | null = !bypassAllCaches ? getSynchronousBlobUrl(track.id) : null;
     let recoveredQuality: 'offline' | 'cache' | ResolvedStreamQuality = 'offline';
-    if (!targetSrc && !skipStreamCache) {
+    if (!targetSrc && !bypassAllCaches && !skipStreamCache) {
       const streamRam = getSynchronousStreamBlob(track.id);
       if (streamRam) {
         targetSrc = streamRam.blobUrl;
         recoveredQuality = 'cache';
       }
     }
-    if (!targetSrc) {
+    if (!targetSrc && !bypassAllCaches) {
       try {
         targetSrc = await getCachedTrackUrl(track.id);
         if (targetSrc) recoveredQuality = 'offline';
       } catch (_) {}
     }
-    if (!targetSrc && !skipStreamCache) {
+    if (!targetSrc && !bypassAllCaches && !skipStreamCache) {
       try {
         const sc = await getStreamCachedTrackUrl(track.id);
         if (sc) {
@@ -1860,6 +1928,23 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   };
 
   audio.onplay = () => {
+    if (wasPausedBeforeFreeze && Date.now() < blockUnsolicitedPostFreezePlayUntil) {
+      wasPausedBeforeFreeze = false;
+      blockUnsolicitedPostFreezePlayUntil = 0;
+      isUserInitiatedPause = true;
+      diag(`[freeze-guard] blocked unsolicited post-freeze auto-play at ${(audio.currentTime || 0).toFixed(1)}s`, true);
+      try {
+        audio.pause();
+      } catch (_) {}
+      stopPlaybackWatchdog();
+      deactivateSilentAnchor();
+      set({ isPlaying: false, isBuffering: false });
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'paused';
+      }
+      updateMediaPositionState();
+      return;
+    }
     clearInterruptionRetries();
     setInternalSrcChange(false);
     isUserInitiatedPause = false;
@@ -2020,6 +2105,23 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   };
 
   audio.onplaying = () => {
+    if (wasPausedBeforeFreeze && Date.now() < blockUnsolicitedPostFreezePlayUntil) {
+      wasPausedBeforeFreeze = false;
+      blockUnsolicitedPostFreezePlayUntil = 0;
+      isUserInitiatedPause = true;
+      diag(`[freeze-guard] blocked unsolicited post-freeze auto-play at ${(audio.currentTime || 0).toFixed(1)}s`, true);
+      try {
+        audio.pause();
+      } catch (_) {}
+      stopPlaybackWatchdog();
+      deactivateSilentAnchor();
+      set({ isPlaying: false, isBuffering: false });
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'paused';
+      }
+      updateMediaPositionState();
+      return;
+    }
     if (audio.paused) return;
     isUserInitiatedPause = false;
     wasInterruptedByExternalApp = false;
@@ -2325,8 +2427,24 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       updateMediaPositionState();
     };
 
+    const handleUnfreezeTransition = () => {
+      if (isPageFrozen) {
+        isPageFrozen = false;
+      }
+      lastUnfreezeWallTime = Date.now();
+      if (isAudioGraphAttached && audioCtx) {
+        needsPostFreezeAudioCtxBounce = true;
+      }
+      if (wasPausedBeforeFreeze) {
+        blockUnsolicitedPostFreezePlayUntil = Date.now() + 2500;
+      }
+    };
+
     const handleAppVisibility = () => {
       if (document.visibilityState === 'visible') {
+        if (isPageFrozen) {
+          handleUnfreezeTransition();
+        }
         const store = get();
         const isLocal = useSyncStore.getState().isLocalActive;
         const isActiveLocalPlay = (store.isPlaying || !audio.paused) && isLocal && !isUserInitiatedPause;
@@ -2338,28 +2456,52 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           audioCtx.resume().catch(() => {});
         }
         reconcilePlaybackAfterForeground('visibility-visible');
+      } else if (document.visibilityState === 'hidden') {
+        const store = get();
+        const isLocal = useSyncStore.getState().isLocalActive;
+        if (store.currentTrack && isLocal && store.isPlaying && !isUserInitiatedPause) {
+          activateSilentAnchor();
+          if (
+            audio.paused ||
+            audio.readyState < 3 ||
+            store.isBuffering ||
+            isTransitioningTrack ||
+            isRecoveringStream ||
+            isInternalSrcChange
+          ) {
+            startTransitionBridge('hidden-while-buffering');
+          }
+        }
+      }
+    };
+
+    const handleWindowFocus = () => {
+      if (document.visibilityState === 'visible') {
+        handleAppVisibility();
       }
     };
 
     const handlePageFreeze = () => {
       isPageFrozen = true;
+      wasFrozenSinceLastPlay = true;
+      const store = get();
+      if (audio.paused || !store.isPlaying || isUserInitiatedPause) {
+        wasPausedBeforeFreeze = true;
+        blockUnsolicitedPostFreezePlayUntil = Number.MAX_SAFE_INTEGER;
+      }
       if (isAudioGraphAttached && audioCtx) {
         needsPostFreezeAudioCtxBounce = true;
       }
     };
 
     const handlePageResume = () => {
-      isPageFrozen = false;
-      lastUnfreezeWallTime = Date.now();
-      if (isAudioGraphAttached && audioCtx) {
-        needsPostFreezeAudioCtxBounce = true;
-      }
+      handleUnfreezeTransition();
       setTimeout(() => reconcilePlaybackAfterForeground('lifecycle-resume'), 80);
       setTimeout(() => reconcilePlaybackAfterForeground('lifecycle-resume'), 350);
     };
 
     document.addEventListener('visibilitychange', handleAppVisibility);
-    window.addEventListener('focus', handleAppVisibility);
+    window.addEventListener('focus', handleWindowFocus);
     document.addEventListener('freeze', handlePageFreeze);
     document.addEventListener('resume', handlePageResume);
   }
@@ -2385,6 +2527,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           useSyncStore.setState({ isLocalActive: true });
         }
         clearInterruptionRetries();
+        clearPostFreezeAutoPlayBlock();
         isUserInitiatedPause = false;
         wasInterruptedByExternalApp = false;
         activateSilentAnchor();
@@ -2849,6 +2992,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         useSyncStore.getState().sendPlaybackState({ shuffle: false });
       }
 
+      clearPostFreezeAutoPlayBlock();
       checkAndInitAudioGraph();
       if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
         audioCtx.resume().catch(() => {});
@@ -2889,6 +3033,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         duration: initialDur,
       });
 
+      if (autoPlay) {
+        clearPostFreezeAutoPlayBlock();
+      }
       checkAndInitAudioGraph();
       if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
         audioCtx.resume().catch(() => {});
@@ -2955,6 +3102,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       localStorage.setItem(STORAGE_KEY_SHUFFLE, 'true');
 
+      clearPostFreezeAutoPlayBlock();
       checkAndInitAudioGraph();
       if (audioCtx && (audioCtx.state === 'suspended' || (audioCtx.state as string) === 'interrupted')) {
         audioCtx.resume().catch(() => {});
@@ -3023,6 +3171,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (!currentTrack) return;
 
       clearInterruptionRetries();
+      clearPostFreezeAutoPlayBlock();
       isUserInitiatedPause = false;
       wasInterruptedByExternalApp = false;
       setInternalSrcChange(false);
@@ -3050,11 +3199,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         audioCtx.resume().catch(() => {});
       }
 
+      const frozenPipeline = wasFrozenSinceLastPlay;
+      wasFrozenSinceLastPlay = false;
       const isBroken = !audio.src ||
         audio.error !== null ||
         audio.networkState === HTMLMediaElement.NETWORK_NO_SOURCE ||
         (audio.readyState === 0 && Boolean(audio.src));
-      const needsRecovery = pendingRecoveryOnResume || isBroken;
+      const needsRecovery = pendingRecoveryOnResume || isBroken || frozenPipeline;
 
       if (needsRecovery) {
         const resumePos = pendingRecoveryOnResume && pendingRecoveryTime > 0
@@ -3063,7 +3214,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         pendingRecoveryOnResume = false;
         pendingRecoveryTime = 0;
         console.log('[resume] Audio element needs recovery/reconnect, running recoverAudioStream...');
-        recoverAudioStream(resumePos, true);
+        recoverAudioStream(resumePos, true, !(frozenPipeline && !pendingRecoveryOnResume && !isBroken));
       } else {
         audio.play().then(() => {
           set({ isPlaying: true });
@@ -3846,9 +3997,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         const targetTime = shouldReset ? 0 : (currentTime > 0 ? currentTime : 0);
         if (shouldReset) {
           set({ currentTime: 0 });
-          try {
-            audio.currentTime = 0;
-          } catch (_) {}
+        }
+        if (
+          resetToStart &&
+          lastStudioReloadTrackId === t.id &&
+          Date.now() - lastStudioReloadAt < 8000 &&
+          (isRecoveringStream || Date.now() - lastStudioReloadAt < 5000)
+        ) {
+          return;
+        }
+        if (resetToStart) {
+          lastStudioReloadTrackId = t.id;
+          lastStudioReloadAt = Date.now();
         }
         if (!isPlaying || audio.paused) {
           setInternalSrcChange(true);
@@ -3861,7 +4021,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           pendingRecoveryTime = targetTime;
           return;
         }
+        setInternalSrcChange(true);
+        try {
+          audio.pause();
+        } catch (_) {}
         recoverAudioStream(targetTime, true, true, true);
+        if (shouldTrackBeCachedOffline(t.id, undefined, get().likedTrackIds)) {
+          const trackToCache = trackOverride || t;
+          setTimeout(() => {
+            useOfflineStore.getState().cacheTrack(trackToCache).catch(() => {});
+          }, 2500);
+        }
       }
     },
   };

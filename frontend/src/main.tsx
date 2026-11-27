@@ -3,6 +3,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { registerSW } from 'virtual:pwa-register';
 import { isPlaybackActive } from './store/playerStore';
+import { diag } from './utils/playbackDiag';
 import App from './App';
 import './index.css';
 
@@ -15,10 +16,12 @@ const updateSW = registerSW({
   onNeedRefresh() {
     if (isPlaybackActive()) {
       console.log('[PWA] New version available, but songs are currently playing. Postponing update until browser reload.');
+      diag('[pwa] update ready — deferred while playing');
       updatePostponed = true;
       return;
     }
     console.log('[PWA] New version available, reloading to apply updates...');
+    diag('[pwa] applying SW update (idle)', true);
     updateSW(true);
   },
   onOfflineReady() {
@@ -29,6 +32,7 @@ const updateSW = registerSW({
       // If a new worker is waiting and no songs are playing, activate immediately
       if (registration.waiting && !isPlaybackActive()) {
         console.log('[PWA] Service worker waiting found on startup. Applying update...');
+        diag('[pwa] applying waiting SW on startup', true);
         updateSW(true);
       }
 

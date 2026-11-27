@@ -83,14 +83,26 @@ export function initPlaybackDiagnostics(): void {
     const wasDiscarded = Boolean((document as any).wasDiscarded);
     if (hb && hb.playing) {
       const ago = Math.round((Date.now() - Number(hb.t || 0)) / 1000);
-      diag(
-        `[startup] previous session was PLAYING (track #${hb.track}, hidden=${hb.hidden}) — last heartbeat ${ago}s ago` +
-          ` → app was killed during playback${wasDiscarded ? ' (document.wasDiscarded=true: Chrome tab discard)' : ' (renderer process killed by OS / Chrome)'}`,
-        true
-      );
+      const hadPagehide = Boolean(hb.pagehideAt && Date.now() - Number(hb.pagehideAt) < 20000);
+      if (hadPagehide) {
+        diag(
+          `[startup] previous session was PLAYING (track #${hb.track}, hidden=${hb.hidden}) — page reloaded/unloaded (${ago}s ago)`,
+          true
+        );
+      } else {
+        diag(
+          `[startup] previous session was PLAYING (track #${hb.track}, hidden=${hb.hidden}) — last heartbeat ${ago}s ago` +
+            ` → app was killed during playback${wasDiscarded ? ' (document.wasDiscarded=true: Chrome tab discard)' : ' (renderer process killed by OS / Chrome)'}`,
+          true
+        );
+      }
     } else {
       diag(`[startup] app launched (wasDiscarded=${wasDiscarded})`, true);
     }
+    localStorage.setItem(
+      HEARTBEAT_KEY,
+      JSON.stringify({ t: Date.now(), playing: false, track: hb?.track ?? null, hidden: document.hidden })
+    );
   } catch (_) {}
 
   const mem = () => {
@@ -105,7 +117,18 @@ export function initPlaybackDiagnostics(): void {
   document.addEventListener('visibilitychange', () => diag(`[lifecycle] visibility=${document.visibilityState}${mem()}`, true));
   document.addEventListener('freeze', () => diag('[lifecycle] FREEZE (page frozen by Chrome)', true));
   document.addEventListener('resume', () => diag('[lifecycle] resume after freeze', true));
-  window.addEventListener('pagehide', (e) => diag(`[lifecycle] pagehide persisted=${(e as PageTransitionEvent).persisted}`, true));
+  window.addEventListener('pagehide', (e) => {
+    try {
+      const raw = localStorage.getItem(HEARTBEAT_KEY);
+      if (raw) {
+        const hb = JSON.parse(raw);
+        if (hb && typeof hb === 'object') {
+          localStorage.setItem(HEARTBEAT_KEY, JSON.stringify({ ...hb, pagehideAt: Date.now() }));
+        }
+      }
+    } catch (_) {}
+    diag(`[lifecycle] pagehide persisted=${(e as PageTransitionEvent).persisted}`, true);
+  });
   window.addEventListener('online', () => diag('[net] online'));
   window.addEventListener('offline', () => diag('[net] offline'));
 }
