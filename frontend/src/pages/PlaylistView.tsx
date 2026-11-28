@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ArrowUpDown, ArrowLeft, Loader2, RefreshCw, ChevronUp } from 'lucide-react';
+import { ArrowUpDown, ArrowLeft, Loader2, RefreshCw } from 'lucide-react';
 import { Playlist, Track } from '../types';
 import { apiRequest } from '../api/client';
 import { PlaylistHeader } from '../components/PlaylistHeader';
 import { TrackRow } from '../components/TrackRow';
 import { ContextMenu } from '../components/ContextMenu';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
+import { ScrollToTopButton } from '../components/ScrollToTopButton';
 import { usePlayerStore } from '../store/playerStore';
 import { toast } from '../store/toastStore';
 import { useOfflineStore } from '../store/offlineStore';
@@ -33,24 +34,9 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
   const [sortAsc, setSortAsc] = useState(true);
   const [menuState, setMenuState] = useState<{ track: Track; pos: { x: number; y: number } } | null>(null);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<Track | null>(null);
-  const [showScrollTop, setShowScrollTop] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const activePlaylistIdRef = useRef<number>(Number(playlistId));
   const requestSeqRef = useRef<number>(0);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const handleScroll = () => {
-      setShowScrollTop(el.scrollTop > 200);
-    };
-    el.addEventListener('scroll', handleScroll, { passive: true });
-    return () => el.removeEventListener('scroll', handleScroll);
-  }, [loading]);
-
-  const scrollToTop = () => {
-    containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-  };
 
   const { playTrack, shufflePlay, toggleShuffle, addToQueue } = usePlayerStore();
 
@@ -319,7 +305,6 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
   return (
     <div
       ref={containerRef}
-      onScroll={(e) => setShowScrollTop(e.currentTarget.scrollTop > 200)}
       className="flex-1 w-full max-w-full overflow-y-auto overflow-x-hidden px-4 md:px-8 py-4 pb-28 md:pb-24 select-none custom-scrollbar"
     >
       {onBack && (
@@ -522,16 +507,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({ playlistId, onBack, 
       )}
 
       {/* Floating Scroll to Top Arrow */}
-      {showScrollTop && (
-        <button
-          onClick={scrollToTop}
-          title={t('Back to top', 'Наверх')}
-          aria-label={t('Scroll to top', 'Прокрутить наверх')}
-          className="fixed bottom-36 md:bottom-28 right-5 md:right-8 z-40 p-3.5 rounded-full bg-cat-mauve text-cat-base shadow-2xl hover:scale-110 active:scale-95 transition-all duration-200 cursor-pointer flex items-center justify-center border-2 border-cat-base animate-in fade-in zoom-in-75"
-        >
-          <ChevronUp className="w-5 h-5 stroke-[2.5]" />
-        </button>
-      )}
+      <ScrollToTopButton containerRef={containerRef} resetKey={playlistId} />
     </div>
   );
 };

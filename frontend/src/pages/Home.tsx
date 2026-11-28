@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Plus, Music2, Download, Heart, ChevronUp, Sparkles, RefreshCw, Loader2 } from 'lucide-react';
+import { Play, Plus, Music2, Download, Heart, Sparkles, RefreshCw, Loader2 } from 'lucide-react';
+import { ScrollToTopButton } from '../components/ScrollToTopButton';
 import { Playlist, Track } from '../types';
 import { useAuthStore } from '../store/authStore';
 import { apiRequest } from '../api/client';
@@ -64,7 +65,6 @@ export const Home: React.FC<HomeProps> = ({
 }) => {
   const { user } = useAuthStore();
   const { lang, t, td } = useI18nStore();
-  const [showScrollTop, setShowScrollTop] = useState(false);
   const [dailyMixes, setDailyMixes] = useState<Playlist[]>(() => {
     try {
       const raw = localStorage.getItem(DAILY_MIXES_CACHE_KEY);
@@ -141,14 +141,9 @@ export const Home: React.FC<HomeProps> = ({
     }
   };
 
-  const scrollToTop = () => {
-    containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
   return (
     <div
       ref={containerRef}
-      onScroll={(e) => setShowScrollTop(e.currentTarget.scrollTop > 200)}
       className="flex-1 w-full max-w-full overflow-y-auto overflow-x-hidden px-4 md:px-8 py-6 pb-28 md:pb-24 select-none custom-scrollbar"
     >
       {/* Header Greeting */}
@@ -403,16 +398,7 @@ export const Home: React.FC<HomeProps> = ({
       </div>
 
       {/* Floating Scroll to Top Arrow */}
-      {showScrollTop && (
-        <button
-          onClick={scrollToTop}
-          title={t('Back to top', 'Наверх')}
-          aria-label={t('Scroll to top', 'Прокрутить наверх')}
-          className="fixed bottom-36 md:bottom-28 right-5 md:right-8 z-40 p-3.5 rounded-full bg-cat-mauve text-cat-base shadow-2xl hover:scale-110 active:scale-95 transition-all duration-200 cursor-pointer flex items-center justify-center border-2 border-cat-base animate-in fade-in zoom-in-75"
-        >
-          <ChevronUp className="w-5 h-5 stroke-[2.5]" />
-        </button>
-      )}
+      <ScrollToTopButton containerRef={containerRef} />
     </div>
   );
 };

@@ -33,6 +33,7 @@ import {
   Wifi,
   BarChart3
 } from 'lucide-react';
+import { ScrollToTopButton } from '../components/ScrollToTopButton';
 import { useAuthStore } from '../store/authStore';
 import { usePlayerStore } from '../store/playerStore';
 import { useOfflineStore } from '../store/offlineStore';
@@ -268,7 +269,6 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const [deletePassword, setDeletePassword] = useState('');
   const [deleteError, setDeleteError] = useState('');
   const [deleting, setDeleting] = useState(false);
-  const [showScrollTop, setShowScrollTop] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Crossfade & Library Backup/Restore
@@ -477,10 +477,6 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     }, 2000);
     return () => clearInterval(interval);
   }, [qualityStats?.isRunning, qualityStats?.progress?.isRunning]);
-
-  const scrollToTop = () => {
-    containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-  };
 
   const loadBlacklist = async () => {
     try {
@@ -719,7 +715,6 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   return (
     <div
       ref={containerRef}
-      onScroll={(e) => setShowScrollTop(e.currentTarget.scrollTop > 200)}
       className="flex-1 w-full max-w-full overflow-y-auto overflow-x-hidden px-4 md:px-8 py-6 pb-28 md:pb-24 select-none max-w-3xl custom-scrollbar"
     >
       {onBack && (
@@ -1961,16 +1956,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       </div>
 
       {/* Floating Scroll to Top Arrow */}
-      {showScrollTop && (
-        <button
-          onClick={scrollToTop}
-          title={t('Back to top', 'Наверх')}
-          aria-label={t('Scroll to top', 'Прокрутить наверх')}
-          className="fixed bottom-36 md:bottom-28 right-5 md:right-8 z-40 p-3.5 rounded-full bg-cat-mauve text-cat-base shadow-2xl hover:scale-110 active:scale-95 transition-all duration-200 cursor-pointer flex items-center justify-center border-2 border-cat-base animate-in fade-in zoom-in-75"
-        >
-          <ChevronUp className="w-5 h-5 stroke-[2.5]" />
-        </button>
-      )}
+      <ScrollToTopButton containerRef={containerRef} />
 
       {/* Delete Confirmation Modal */}
       {showDeleteModal && (
